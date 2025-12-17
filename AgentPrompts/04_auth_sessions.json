@@ -1,0 +1,235 @@
+{
+  "task": "auth_sessions_dual_source",
+  "role": "backend_engineer",
+  "objective": "Implement unified authentication against MSSQL tblUsers (admin) and tblTutors (tutor) using server-side sessions with a 15-minute rolling inactivity timeout, multi-account selection, and strict role-based route protection. Legacy passwords are plaintext today; implement interim handling safely and design a future rehash-on-login upgrade path.",
+  "constraints": {
+    "session_timeout_minutes": 15,
+    "rolling_inactivity_timeout": true,
+    "cookies": {
+      "httpOnly": true,
+      "sameSite": "lax",
+      "secure_in_production_only": true
+    },
+    "legacy_passwords_are_plaintext": true,
+    "do_not_store_passwords_anywhere_else": true,
+    "do_not_log_passwords": true,
+    "do_not_test_db_connections_automatically": true,
+    "prefer_additive_changes": true,
+    "no_unrelated_refactors": true
+  },
+  "required_endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/auth/login",
+      "body": {
+        "identifier": "string",
+        "password": "string"
+      },
+      "responses": [
+        {
+          "case": "single_match_session_created",
+          "status": 200,
+          "body": {
+            "requiresSelection": false,
+            "session": {
+              "accountType": "TUTOR|ADMIN",
+              "accountId": "number",
+              "franchiseId": "number|null",
+              "displayName": "string|null",
+              "createdAt": "ISO timestamp",
+              "lastSeenAt": "ISO timestamp"
+            }
+          }
+        },
+        {
+          "case": "multiple_matches_requires_selection",
+          "status": 200,
+          "body": {
+            "requiresSelection": true,
+            "selectionToken": "string (signed, short-lived, single-use)",
+            "accounts": [
+              {
+                "accountType": "TUTOR|ADMIN",
+                "accountId": "number",
+                "label": "string",
+                "franchiseId": "number|null"
+              }
+            ]
+          }
+        },
+        {
+          "case": "invalid_credentials",
+          "status": 401,
+          "body": {
+            "error": "Invalid credentials"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/select-account",
+      "body": {
+        "selectionToken": "string",
+        "selectedAccount": {
+          "accountType": "TUTOR|ADMIN",
+          "accountId": "number"
+        }
+      },
+      "responses": [
+        {
+          "case": "session_created",
+          "status": 200,
+          "body": {
+            "session": {
+              "accountType": "TUTOR|ADMIN",
+              "accountId": "number",
+              "franchiseId": "number|null",
+              "displayName": "string|null",
+              "createdAt": "ISO timestamp",
+              "lastSeenAt": "ISO timestamp"
+            }
+          }
+        },
+        {
+          "case": "invalid_or_expired_token",
+          "status": 401,
+          "body": {
+            "error": "Selection expired. Please log in again."
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "responses": [
+        {
+          "case": "authenticated",
+          "status": 200,
+          "body": {
+            "session": {
+              "accountType": "TUTOR|ADMIN",
+              "accountId": "number",
+              "franchiseId": "number|null",
+              "displayName": "string|null",
+              "createdAt": "ISO timestamp",
+              "lastSeenAt": "ISO timestamp"
+            }
+          }
+        },
+        {
+          "case": "not_authenticated",
+          "status": 401,
+          "body": {
+            "error": "Not authenticated"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/logout",
+      "responses": [
+        {
+          "case": "logged_out",
+          "status": 200,
+          "body": {
+            "ok": true
+          }
+        }
+      ]
+    }
+  ],
+  "identity_sources": [
+    {
+      "accountType": "TUTOR",
+      "table": "tblTutors",
+      "identifier_field": "Email",
+      "id_field": "ID",
+      "active_field": "Active",
+      "display_name_fields": ["FirstName", "LastName"],
+      "franchise_field": "FranchiseID",
+      "password_field": "Password"
+    },
+    {
+      "accountType": "ADMIN",
+      "table": "tblUsers",
+      "identifier_field": "User",
+      "id_field": "ID",
+      "active_field": "Active",
+      "display_name_fields": ["User"],
+      "franchise_field": null,
+      "password_field": "Password"
+    }
+  ],
+  "password_handling": {
+    "current_state": "Passwords are stored in plaintext in MSSQL (legacy).",
+    "implementation_rules": [
+      "Do not query MSSQL using WHERE Password = @password. Always query by identifier and active status only, then compare in application code.",
+      "Compare password using constant-time comparison (crypto.timingSafeEqual) after converting both strings to Buffer with the same encoding and length normalization strategy.",
+      "Return a generic error for all login failures: 'Invalid credentials'. Do not reveal whether the identifier exists or which account type matched.",
+      "Do not log passwords, selection tokens, or raw session cookies."
+    ],
+    "future_upgrade_plan": [
+      "Implement comparePassword() as a single function so the system can later support bcrypt hashes without rewriting routes.",
+      "Plan for rehash-on-login once PasswordHash exists: if PasswordHash present verify bcrypt; else verify plaintext then write bcrypt hash."
+    ]
+  },
+  "session_management": {
+    "library": "express-session",
+    "storage": "memory store acceptable for MVP; design so it can be swapped to a persistent store later",
+    "session_regeneration": "On successful login (or selection), regenerate session to prevent fixation.",
+    "rolling_timeout": "Update lastSeenAt on each authenticated request; expire session if now - lastSeenAt > 15 minutes."
+  },
+  "multi_account_selection": {
+    "when_triggered": "If the same identifier/password combination yields more than one valid account (e.g., tutor and admin accounts), do not create a session until the user selects.",
+    "token_requirements": [
+      "selectionToken must be signed (HMAC) using SESSION_SECRET",
+      "selectionToken must include an expiry (<= 5 minutes) and be single-use",
+      "selectionToken must not contain the plaintext password"
+    ]
+  },
+  "rate_limiting_and_lockout": {
+    "requirements": [
+      "Rate limit POST /api/auth/login per IP (and ideally per identifier).",
+      "Implement a simple lockout/backoff: after N failed attempts for an identifier, reject login attempts for that identifier for a cooldown period.",
+      "Do not store passwords in the limiter/lockout store."
+    ],
+    "defaults": {
+      "max_attempts": 5,
+      "cooldown_minutes": 10
+    }
+  },
+  "authorization": {
+    "guards": [
+      "requireAuth",
+      "requireTutor",
+      "requireAdmin"
+    ],
+    "rules": [
+      "Tutor routes require session.accountType = 'TUTOR'.",
+      "Admin routes require session.accountType = 'ADMIN'.",
+      "All admin actions that operate on a franchise must require an explicit franchiseId scope and validate it against the admin's allowed scope (for MVP, at minimum ensure franchiseId is provided and is a number; later tasks can implement allowed-franchise lists)."
+    ]
+  },
+  "security_and_http": {
+    "cors": "In dev, allow credentials from APP_ORIGIN. In prod, restrict to your deployed origin.",
+    "cookies": [
+      "httpOnly=true",
+      "sameSite=lax",
+      "secure=true only in production (HTTPS)",
+      "clear cookie on logout"
+    ],
+    "csrf_posture": "State-changing endpoints are POST-only and rely on same-site cookies. Do not implement token-based CSRF for MVP unless required; do not allow cross-site credentialed requests."
+  },
+  "acceptance_criteria": [
+    "Tutors cannot access admin routes (401/403).",
+    "Admins cannot access tutor routes (401/403).",
+    "Sessions expire after 15 minutes of inactivity (rolling).",
+    "Multi-account selection works and selectionToken expires quickly and is single-use.",
+    "Login does not leak identifier validity (generic errors).",
+    "Passwords are never logged and never stored outside MSSQL.",
+    "Rate limiting and lockout/backoff exist on /api/auth/login."
+  ]
+}

@@ -1,0 +1,43 @@
+:root {
+  /* Core brand */
+  --color-header-orange: #ff5f0e;
+  --color-form-blue: #487cb6;
+  --color-accent-blue: #3498db;
+  --color-accent-blue-hover: #2980b9;
+  --color-success: #28a745;
+  --color-success-hover: #218838;
+  --color-secondary: #6c757d;
+  --color-secondary-hover: #545b62;
+  --color-legacy-secondary: #95a5a6;
+  --color-legacy-secondary-hover: #7f8c8d;
+  --color-neutral-100: #ffffff;
+  --color-neutral-200: #f8f9fa;
+  --color-neutral-300: #f0f0f0;
+  --color-neutral-400: #e9ecef;
+  --color-neutral-500: #e0e0e0;
+  --color-input-border: #ddd;
+  --color-body-bg: #c9d7e0;
+  --color-text-primary: #333;
+  --color-text-strong: #2c3e50;
+  --color-error: #e74c3c;
+  --color-error-hover: #c0392b;
+  --color-success-bg: #d4edda;
+  --color-success-border: #c3e6cb;
+
+  /* Logo palette (for reference) */
+  --color-logo-orange-2: #ef6932;
+  --color-logo-blue-1: #0063ae;
+  --color-logo-blue-2: #0063ad;
+
+  /* Typography */
+  --font-body: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  --font-heading: 'Times New Roman', Times, serif;
+
+  /* Radii & shadows */
+  --radius-card: 8px;
+  --radius-button: 6px;
+  --radius-btn-alt: 5px;
+  --radius-input: 4px;
+  --shadow-container: 0 2px 10px rgba(0, 0, 0, 0.1);
+  --shadow-button-hover: 0 4px 8px rgba(0, 0, 0, 0.2);
+}

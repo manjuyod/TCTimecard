@@ -1,0 +1,142 @@
+{
+  "task": "admin_pay_period_summary_api",
+  "role": "backend_engineer",
+  "objective": "Implement admin-only API endpoints that return per-tutor pay-period summaries for a given franchise by aggregating tutoring hours from MSSQL (deduped by ScheduleDate+TimeID) and approved extra hours from Postgres (status='approved'), then merging results in the API layer. Must use pay period resolution from task 05 (override-first, timezone-correct). Must support a 'total>0' view that includes tutors who only have approved extra hours and no tutoring schedule rows.",
+  "constraints": {
+    "no_cross_db_sql": true,
+    "no_schema_changes": true,
+    "no_startup_db_tests": true,
+    "timezone_correct": true,
+    "must_use_task_05_pay_period_resolution": true,
+    "do_not_loop_per_tutor": true
+  },
+  "dependencies": {
+    "requires": [
+      "auth sessions with admin context (session.accountType=ADMIN)",
+      "task 05 pay period resolution function/module",
+      "MSSQL connector module",
+      "Postgres connector module"
+    ],
+    "mssql_tables": ["dbo.tblSessionSchedule", "dbo.tblTutors"],
+    "postgres_tables": ["public.extrahours"]
+  },
+  "definitions": {
+    "tutoring_hour_block": "One tutoring hour is a unique (ScheduleDate, TimeID) pair for a TutorID in tblSessionSchedule. Multiple student rows in the same slot must not increase hours.",
+    "extra_hours_inclusion": "Include ONLY extrahours rows where status='approved'. Duration is (end_at - start_at) in hours.",
+    "bounds_semantics": "MSSQL uses local DATE bounds [startDate, endDateExclusive). Postgres uses UTC timestamptz bounds [startAt, endAt).",
+    "total_hours_filter_rule": "In the 'total>0' endpoint, include a tutor row if (tutoringHours + extraHours) > 0."
+  },
+  "required_helpers": [
+    {
+      "name": "roundHours2",
+      "signature": "(hours: number) => number",
+      "requirements": ["Round to 2 decimals using standard rounding."]
+    }
+  ],
+  "sql_reference": {
+    "mssql_tutor_hours_by_franchise": ";WITH Slots AS (\n    SELECT\n        s.TutorID,\n        s.ScheduleDate,\n        s.TimeID\n    FROM dbo.tblSessionSchedule s\n    WHERE s.FranchiseID = @p_franchise_id\n      AND s.TutorID IS NOT NULL\n      AND s.ScheduleDate >= @p_start_date\n      AND s.ScheduleDate <  @p_end_date\n    GROUP BY s.TutorID, s.ScheduleDate, s.TimeID\n),\nTutorHours AS (\n    SELECT\n        TutorID,\n        COUNT(*) AS tutoring_hours\n    FROM Slots\n    GROUP BY TutorID\n)\nSELECT\n    th.TutorID,\n    t.FirstName,\n    t.LastName,\n    th.tutoring_hours\nFROM TutorHours th\nJOIN dbo.tblTutors t ON t.ID = th.TutorID\nWHERE t.FirstName <> 'Overflow'\nORDER BY t.LastName, t.FirstName;",
+    "postgres_extra_hours_by_franchise": "SELECT\n  tutorid,\n  COALESCE(SUM(EXTRACT(EPOCH FROM (end_at - start_at)) / 3600.0), 0) AS extra_hours\nFROM public.extrahours\nWHERE franchiseid = $1\n  AND status = 'approved'\n  AND start_at >= $2\n  AND start_at <  $3\nGROUP BY tutorid;",
+    "mssql_tutor_names_by_ids_template": "SELECT\n  t.ID AS TutorID,\n  t.FirstName,\n  t.LastName\nFROM dbo.tblTutors t\nWHERE t.ID IN (@p_id_list)\n  AND t.FirstName <> 'Overflow';"
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/hours/admin/pay-period/summary",
+      "auth": "admin",
+      "query_params": {
+        "franchiseId": "number (required)",
+        "forDate": "YYYY-MM-DD (optional; defaults to today in franchise timezone)"
+      },
+      "behavior": [
+        "Authorize: requireAdmin guard enforced.",
+        "Resolve pay period using task 05 for provided franchiseId (override-first).",
+        "Compute MSSQL endDateExclusive = payPeriod.endDate + 1 day (local). Use '< end' semantics.",
+        "Run ONE MSSQL query sql_reference.mssql_tutor_hours_by_franchise (no per-tutor loop).",
+        "Run ONE Postgres query sql_reference.postgres_extra_hours_by_franchise (no per-tutor loop).",
+        "Merge by tutorId.",
+        "Include tutors present in MSSQL tutoring-hours query (standard summary).",
+        "For tutors missing Postgres rows, extraHours=0.",
+        "Compute totalHours = tutoringHours + extraHours.",
+        "Round extraHours and totalHours to 2 decimals for output; keep tutoringHours integer.",
+        "Return rows ordered by lastName then firstName (as provided by MSSQL query)."
+      ],
+      "response": {
+        "status": 200,
+        "body": {
+          "payPeriod": "pay_period object from task 05",
+          "rows": [
+            {
+              "tutorId": "number",
+              "firstName": "string",
+              "lastName": "string",
+              "tutoringHours": "number (integer)",
+              "extraHours": "number (decimal, 2dp)",
+              "totalHours": "number (decimal, 2dp)"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/hours/admin/pay-period/summary-total-positive",
+      "auth": "admin",
+      "query_params": {
+        "franchiseId": "number (required)",
+        "forDate": "YYYY-MM-DD (optional; defaults to today in franchise timezone)"
+      },
+      "behavior": [
+        "Authorize: requireAdmin guard enforced.",
+        "Resolve pay period using task 05 for provided franchiseId (override-first).",
+        "Compute MSSQL endDateExclusive = payPeriod.endDate + 1 day (local).",
+        "Run ONE MSSQL query sql_reference.mssql_tutor_hours_by_franchise to get tutoring hours + names for tutors with schedule rows.",
+        "Run ONE Postgres query sql_reference.postgres_extra_hours_by_franchise to get extra hours for tutors who submitted approved extra hours.",
+        "Build a union set of tutorIds from both results.",
+        "For tutorIds present in Postgres but missing in MSSQL result, fetch their names using ONE additional MSSQL query against dbo.tblTutors using an IN (...) list (batch). Do not loop per tutor.",
+        "Merge all tutors by tutorId into rows with tutoringHours (default 0), extraHours (default 0).",
+        "Compute totalHours = tutoringHours + extraHours.",
+        "Filter: include ONLY rows where totalHours > 0 (strictly greater than 0).",
+        "Round extraHours and totalHours to 2 decimals for output; keep tutoringHours integer.",
+        "Sort deterministically by lastName then firstName (after names are available)."
+      ],
+      "response": {
+        "status": 200,
+        "body": {
+          "payPeriod": "pay_period object from task 05",
+          "rows": [
+            {
+              "tutorId": "number",
+              "firstName": "string",
+              "lastName": "string",
+              "tutoringHours": "number (integer)",
+              "extraHours": "number (decimal, 2dp)",
+              "totalHours": "number (decimal, 2dp)"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "error_cases": [
+    {
+      "case": "missing_franchiseId",
+      "status": 400,
+      "body": { "error": "franchiseId is required" }
+    },
+    {
+      "case": "not_admin",
+      "status": 403,
+      "body": { "error": "Forbidden" }
+    }
+  ],
+  "acceptance_criteria": [
+    "Both endpoints are admin-only and protected by requireAdmin.",
+    "Both endpoints use task 05 pay period resolution and respect overrides.",
+    "MSSQL tutoring hours are deduped by (ScheduleDate, TimeID) per tutor using the provided SQL shape.",
+    "Only Postgres extrahours with status='approved' are included.",
+    "No per-tutor looping is used. Queries are batched: 1 MSSQL tutoring query + 1 Postgres extra query (+ optional 1 MSSQL names batch query for tutors who only appear in Postgres).",
+    "summary-total-positive includes tutors with only approved extra hours as long as totalHours > 0.",
+    "Rows are deterministically sorted by lastName then firstName.",
+    "No schema changes and no DB connection tests at startup."
+  ]
+}

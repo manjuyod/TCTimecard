@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 33% 98%;
+    --foreground: 210 29% 18%;
+    --muted: 210 25% 95%;
+    --muted-foreground: 215 15% 45%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 210 29% 18%;
+    --card: 0 0% 100%;
+    --card-foreground: 210 29% 18%;
+    --border: 210 20% 88%;
+    --input: 210 20% 88%;
+    --primary: 212 43% 50%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 20 100% 53%;
+    --secondary-foreground: 0 0% 100%;
+    --accent: 203 27% 88%;
+    --accent-foreground: 210 29% 20%;
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 0 0% 98%;
+    --ring: 212 43% 50%;
+    --radius: 12px;
+    --brand-cream: #c9d7e0;
+    --brand-blue: #487cb6;
+    --brand-orange: #ff5f0e;
+    --brand-navy: #2c3e50;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Segoe UI', system-ui, -apple-system, 'Inter', sans-serif;
+    background: radial-gradient(circle at 10% 20%, rgba(72, 124, 182, 0.12), transparent 22%),
+      radial-gradient(circle at 80% 0%, rgba(255, 95, 14, 0.12), transparent 30%),
+      linear-gradient(180deg, #f7f9fb 0%, #f0f4f8 40%, var(--brand-cream) 100%);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: 'Segoe UI', 'Inter', system-ui, sans-serif;
+    @apply text-slate-900;
+  }
+
+  a {
+    @apply text-primary;
+  }
+
+  ::selection {
+    background-color: rgba(72, 124, 182, 0.15);
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply rounded-xl bg-white/80 shadow-lg ring-1 ring-border backdrop-blur-sm;
+  }
+
+  .page-grid {
+    @apply grid gap-4 md:gap-6;
+  }
+}
+
+.fc .fc-event {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  padding: 2px 6px;
+  font-weight: 600;
+}
+
+.fc .fc-event.fc-event-schedule {
+  background-color: rgba(72, 124, 182, 0.15);
+  border-color: #487cb6;
+  color: #1d4c7d;
+}
+
+.fc .fc-event.fc-event-timeoff-pending {
+  background-color: #fef3c7;
+  border-color: #facc15;
+  color: #854d0e;
+}
+
+.fc .fc-event.fc-event-timeoff-approved {
+  background-color: #dcfce7;
+  border-color: #22c55e;
+  color: #166534;
+}
+
+.fc .fc-event.fc-event-timeoff-denied {
+  background-color: #fee2e2;
+  border-color: #ef4444;
+  color: #991b1b;
+}
+
+.fc .fc-event.fc-event-timeoff-cancelled {
+  background-color: #e2e8f0;
+  border-color: #cbd5e1;
+  color: #475569;
+}

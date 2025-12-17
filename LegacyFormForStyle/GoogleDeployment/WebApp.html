@@ -1,0 +1,1910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Request for Time Off</title>
+    <style>
+        /* Reset and Base Styles */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        /* CSS Custom Properties for Header Background Colors
+         * 
+         * To customize header colors, change these values:
+         * --header-logo-bg: Background color for logo section (above the line)
+         * --header-title-bg: Background color for title section (below the line)
+         * --header-border-color: Color of the divider line between sections
+         * 
+         * Examples:
+         * --header-logo-bg: #f0f8ff; (light blue)
+         * --header-title-bg: #fffacd; (light yellow)
+         * --header-border-color: #4682b4; (steel blue)
+         */
+        :root {
+            --header-logo-bg: #f8f9fa;
+            --header-title-bg: #ffffff;
+            --header-border-color: #e0e0e0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #c9d7e0;
+            margin: 0;
+            padding: 0;
+        }
+
+        /*
+        .container {
+            max-width: 800px;
+            margin: 325px auto 20px;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Header Styles */
+        /*
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid var(--header-border-color);
+            position: relative;
+            padding: 0;
+        }
+
+        /* Header Logo Section (Above the divider line) */
+        /*
+        .header-logo-section {
+            background-color: var(--header-logo-bg);
+            padding: 20px;
+            margin: -20px -20px 0 -20px;
+            border-radius: 8px 8px 0 0;
+        }
+
+        /* Container Styles */
+        .container {
+            max-width: 800px;
+            margin: 20px auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        /* Main Header with Orange Background */
+        .main-header {
+            background-color: #ff5f0e;
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .main-header h1 {
+            color: white;
+            font-family: 'Times New Roman', Times, serif; /* Museo Slab fallback */
+            font-size: 2.2em;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+
+        .main-header .instructions {
+            color: white;
+            font-size: 0.95em;
+            max-width: 600px;
+            margin: 0 auto;
+            line-height: 1.4;
+        }
+
+        /* Header Divider */
+        .header-divider {
+            height: 3px;
+            background-color: #e0e0e0;
+            margin: 0;
+        }
+
+        /* Form Body with Blue Background */
+        .form-body {
+            background-color: #487cb6;
+            padding: 40px;
+            min-height: 400px;
+        }
+
+        /* Logo Styles */
+        .company-logo {
+            display: block;
+            text-align: center;
+            margin: 30px auto;
+            width: fit-content;
+            padding: 30px;
+        }
+
+        .company-logo svg {
+            height: 240px; /* Golden ratio applied: increased from 150px */
+            width: auto;
+            max-width: 485px; /* Golden ratio: 300px * 1.618 */
+            display: block;
+            margin: 0 auto;
+        }
+
+        /* Form Section Styles - Updated for Blue Background */
+        .form-section {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 25px;
+            border-radius: 8px;
+            border: none;
+            margin-bottom: 25px;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.5s ease-in-out;
+        }
+
+        .form-section.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .form-section h3 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+            font-size: 1.4em;
+            border-bottom: 2px solid #487cb6;
+            padding-bottom: 10px;
+        }
+
+        /* Form Styles */
+        .time-off-form {
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+        }
+
+        /* Email Preview Styles */
+        .email-preview {
+            background: rgba(255, 255, 255, 0.9);
+            padding: 20px;
+            border-radius: 6px;
+            border: 2px solid #487cb6;
+        }
+
+        .email-preview p {
+            margin-bottom: 10px;
+            font-size: 0.9em;
+        }
+
+        .email-actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+            justify-content: center;
+        }
+
+        .submit-btn, .print-btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .submit-btn {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .submit-btn:hover {
+            background-color: #218838;
+            transform: translateY(-2px);
+        }
+
+        .print-btn {
+            background-color: #6c757d;
+            color: white;
+        }
+
+        .print-btn:hover {
+            background-color: #545b62;
+            transform: translateY(-2px);
+        }
+
+        /* Success Message Styles */
+        .success-message {
+            background: rgba(40, 167, 69, 0.1);
+            border: 2px solid #28a745;
+            border-radius: 8px;
+            padding: 30px;
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .success-message h3 {
+            color: #155724;
+            margin-bottom: 10px;
+        }
+
+        .success-message p {
+            color: #155724;
+            margin: 0;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .form-row .form-group {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        input[type="text"],
+        input[type="email"],
+        input[type="date"],
+        input[type="time"],
+        textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: border-color 0.3s ease;
+        }
+
+        input[type="text"]:focus,
+        input[type="date"]:focus,
+        input[type="time"]:focus,
+        textarea:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        /* Radio Button Styles */
+        .radio-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .radio-label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            padding: 8px;
+            border-radius: 4px;
+            transition: background-color 0.2s ease;
+        }
+
+        .radio-label:hover {
+            background-color: #f0f0f0;
+        }
+
+        .radio-label input[type="radio"] {
+            display: none;
+        }
+
+        .radio-custom {
+            width: 20px;
+            height: 20px;
+            border: 2px solid #ddd;
+            border-radius: 50%;
+            margin-right: 10px;
+            position: relative;
+            transition: all 0.2s ease;
+        }
+
+        .radio-label input[type="radio"]:checked + .radio-custom {
+            border-color: #3498db;
+            background-color: #3498db;
+        }
+
+        .radio-label input[type="radio"]:checked + .radio-custom::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 8px;
+            height: 8px;
+            background-color: white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        /* Checkbox Styles */
+        input[type="checkbox"] {
+            margin-right: 8px;
+            transform: scale(1.2);
+        }
+
+        /* Signature Styles */
+        .signature-group {
+            position: relative;
+        }
+
+        .signature-container {
+            position: relative;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            background: white;
+            display: block;
+            width: 100%;
+        }
+
+        .signature-container canvas {
+            display: block;
+            cursor: crosshair;
+            width: 100%;
+            height: 150px; /* You can adjust this height as needed */
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        .clear-signature {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background-color 0.2s ease;
+        }
+
+        .clear-signature:hover {
+            background: #c0392b;
+        }
+
+        /* Partial Day Section */
+        .partial-day-section {
+            margin-top: 10px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #e9ecef;
+        }
+
+        /* Error Messages */
+        .error-message {
+            color: #e74c3c;
+            font-size: 0.85em;
+            margin-top: 5px;
+            display: none;
+        }
+
+        .error-message.show {
+            display: block;
+        }
+
+        .form-group.error input,
+        .form-group.error textarea {
+            border-color: #e74c3c;
+        }
+
+        /* Success Message */
+        .success-message {
+            text-align: center;
+            padding: 30px;
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+            border-radius: 6px;
+            margin-top: 20px;
+        }
+
+        .success-message h3 {
+            margin-bottom: 10px;
+            color: #155724;
+        }
+
+        /* Form Actions */
+        .form-actions {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn-secondary {
+            background: #95a5a6;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #7f8c8d;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            .container {
+                margin: 120px auto 10px;
+                padding: 15px;
+            }
+
+            .company-logo svg {
+                height: 148px; /* Golden ratio applied: 60px * 1.618 * 1.5 */
+                max-width: 405px; /* Golden ratio: 250px * 1.618 */
+            }
+
+            .form-row {
+                flex-direction: column;
+            }
+
+            .form-row .form-group {
+                min-width: auto;
+            }
+
+            .signature-container canvas {
+                width: 100%;
+                max-width: 350px;
+            }
+
+            .form-actions {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .btn {
+                width: 100%;
+                max-width: 300px;
+            }
+
+            h1 {
+                font-size: 1.8em;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                margin: 100px auto 5px;
+                padding: 10px;
+            }
+
+            .company-logo svg {
+                height: 120px; /* Golden ratio applied: more generous mobile size */
+                max-width: 324px; /* Golden ratio: 200px * 1.618 */
+            }
+
+            .form-section {
+                padding: 15px;
+            }
+
+            .signature-container canvas {
+                width: 100%;
+                height: 120px;
+            }
+        }
+
+        /* Print Styles */
+        @media print {
+            body {
+                background: white;
+                color: black;
+            }
+
+            .container {
+                box-shadow: none;
+                max-width: none;
+                margin: 0;
+                padding: 0;
+            }
+
+            .company-logo svg {
+                max-height: 60px;
+            }
+
+            .form-actions {
+                display: none;
+            }
+
+            .success-message {
+                display: none;
+            }
+
+            .clear-signature {
+                display: none;
+            }
+
+            .form-section {
+                background: white;
+                border: 1px solid #000;
+                margin-bottom: 20px;
+                page-break-inside: avoid;
+            }
+
+            .signature-container {
+                border: 1px solid #000;
+            }
+        }
+
+        /* Additional Accessibility */
+        input:focus,
+        textarea:focus,
+        button:focus {
+            outline: 2px solid #3498db;
+            outline-offset: 2px;
+        }
+
+        .radio-label:focus-within .radio-custom {
+            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.3);
+        }
+
+        /* Loading State */
+        .form-loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+
+        .form-loading .btn {
+            position: relative;
+        }
+
+        .form-loading .btn::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            border: 2px solid transparent;
+            border-top: 2px solid currentColor;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            transform: translate(-50%, -50%);
+        }
+
+        @keyframes spin {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+
+
+        /* Final Submit Button */
+        #finalSubmitBtn {
+            background-color: #28a745;
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        #finalSubmitBtn:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+
+        #finalSubmitBtn:hover:not(:disabled) {
+            background-color: #218838;
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body>
+    <!-- Company Logo -->
+    <div class="company-logo">
+        <svg id="company-logo-svg" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 612 792">
+                  <!-- Generator: Adobe Illustrator 29.5.1, SVG Export Plug-In . SVG Version: 2.1.0 Build 141)  -->
+                  <defs>
+                    <style>
+                      .st0 {
+                        fill: #f28354;
+                      }
+
+                      .st1 {
+                        fill: #487cb6;
+                      }
+
+                      .st2 {
+                        fill: #ff5f0e;
+                      }
+
+                      .st3 {
+                        fill: #ef6932;
+                      }
+
+                      .st4 {
+                        fill: #ff5f0e;
+                      }
+
+                      .st5 {
+                        fill: #0063ae;
+                      }
+
+                      .st6 {
+                        fill: #0063ad;
+                      }
+                    </style>
+                  </defs>
+                  <path class="st0" d="M254.04,255.96c11.24-.27,21.97,7.13,26.16,18.4,6.73,18.11-.97,41.11-25.52,47.51h-.67c-.6-.65-.55-1.47-.55-2.25-.01-20.47-.01-40.94,0-61.41,0-.79.01-1.59.58-2.24Z"/>
+                  <path class="st1" d="M390.58,212.34c-4.43,1.79-8.87,3.57-13.29,5.38-.35.14-.66.4-.99.6-.39.44-.9.68-1.42.9-9.6,4.18-19.08,8.63-28.65,12.86-1.86.82-3.67,1.78-5.56,2.54-1.15.46-1.6,1.26-1.58,2.5.05,3.45.03,6.91.01,10.36,0,.73.1,1.49-.47,2.09-4.28.6-8.6.43-12.88.22-9.56-.47-19.01-1.79-28.36-3.93-1.31-.3-1.58-.84-1.5-2.06.25-3.89.34-7.8.6-11.69.09-1.32-.41-1.53-1.6-1.63-11.94-1.01-23.86-2.09-36.32-3.2,1.11-.63,1.83-1.06,2.58-1.45,21.85-11.39,43.71-22.78,65.56-34.17.72-.38,1.41-.62,2.26-.49,11.95,1.88,23.89,3.75,35.84,5.6,12.79,1.98,25.58,3.94,38.37,5.91,2.44.38,4.89.76,7.45,1.53-3.35,1.34-6.7,2.68-10.04,4.02-2.19.68-4.47.72-6.7.7-6.22-.04-12.44.33-18.65.47-8.36.18-16.73.45-25.09.68-3.96.11-7.91.22-11.87.27-.97.01-1.92.14-2.86.36-1.12.27-1.83.92-1.81,2.12.03,1.03,1.02,1.82,2.35,1.69,2.15-.21,4.3-.11,6.44-.25,5.36-.36,10.72-.58,16.08-.93,5.58-.37,11.18-.49,16.76-.91,4.67-.36,9.37-.41,14.06-.68.5-.03,1.03.02,1.3.58Z"/>
+                  <path class="st1" d="M339.97,261.09c-.2,15.39-.43,30.79-.32,46.18-3.42-.35-6.52-1.73-9.63-3.02-7.75-3.23-14.79-7.53-20.28-14.04-7.71-9.15-9.34-19.63-6.76-31.04.28-1.23.97-.93,1.75-.79,10.02,1.88,20.1,3,30.31,2.78,1.64-.04,3.28-.05,4.91-.07Z"/>
+                  <path class="st2" d="M311.58,589.22c-2.09-3.43-3.28-7.9-3.28-13.12v-31.01h-9.69v-13.71h25.94v40.7c0,2.83.44,4.92,1.34,6.71,1.49,2.83,4.18,4.32,8.05,4.32,5.67,0,11.63-3.28,16.84-7.6v-30.41h-10.13v-13.71h26.38v51.87h9.69v13.42h-25.34v-10.43c-6.26,6.11-13.27,11.63-22.81,11.63-7.9,0-13.71-3.28-16.99-8.65"/>
+                  <path class="st2" d="M399.08,590.41l-3.58,6.56h-11.03v-95.7h-9.84v-13.72h26.08v50.98c4.77-4.62,10.88-8.35,19.23-8.35,17.29,0,30.26,13.86,30.26,33.54s-13.72,34.13-31.3,34.13c-8.35,0-14.31-2.98-19.83-7.45M433.51,563.88c0-12.52-7.75-19.68-17.29-19.68-6.11,0-11.03,2.68-15.51,6.56v28.03c4.32,2.98,9.39,5.06,15.51,5.06,9.09,0,17.29-7.01,17.29-19.97"/>
+                  <path class="st2" d="M243.67,571.64c-7.5,8.07-17.16,13.25-28.95,13.25-21.29,0-35.39-15.98-35.39-36.08s15.01-35.77,34.62-35.77c3,0,5.81.23,8.47.58,5.49.86,9.92,2.93,14.82,7.65,1.53,1.48,2.27,3.07,2.27,4.86v7.56h15.36c1-15.02-.89-17.07-1.66-18.38-1-1.7-1.78-2.85-3.14-4.28-4.48-5.70-13.11-10.71-23.62-12.81-2.33-.52-4.71-.96-7.19-1.20-1.58-.12-3.19-.19-4.85-.19-29.41,0-53.01,22-53.01,52.14s22.21,51.91,53.31,51.91c16.09,0,30.64-6.55,40.44-17.36l-11.49-11.87Z"/>
+                  <path class="st2" d="M260.6,583.25h10.13v-81.98h-10.13v-13.71h26.38v95.69h9.69v13.42h-36.07v-13.42Z"/>
+                  <path class="st3" d="M390.58,212.34c-2.59.08-5.18.11-7.77.25-13.48.74-26.95,1.5-40.43,2.26-2.09.12-4.17.22-6.26.34-1.85.11-3.16-.87-3.25-2.46-.09-1.49,1.01-2.64,2.81-2.7,7.97-.26,15.93-.45,23.9-.69,12.65-.38,25.3-.78,37.95-1.16,1.01-.03,2.03.04,3.04.06.08,8.19.17,16.39.25,24.58,0,.55,0,1.09,0,1.96-1.45-1.01-2.71-1.82-3.89-2.73-.74-.57-1.2-.55-1.79.21-1.24,1.58-2.58,3.08-4.23,5.03,0-2.84,0-5.18,0-7.53-.02-5.26-.05-10.51-.09-15.77,0-.56.11-1.14-.23-1.65Z"/>
+                  <path class="st4" d="M254.04,255.96c0,21.97-.02,43.93-.03,65.9-12.25-3.06-26.16-13.1-27.93-31-.93-9.4,1.02-17.9,7.21-25.13,5.41-6.31,12.27-9.82,20.75-9.77Z"/>
+                  <path class="st4" d="M327.3,367.55c1.19,4.83,2.26,9.68,2.67,14.66.17,2.09.81,4.44.03,6.2-.81,1.81-3.5,1.56-5.37,2.16-4.35,1.41-8.76,2.64-13.14,3.97-2.18.66-4.38.65-6.52-.02-2.79-.88-5-2.53-5.61-5.57-.63-3.16.87-5.62,3.04-7.7,2.13-2.04,4.72-3.3,7.65-3.75.99-.15,1.38-.44,1.46-1.55.59-8.92,1.27-17.82,1.91-26.74l.02-.68c.02-.72.28-1.6-.49-2.02-.89-.48-1.44.36-2.02.85-11.41,9.62-23.45,18.3-37.07,24.59-4.63,2.14-9.4,3.89-14.44,4.77-1.03.18-1.71.67-2.29,1.52-1.1,1.64-2.33,3.2-3.45,4.83-.5.73-.81.75-1.33.02-1.25-1.75-2.6-3.42-3.86-5.17-.46-.64-1-.99-1.77-1.14-8.56-1.6-16.31-5.27-23.8-9.54-9.36-5.34-18.08-11.61-26.33-18.54-.58-.49-1.18-1.32-2.04-.83-.81.45-.56,1.39-.53,2.17.39,8.81.79,17.63,1.16,26.44.04.95.2,1.42,1.34,1.63,4.11.77,7.56,2.68,9.7,6.44,1.43,2.5,1.59,5.07-.2,7.49-1.69,2.29-5.44,3.57-8.06,2.8-6.23-1.84-12.44-3.74-18.68-5.54-.99-.29-1.19-.73-1.17-1.66.37-18.18,6.61-34.03,18.95-47.39,8.67-9.39,19.31-15.73,31.47-19.6,1.22-.39,2-.28,2.97.64,4,3.79,8.57,6.79,13.35,9.54,6.47,3.72,12.71,3.52,19.13-.07,4.72-2.64,9.17-5.61,13.07-9.35,1.03-.98,1.95-1.31,3.26-.75.82.36,1.72.56,2.58.83.65-.3,1.21.04,1.79.25,8.45,3.19,16.06,7.72,22.84,13.73,9.25,8.21,15.42,18.37,19.51,29.92.24.68.58,1.37.29,2.14Z"/>
+                  <path class="st5" d="M134.46,471.38c-1.96-3.22-3.08-7.42-3.08-12.32v-29.13h-9.1v-12.88h24.36v38.23c0,2.66.42,4.62,1.26,6.3,1.4,2.66,3.92,4.06,7.56,4.06,5.32,0,10.92-3.08,15.82-7.14v-28.57h-9.52v-12.88h24.79v48.73h9.1v12.6h-23.8v-9.8c-5.89,5.74-12.46,10.92-21.43,10.92-7.42,0-12.88-3.08-15.96-8.12"/>
+                  <path class="st5" d="M208.95,471.1c-1.4-2.52-2.1-5.74-2.1-9.66v-31.5h-11.9v-12.89h11.9v-12.88l15.12-6.58v19.46h18.63v12.89h-18.63v28.57c0,1.96.28,3.22.98,4.48,1.12,1.96,3.36,2.94,6.44,2.94,3.92,0,8.4-1.54,12.05-3.22l-1.26,13.16c-4.2,2.1-9.1,3.64-14.71,3.64-7.42,0-13.44-2.52-16.52-8.4"/>
+                  <path class="st5" d="M244.52,447.71c0-16.8,12.6-31.79,32.63-31.79s32.63,14.7,32.63,31.79-12.6,31.79-32.63,31.79-32.63-14.7-32.63-31.79M294.09,447.71c0-11.2-7-19.05-16.94-19.05s-16.94,7.84-16.94,19.05,7,19.05,16.94,19.05,16.94-7.84,16.94-19.05"/>
+                  <path class="st5" d="M367.89,426.01c0,5.18-4.06,9.52-9.1,9.52-4.62,0-7.7-2.66-8.96-5.46-4.34,1.54-9.38,6.3-12.18,11.62v24.08h10.64v12.61h-35.01v-12.61h9.1v-35.84h-9.1v-12.89h23.8v13.86c5.18-8.26,11.62-14.98,19.47-14.98s11.34,4.62,11.34,10.08"/>
+                  <path class="st5" d="M435.1,426.85c5.88-5.74,12.46-10.92,21.43-10.92,7.28,0,12.6,2.94,15.82,7.84,2.1,3.36,3.22,7.56,3.22,12.6v29.41h9.1v12.6h-32.77v-12.6h8.4v-25.62c0-2.52-.42-4.76-1.26-6.3-1.4-2.66-3.92-4.06-7.56-4.06-5.32,0-10.93,3.08-15.82,7.14v28.84h8.4v12.6h-32.77v-12.6h9.1v-35.85h-9.1v-12.88h23.8v9.8Z"/>
+                  <path class="st5" d="M371.53,465.78h9.37v-35.82h-9.37v-12.87h24.62v48.68h9.09v12.59h-33.72v-12.59ZM376.85,397.65c0-5.59,4.9-10.07,10.35-10.07s10.07,4.48,10.07,10.07-4.9,10.07-10.35,10.07-10.07-4.48-10.07-10.07"/>
+                  <path class="st5" d="M546.01,478.52c0,7.56-1.96,13.86-5.74,18.48-5.04,6.16-13.02,9.38-22.97,9.38-10.64,0-19.74-3.36-24.08-7.7-2.38-2.38-3.36-5.04-3.36-7.98,0-4.34,3.22-8.55,8.26-8.55,4.76,0,8.54,3.36,8.54,7.98,0,.7-.14,1.82-.28,2.38,2.52.84,5.46,1.54,9.1,1.54,5.46,0,9.8-1.68,12.46-5.32,1.82-2.52,2.8-6.02,2.8-10.64v-8.82c-4.62,4.62-9.52,7.84-17.64,7.84-15.55,0-28.01-11.9-28.01-30.11s12.74-31.09,28.71-31.09c7.84,0,13.45,3.08,17.5,6.58v-5.46h23.81v12.89h-9.1v48.59ZM500.78,446.87c0,11.2,6.86,17.36,16.24,17.36,5.18,0,9.8-2.38,13.73-6.02v-24.36c-3.64-2.8-8.26-4.76-13.73-4.76-9.38,0-16.24,6.16-16.24,17.78"/>
+                  <polygon class="st5" points="56.89 386.33 56.89 409.17 71.82 409.17 71.82 400 88.83 400 88.83 478.22 96.69 482.32 104.59 478.22 104.59 400 121.62 400 121.62 409.17 136.54 409.17 136.54 386.33 56.89 386.33"/>
+                  <path class="st6" d="M390,368.07c-13.98,0-27.96-.02-41.93.03-1.38,0-1.82-.32-1.81-1.76.05-13.69.05-27.39,0-41.08,0-1.23.41-1.76,1.51-2.21,8.29-3.4,16.38-7.28,23.14-13.21,2.57-2.26,4.4-2.17,7.15-.83,25.42,12.4,44.42,30.92,55.23,57.37.6,1.46.35,1.72-1.19,1.72-14.03-.05-28.07-.03-42.1-.03Z"/>
+                  <path class="st6" d="M338.61,249.58c0-4.35.03-8.7-.02-13.05-.01-1.05.3-1.63,1.27-2.07,7.77-3.46,15.52-6.96,23.28-10.46,3.8-1.71,7.6-3.44,11.39-5.16.56-.26,1.09-.62,1.75-.53,1.32,5.36,2.6,10.74,4,16.08.36,1.37.1,2.02-1.22,2.68-11.91,6.02-24.31,10.5-37.59,12.3-.95.13-1.91.14-2.87.2Z"/>
+                  <path class="st6" d="M339.97,261.09c11.52-1.15,22.38-4.67,32.92-9.29,1.17-.51,1.36.18,1.67.91,6.45,15.08,4.13,31.8-10.14,43.17-6.82,5.43-14.58,8.94-22.92,11.29-.62.17-1.22.18-1.84.1-.63-.63-.57-1.45-.58-2.23-.01-9.5-.18-19,.07-28.49.12-4.4.19-8.81.26-13.21.01-.79-.02-1.6.55-2.25Z"/>
+                  <path class="st6" d="M327.3,367.55c-2.28-6.89-5.19-13.47-9.33-19.48-8.31-12.06-19.42-20.52-33.04-25.77-.68-.26-1.37-.53-2.05-.79,7.45-5.87,15.55-10.63,24.31-14.29.57-.24.99-.3,1.52.18,7.48,6.88,16.4,11.36,25.66,15.22,1.06.44,1.39,1,1.38,2.12-.04,13.69-.04,27.39,0,41.08,0,1.29-.28,1.77-1.66,1.71-2.26-.11-4.52,0-6.79,0Z"/>
+                  <path class="st6" d="M386.88,407.82c-5.58,0-10.16-4.57-10.14-10.12.02-5.46,4.81-10.13,10.43-10.15,5.47-.02,10.19,4.71,10.17,10.17-.02,5.46-4.82,10.09-10.46,10.09Z"/>
+                  <line class="st5" x1="524.12" y1="429.01" x2="524.22" y2="429.01"/>
+                </svg>
+    </div>
+
+    <!-- For Google Apps Script deployment, comment out the inline SVG above and uncomment this line: -->
+    <!-- <img src="path/to/TC_Stacked_logo.svg" alt="TC Logo" class="company-logo-file"> -->
+
+    <div class="container">
+        <!-- Header Section with Orange Background -->
+        <header class="main-header">
+            <h1>Request for Time Off - <?= center.name ?></h1>
+            <p class="instructions">Please complete and return this form to your supervisor. You must submit requests for absences, other than sick leave, 14 days prior to the first day you will be absent.</p>
+        </header>
+        
+        <!-- Divider Line -->
+        <div class="header-divider"></div>
+
+        <!-- Form Body with Blue Background -->
+        <div class="form-body">
+            <form id="timeOffForm" class="time-off-form">
+                <!-- Hidden input to store the center ID -->
+                <input type="hidden" id="centerId" name="centerId" value="<?= center.id ?>">
+
+                <!-- Section 1: Employee Information (Always visible) -->
+                <div class="form-section visible" id="section-employee-info">
+                    <h3>Employee Information</h3>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="employeeName">Employee Name *</label>
+                            <input type="text" id="employeeName" name="employeeName" required>
+                            <div id="employeeNameError" class="error-message"></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="employeeEmail">Employee Email *</label>
+                            <input type="email" id="employeeEmail" name="employeeEmail" required>
+                            <div id="employeeEmailError" class="error-message"></div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="todaysDate">Today's Date *</label>
+                        <input type="date" id="todaysDate" name="todaysDate" required>
+                        <div id="todaysDateError" class="error-message"></div>
+                    </div>
+                </div>
+
+                <!-- Section 2: Calendar Integration (Appears after Employee Info) -->
+                <div class="form-section" id="section-calendar" style="display: none;">
+                    <h3>Select Time Off Dates</h3>
+                    <div class="calendar-container">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="startDate">Start Date *</label>
+                                <input type="date" id="startDate" name="startDate" required>
+                                <div id="startDateError" class="error-message"></div>
+                            </div>
+                            <div class="form-group">
+                                <label for="endDate">End Date *</label>
+                                <input type="date" id="endDate" name="endDate" required>
+                                <div id="endDateError" class="error-message"></div>
+                            </div>
+                        </div>
+                        
+                        <!-- Partial Day Option -->
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="partialDay" name="partialDay">
+                                This is a partial day absence
+                            </label>
+                            <div id="partialDaySection" class="partial-day-section" style="display: none;">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="leaveTime">Leave Time</label>
+                                        <input type="time" id="leaveTime" name="leaveTime">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="returnTime">Return Time</label>
+                                        <input type="time" id="returnTime" name="returnTime">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Section 3: Absence Type (Appears after Calendar selection) -->
+                <div class="form-section" id="section-absence-type" style="display: none;">
+                    <h3>Type of Absence</h3>
+                    <div class="form-group">
+                        <div class="radio-group">
+                            <label class="radio-label">
+                                <input type="radio" name="absenceType" value="vacation" required>
+                                <span class="radio-custom"></span>
+                                Vacation
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="absenceType" value="sick" required>
+                                <span class="radio-custom"></span>
+                                Sick Leave
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="absenceType" value="personal" required>
+                                <span class="radio-custom"></span>
+                                Personal Time
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="absenceType" value="bereavement" required>
+                                <span class="radio-custom"></span>
+                                Bereavement
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="absenceType" value="jury" required>
+                                <span class="radio-custom"></span>
+                                Jury Duty
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="absenceType" value="other" required>
+                                <span class="radio-custom"></span>
+                                Other
+                            </label>
+                        </div>
+                        <input type="text" id="otherAbsenceType" name="otherAbsenceType" 
+                               placeholder="Please specify other type of absence" 
+                               style="margin-top: 10px; display: none;" disabled>
+                        <div id="absenceTypeError" class="error-message"></div>
+                    </div>
+                </div>
+
+                <!-- Section 4: Reason for Absence (Appears after Type selection) -->
+                <div class="form-section" id="section-reason" style="display: none;">
+                    <h3>Reason for Absence</h3>
+                    <div class="form-group">
+                        <label for="reason">Please provide a detailed reason for your absence request *</label>
+                        <textarea id="reason" name="reason" 
+                                  placeholder="Enter your reason for requesting time off..."
+                                  required></textarea>
+                        <div id="reasonError" class="error-message"></div>
+                    </div>
+                </div>
+
+                <!-- Section 5: Employee Signature (Appears after Reason) -->
+                <div class="form-section" id="section-signature" style="display: none;">
+                    <h3>Employee Signature</h3>
+                    <div class="form-group">
+                        <div class="signature-group">
+                            <label>Employee Signature *</label>
+                            <div class="signature-container">
+                                <canvas id="employeeSignature" width="400" height="150"></canvas>
+                                <button type="button" id="clearEmployeeSignature" class="clear-signature">Clear</button>
+                            </div>
+                            <div id="employeeSignatureError" class="error-message"></div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="employeeSignatureDate">Date *</label>
+                        <input type="date" id="employeeSignatureDate" name="employeeSignatureDate" required>
+                        <div id="employeeSignatureDateError" class="error-message"></div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" id="finalSubmitBtn" class="submit-btn" disabled>Submit</button>
+                    </div>
+                </div>
+
+                <!-- Section 6: Email Generation (Appears after Signature) -->
+                <!-- This section is now removed in favor of the new submit button -->
+            </form>
+
+            <!-- Success Message -->
+            <div id="successMessage" class="success-message" style="display: none;">
+                <h3>Form Submitted Successfully!</h3>
+                <p>Your time-off request has been submitted and will be reviewed by your supervisor.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /**
+         * Lightweight Signature Pad — fixed version
+         */
+        class SignaturePad {
+          constructor(canvas, options = {}) {
+            this.canvas = canvas;
+            this.ctx    = canvas.getContext('2d');
+
+            this.options = {
+              penColor:        '#000000',
+              backgroundColor: '#ffffff',
+              minWidth:        1,
+              maxWidth:        3,
+              throttle:        16,
+              ...options
+            };
+
+            this.isDrawing    = false;
+            this.points       = [];
+            this._lastVelocity = 0;
+            this._lastWidth    = (this.options.minWidth + this.options.maxWidth) / 2;
+
+            this.init();
+          }
+
+          /* ---------- lifecycle ---------- */
+
+          init() {
+            this.handleResize();
+            this.clear();
+            this.bindEvents();
+          }
+
+          bindEvents() {
+            /* Mouse */
+            this.canvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
+            this.canvas.addEventListener('mousemove', this.handleMouseMove.bind(this));
+            ['mouseup', 'mouseleave'].forEach(e =>
+              this.canvas.addEventListener(e, this.handleMouseUp.bind(this)));
+
+            /* Touch */
+            this.canvas.addEventListener('touchstart', this.handleTouchStart.bind(this));
+            this.canvas.addEventListener('touchmove',  this.handleTouchMove.bind(this));
+            this.canvas.addEventListener('touchend',   this.handleTouchEnd.bind(this));
+
+            /* Prevent scroll */
+            ['touchstart', 'touchmove'].forEach(e =>
+              this.canvas.addEventListener(e, ev => ev.preventDefault(), { passive:false }));
+
+            /* Resize */
+            window.addEventListener('resize', this.handleResize.bind(this));
+          }
+
+          handleResize() {
+            const dpr  = window.devicePixelRatio || 1;
+            const rect = this.canvas.getBoundingClientRect();
+
+            this.ctx.setTransform(1, 0, 0, 1, 0, 0);        // reset
+            this.canvas.width  = rect.width  * dpr;
+            this.canvas.height = rect.height * dpr;
+            this.canvas.style.width  = `${rect.width}px`;
+            this.canvas.style.height = `${rect.height}px`;
+            this.ctx.scale(dpr, dpr);
+
+            this.redraw();
+          }
+
+          /* ---------- event helpers ---------- */
+
+          _evtPoint(ev, touch = false) {
+            const { left, top } = this.canvas.getBoundingClientRect();
+            return {
+              x: (touch ? ev.clientX : ev.clientX) - left,
+              y: (touch ? ev.clientY : ev.clientY) - top,
+              time: Date.now()
+            };
+          }
+
+          /* Mouse */
+          handleMouseDown(e) {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            this._startStroke(this._evtPoint(e));
+          }
+          handleMouseMove(e) {
+            if (!this.isDrawing) return;
+            e.preventDefault();
+            this._addPoint(this._evtPoint(e));
+          }
+          handleMouseUp() { this._endStroke(); }
+
+          /* Touch */
+          handleTouchStart(e) {
+            this._startStroke(this._evtPoint(e.touches[0], true));
+          }
+          handleTouchMove(e) {
+            if (!this.isDrawing) return;
+            this._addPoint(this._evtPoint(e.touches[0], true));
+          }
+          handleTouchEnd() { this._endStroke(); }
+
+          /* ---------- stroke logic ---------- */
+
+          _startStroke(p) {
+            this.isDrawing = true;
+            this.points.length = 0;
+            this._reset();
+            this._addPoint(p);
+          }
+          _endStroke() {
+            if (!this.isDrawing) return;
+            this.isDrawing = false;
+            this.canvas.dispatchEvent(new Event('end'));
+          }
+
+          _addPoint(p) {
+            this.points.push(p);
+
+            if (this.points.length > 2) {
+              if (this.points.length === 3) this.points.unshift(this.points[0]);
+
+              const [p0, p1, p2] = this.points.slice(-3);
+              const cp1 = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+              /* draw quadratic curve */
+              this._drawCurve(cp1, p2);
+
+              this.points.shift();            // keep last two points
+            } else if (this.points.length === 1) {
+              this._drawDot(p);
+            }
+          }
+
+          _drawDot(p) {
+            this.ctx.beginPath();
+            this.ctx.fillStyle = this.options.penColor;
+            this.ctx.arc(p.x, p.y, this._lastWidth / 2, 0, Math.PI * 2);
+            this.ctx.fill();
+          }
+
+          _drawCurve(cp, end) {
+            const v   = this._velocity(this.points[this.points.length-2], end);
+            const w   = this._calculateWidth(v);
+
+            this.ctx.beginPath();
+            this.ctx.lineWidth = this._lastWidth;
+            this.ctx.moveTo(cp.x, cp.y);
+            this.ctx.quadraticCurveTo(cp.x, cp.y, end.x, end.y);
+            this.ctx.stroke();
+            this._lastWidth = w;
+          }
+
+          _velocity(a, b) {
+            const dt = b.time - a.time;
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            return dt ? Math.sqrt(dx*dx + dy*dy) / dt : 0;
+          }
+          _calculateWidth(v) {
+            const range = this.options.maxWidth - this.options.minWidth;
+            const w = this.options.maxWidth - v * range;
+            return Math.max(this.options.minWidth,
+                            Math.min(this.options.maxWidth, w));
+          }
+
+          /* ---------- public API ---------- */
+
+          clear() {
+            this.ctx.fillStyle = this.options.backgroundColor;
+            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            this.points.length = 0;
+            this._reset();
+          }
+          isEmpty() { return !this.points.length; }
+          toDataURL(type='image/png', q=1) { return this.canvas.toDataURL(type, q); }
+          fromDataURL(dataURL) {
+            const img = new Image();
+            const dpr = window.devicePixelRatio || 1;
+            img.onload = () => {
+              this.clear();
+              this.ctx.drawImage(img, 0, 0,
+                this.canvas.width  / dpr,
+                this.canvas.height / dpr);
+            };
+            img.src = dataURL;
+          }
+          redraw() {
+            const data = this.toDataURL();
+            this.clear();
+            this.fromDataURL(data);
+          }
+          on(evt, cb)  { this.canvas.addEventListener(evt, cb); }
+          off(evt, cb) { this.canvas.removeEventListener(evt, cb); }
+
+          /* ---------- private ---------- */
+
+          _reset() {
+            this._lastVelocity = 0;
+            this._lastWidth    = (this.options.minWidth + this.options.maxWidth) / 2;
+            this.ctx.lineCap   = 'round';
+            this.ctx.lineJoin  = 'round';
+            this.ctx.strokeStyle = this.options.penColor;
+          }
+        }
+
+        window.SignaturePad = SignaturePad;
+    </script>
+    <script>
+        /**
+         * Dynamic Time-Off Request Form
+         * Progressive revelation functionality and email integration
+         */
+
+        // Form state management
+        let formSections = {
+            'section-employee-info': { visible: true, completed: false },
+            'section-calendar': { visible: false, completed: false },
+            'section-absence-type': { visible: false, completed: false },
+            'section-reason': { visible: false, completed: false },
+            'section-signature': { visible: false, completed: false }
+        };
+
+        // Initialize dynamic form functionality
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeDynamicForm();
+            bindDynamicEventListeners();
+            setDefaultValues();
+        });
+
+        /**
+         * Initialize dynamic form functionality
+         */
+        function initializeDynamicForm() {
+            // Set up progressive revelation
+            setupProgressiveRevealation();
+            
+            // Initialize the first section as visible
+            showSection('section-employee-info');
+        }
+
+        /**
+         * Bind event listeners for dynamic functionality
+         */
+        function bindDynamicEventListeners() {
+            // Create a single handler that checks form progress on any input/change.
+            const progressHandler = () => requestAnimationFrame(updateFormProgress);
+
+            // Employee Information section
+            document.getElementById('employeeName').addEventListener('input', progressHandler);
+            document.getElementById('employeeEmail').addEventListener('input', progressHandler);
+            document.getElementById('todaysDate').addEventListener('change', progressHandler);
+            
+            // Calendar section
+            document.getElementById('startDate').addEventListener('change', progressHandler);
+            document.getElementById('endDate').addEventListener('change', progressHandler);
+            document.getElementById('partialDay').addEventListener('change', handlePartialDayToggle); // This one is fine as is.
+            
+            // Absence Type section
+            document.querySelectorAll('input[name="absenceType"]').forEach(radio => {
+                radio.addEventListener('change', progressHandler);
+            });
+            
+            // Reason section
+            document.getElementById('reason').addEventListener('input', progressHandler);
+            
+            // Other absence type handling (this is also fine)
+            document.querySelector('input[value="other"]').addEventListener('change', function() {
+                const otherInput = document.getElementById('otherAbsenceType');
+                if (this.checked) {
+                    otherInput.style.display = 'block';
+                    otherInput.disabled = false;
+                    otherInput.required = true;
+                } else {
+                    otherInput.style.display = 'none';
+                    otherInput.disabled = true;
+                    otherInput.required = false;
+                }
+            });
+        }
+
+        /**
+         * Checks the completion status of all sections and reveals the next one.
+         */
+        function updateFormProgress() {
+            // Sequentially validate and reveal sections.
+            if (validateEmployeeSection()) {
+                showSection('section-calendar');
+            }
+
+            if (validateCalendarSection()) {
+                showSection('section-absence-type');
+            }
+
+            if (validateAbsenceTypeSection()) {
+                showSection('section-reason');
+            }
+
+            if (validateReasonSection()) {
+                showSection('section-signature');
+            }
+        }
+
+        /**
+         * Set default values
+         */
+        function setDefaultValues() {
+            // Set today's date
+            const today = new Date().toISOString().split('T')[0];
+            document.getElementById('todaysDate').value = today;
+            document.getElementById('employeeSignatureDate').value = today;
+        }
+
+        /**
+         * Progressive revelation setup
+         */
+        function setupProgressiveRevealation() {
+            // Hide all sections except the first one
+            Object.keys(formSections).forEach(sectionId => {
+                const section = document.getElementById(sectionId);
+                if (section && !formSections[sectionId].visible) {
+                    section.style.display = 'none';
+                    section.classList.remove('visible');
+                }
+            });
+        }
+
+        /**
+         * Show a section with animation
+         */
+        function showSection(sectionId) {
+            const section = document.getElementById(sectionId);
+            if (section && !formSections[sectionId].visible) {
+                formSections[sectionId].visible = true;
+                
+                // Show the section
+                section.style.display = 'block';
+                
+                // Trigger animation and initialization after a small delay
+                setTimeout(() => {
+                    section.classList.add('visible');
+                    section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                    // If this is the signature section, initialize the signature pad
+                    if (sectionId === 'section-signature' && typeof window.initializeSignaturePads === 'function') {
+                        requestAnimationFrame(() => {
+                            window.initializeSignaturePads();
+                        });
+                    }
+                }, 100);
+            }
+        }
+
+        /**
+         * Validate employee information section
+         */
+        function validateEmployeeSection() {
+            const name = document.getElementById('employeeName').value.trim();
+            const emailInput = document.getElementById('employeeEmail');
+            const email = emailInput.value.trim();
+            const date = document.getElementById('todaysDate').value;
+            
+            const isComplete = name && date && emailInput.checkValidity() && email;
+            formSections['section-employee-info'].completed = isComplete;
+            return isComplete;
+        }
+
+        /**
+         * Validate calendar section
+         */
+        function validateCalendarSection() {
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            
+            const isComplete = startDate && endDate && new Date(startDate) <= new Date(endDate);
+            formSections['section-calendar'].completed = isComplete;
+            return isComplete;
+        }
+
+        /**
+         * Handle partial day toggle
+         */
+        function handlePartialDayToggle() {
+            const isPartial = document.getElementById('partialDay').checked;
+            const partialSection = document.getElementById('partialDaySection');
+            
+            if (isPartial) {
+                partialSection.style.display = 'block';
+            } else {
+                partialSection.style.display = 'none';
+                // Clear time values
+                document.getElementById('leaveTime').value = '';
+                document.getElementById('returnTime').value = '';
+            }
+        }
+
+        /**
+         * Validate absence type section
+         */
+        function validateAbsenceTypeSection() {
+            const absenceType = document.querySelector('input[name="absenceType"]:checked');
+            const isComplete = !!absenceType;
+            formSections['section-absence-type'].completed = isComplete;
+            return isComplete;
+        }
+
+        /**
+         * Validate reason section
+         */
+        function validateReasonSection() {
+            const reason = document.getElementById('reason').value.trim();
+            const isComplete = reason && reason.length >= 10;
+            formSections['section-reason'].completed = isComplete;
+            return isComplete;
+        }
+
+        /**
+         * Handle signature completion (to be called from existing signature code)
+         */
+        function handleSignatureComplete() {
+            const signatureDate = document.getElementById('employeeSignatureDate').value;
+            // Correctly reference the global employeeSignaturePad variable
+            const hasSignature = employeeSignaturePad && !employeeSignaturePad.isEmpty();
+            
+            if (signatureDate && hasSignature) {
+                formSections['section-signature'].completed = true;
+                const submitBtn = document.getElementById('finalSubmitBtn');
+                if(submitBtn) {
+                    submitBtn.disabled = false;
+                }
+            } else {
+                // Explicitly mark as incomplete if checks fail
+                formSections['section-signature'].completed = false;
+            }
+        }
+
+        /**
+         * Generate email preview
+         */
+        function generateEmailPreview() {
+            const formData = collectFormData();
+            
+            // Update supervisor email based on form data or configuration
+            const supervisorEmail = document.getElementById('supervisorEmail');
+            if(supervisorEmail) supervisorEmail.textContent = 'bmillare@tutoringclub.com'; // Test email as specified
+            
+            return formData;
+        }
+
+        /**
+         * Reruns all validation checks to update completion status.
+         */
+        function validateAllSections() {
+            // Section 1: Employee Info
+            const name = document.getElementById('employeeName').value.trim();
+            const emailInput = document.getElementById('employeeEmail');
+            const email = emailInput.value.trim();
+            const date = document.getElementById('todaysDate').value;
+            if (name && date && emailInput.checkValidity() && email) {
+                formSections['section-employee-info'].completed = true;
+            } else {
+                formSections['section-employee-info'].completed = false;
+            }
+
+            // Section 2: Calendar
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            if (startDate && endDate && new Date(startDate) <= new Date(endDate)) {
+                formSections['section-calendar'].completed = true;
+            }
+
+            // Section 3: Absence Type
+            const absenceType = document.querySelector('input[name="absenceType"]:checked');
+            if (absenceType) {
+                formSections['section-absence-type'].completed = true;
+            }
+
+            // Section 4: Reason
+            const reason = document.getElementById('reason').value.trim();
+            if (reason && reason.length >= 10) {
+                formSections['section-reason'].completed = true;
+            }
+
+            // Section 5: Signature
+            handleSignatureComplete();
+        }
+
+        /**
+         * Enhanced form submission with email functionality
+         */
+        async function submitDynamicForm(event) {
+            event.preventDefault();
+            
+            // Run a final validation pass to catch any missed blur/change events
+            validateAllSections();
+
+            // Validate all sections are complete
+            const allCompleted = Object.values(formSections).every(section => section.completed);
+            
+            if (!allCompleted) {
+                const incompleteSections = Object.keys(formSections).filter(key => !formSections[key].completed);
+                console.error('Incomplete sections:', incompleteSections);
+                alert('Please complete all sections before submitting. The following sections are incomplete: ' + incompleteSections.join(', '));
+                return;
+            }
+            
+            const formData = generateEmailPreview();
+            const submitButton = document.getElementById('finalSubmitBtn');
+            const originalText = submitButton.textContent;
+
+            submitButton.textContent = 'Sending...';
+            submitButton.disabled = true;
+            
+            try {
+                const emailData = {
+                    ...formData,
+                    subject: 'REQUEST OFF APPROVAL',
+                    supervisorEmail: 'bmillare@tutoringclub.com',
+                    emailType: 'approval_request'
+                };
+                
+                const response = await submitToGoogleAppsScript(emailData);
+                
+                // Show success message on success
+                document.getElementById('timeOffForm').style.display = 'none';
+                document.getElementById('successMessage').style.display = 'block';
+                document.getElementById('successMessage').scrollIntoView({ behavior: 'smooth' });
+
+            } catch (error) {
+                console.error('Form submission error:', error);
+                alert('There was an error submitting your request. Please try again. Error: ' + error.message);
+                // Reset button on failure
+                submitButton.textContent = originalText;
+                submitButton.disabled = false;
+            }
+        }
+
+        /**
+         * Enhanced Google Apps Script integration for email workflow
+         */
+        function submitToGoogleAppsScript(data) {
+            return new Promise((resolve, reject) => {
+                google.script.run
+                    .withSuccessHandler(function(response) {
+                        if (response.success) {
+                            resolve(response);
+                        } else {
+                            reject(new Error(response.message || 'Submission failed'));
+                        }
+                    })
+                    .withFailureHandler(function(error) {
+                        reject(error);
+                    })
+                    .processForm(data);
+            });
+        }
+
+        /**
+         * Export functions for integration with existing code
+         */
+        window.DynamicForm = {
+            handleSignatureComplete,
+            submitDynamicForm,
+            formSections
+        };
+    </script>
+    <script>
+        /**
+         * Time Off Request Form - Main JavaScript File
+         * Handles form validation, interactions, and Google Apps Script integration
+         */
+
+        // Global variables
+        let employeeSignaturePad;
+        let managerSignaturePad;
+        let formData = {};
+
+        // Initialize the application when DOM is loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeForm();
+            initializeSignaturePads();
+            bindEventListeners();
+            setDefaultDates();
+            
+            // Override form submission for dynamic functionality
+            document.getElementById('timeOffForm').addEventListener('submit', function(event) {
+                if (window.DynamicForm && window.DynamicForm.submitDynamicForm) {
+                    window.DynamicForm.submitDynamicForm(event);
+                } else {
+                    handleFormSubmit(event);
+                }
+            });
+        });
+
+        /**
+         * Initialize form elements and default values
+         */
+        function initializeForm() {
+            const form = document.getElementById('timeOffForm');
+            const partialDayCheckbox = document.getElementById('partialDay');
+            const partialDaySection = document.getElementById('partialDaySection');
+            const otherAbsenceInput = document.getElementById('otherAbsenceType');
+            const absenceTypeRadios = document.querySelectorAll('input[name="absenceType"]');
+            
+            // Handle partial day checkbox
+            partialDayCheckbox.addEventListener('change', function() {
+                if (this.checked) {
+                    partialDaySection.style.display = 'block';
+                } else {
+                    partialDaySection.style.display = 'none';
+                    document.getElementById('leaveTime').value = '';
+                    document.getElementById('returnTime').value = '';
+                }
+            });
+            
+            // Handle "other" absence type
+            absenceTypeRadios.forEach(radio => {
+                radio.addEventListener('change', function() {
+                    if (this.value === 'other') {
+                        otherAbsenceInput.disabled = false;
+                        otherAbsenceInput.required = true;
+                        otherAbsenceInput.focus();
+                    } else {
+                        otherAbsenceInput.disabled = true;
+                        otherAbsenceInput.required = false;
+                        otherAbsenceInput.value = '';
+                    }
+                });
+            });
+        }
+
+        /**
+         * Initialize signature pads
+         */
+        function initializeSignaturePads() {
+            // This function is now a placeholder.
+            // The initialization is moved to a global function to be called on demand.
+        }
+
+        /**
+         * Initialize signature pads on demand
+         */
+        window.initializeSignaturePads = function() {
+            if (employeeSignaturePad) {
+                return; // Already initialized
+            }
+
+            const employeeCanvas = document.getElementById('employeeSignature');
+            if (!employeeCanvas) return;
+
+            // Use ResizeObserver to initialize the pad only when the canvas is visible and has a size.
+            const observer = new ResizeObserver(entries => {
+                const entry = entries[0];
+                if (entry.contentRect.width > 0) {
+                    // Disconnect the observer once we have a size.
+                    observer.disconnect();
+
+                    // Now, initialize the signature pad.
+                    employeeSignaturePad = new SignaturePad(employeeCanvas, {
+                        backgroundColor: '#ffffff',
+                        penColor: '#000000',
+                        minWidth: 1,
+                        maxWidth: 3
+                    });
+
+                    // Bind clear button
+                    const clearEmployeeBtn = document.getElementById('clearEmployeeSignature');
+                    if (clearEmployeeBtn) {
+                        clearEmployeeBtn.addEventListener('click', () => employeeSignaturePad.clear());
+                    }
+
+                    // Integrate with dynamic form
+                    employeeSignaturePad.on('end', () => {
+                        const submitBtn = document.getElementById('finalSubmitBtn');
+                        if (submitBtn && !employeeSignaturePad.isEmpty()) {
+                            submitBtn.disabled = false;
+                        }
+
+                        if (!employeeSignaturePad.isEmpty() && window.DynamicForm) {
+                            const signatureDate = document.getElementById('employeeSignatureDate').value;
+                            if (signatureDate) {
+                                window.DynamicForm.handleSignatureComplete();
+                            }
+                        }
+                    });
+
+                    const signatureDateInput = document.getElementById('employeeSignatureDate');
+                    if (signatureDateInput) {
+                        signatureDateInput.addEventListener('change', () => {
+                            if (signatureDateInput.value && employeeSignaturePad && !employeeSignaturePad.isEmpty() && window.DynamicForm) {
+                                window.DynamicForm.handleSignatureComplete();
+                            }
+                        });
+                    }
+                }
+            });
+
+            observer.observe(employeeCanvas);
+        };
+
+        /**
+         * Bind event listeners
+         */
+        function bindEventListeners() {
+            const form = document.getElementById('timeOffForm');
+            
+            // Form submission is handled by the submitDynamicForm function now
+            
+            // Real-time validation
+            const requiredFields = ['employeeName', 'todaysDate', 'startDate', 'endDate', 'reason', 'employeeSignatureDate'];
+            requiredFields.forEach(fieldId => {
+                const field = document.getElementById(fieldId);
+                if (field) {
+                    field.addEventListener('blur', () => validateField(fieldId));
+                    field.addEventListener('input', () => clearError(fieldId));
+                }
+            });
+            
+            // Date validation
+            document.getElementById('startDate').addEventListener('change', validateDates);
+            document.getElementById('endDate').addEventListener('change', validateDates);
+            
+            // Absence type validation
+            document.querySelectorAll('input[name="absenceType"]').forEach(radio => {
+                radio.addEventListener('change', () => clearError('absenceType'));
+            });
+        }
+
+        /**
+         * Set default dates
+         */
+        function setDefaultDates() {
+            const today = new Date();
+            const todayString = today.toISOString().split('T')[0];
+            
+            document.getElementById('todaysDate').value = todayString;
+            document.getElementById('employeeSignatureDate').value = todayString;
+            document.getElementById('startDate').value = todayString;
+        }
+
+        /**
+         * Validate individual field
+         */
+        function validateField(fieldId) {
+            const field = document.getElementById(fieldId);
+            const errorElement = document.getElementById(fieldId + 'Error');
+            
+            if (!field || !errorElement) return true;
+            
+            let isValid = true;
+            let errorMessage = '';
+            
+            // Check if field is required and empty
+            if (field.required && !field.value.trim()) {
+                isValid = false;
+                errorMessage = 'This field is required.';
+            }
+            
+            // Additional validation based on field type
+            switch (fieldId) {
+                case 'employeeName':
+                    if (field.value.trim().length < 2) {
+                        isValid = false;
+                        errorMessage = 'Employee name must be at least 2 characters long.';
+                    }
+                    break;
+                    
+                case 'todaysDate':
+                case 'employeeSignatureDate':
+                    if (field.value && !isValidDate(field.value)) {
+                        isValid = false;
+                        errorMessage = 'Please enter a valid date.';
+                    }
+                    break;
+                    
+                case 'startDate':
+                case 'endDate':
+                    if (field.value && !isValidDate(field.value)) {
+                        isValid = false;
+                        errorMessage = 'Please enter a valid date.';
+                    }
+                    break;
+                    
+                case 'reason':
+                    if (field.value.trim().length < 10) {
+                        isValid = false;
+                        errorMessage = 'Please provide a more detailed reason (at least 10 characters).';
+                    }
+                    break;
+            }
+            
+            // Show/hide error
+            if (isValid) {
+                clearError(fieldId);
+            } else {
+                showError(fieldId, errorMessage);
+            }
+            
+            return isValid;
+        }
+
+        /**
+         * Validate date range
+         */
+        function validateDates() {
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            const todaysDate = document.getElementById('todaysDate').value;
+            
+            if (!startDate || !endDate) return true;
+            
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            const today = new Date(todaysDate);
+            
+            // Check if end date is after start date
+            if (end < start) {
+                showError('endDate', 'End date must be after start date.');
+                return false;
+            }
+            
+            // Check if absence is at least 14 days in advance (except for sick leave)
+            const absenceType = document.querySelector('input[name="absenceType"]:checked');
+            if (absenceType && absenceType.value !== 'sick') {
+                const daysDifference = Math.floor((start - today) / (1000 * 60 * 60 * 24));
+                if (daysDifference < 14) {
+                    showError('startDate', 'Requests for absences (other than sick leave) must be submitted 14 days in advance.');
+                    return false;
+                }
+            }
+            
+            clearError('startDate');
+            clearError('endDate');
+            return true;
+        }
+
+        /**
+         * Validate absence type
+         */
+        function validateAbsenceType() {
+            const absenceType = document.querySelector('input[name="absenceType"]:checked');
+            const otherAbsenceInput = document.getElementById('otherAbsenceType');
+            
+            if (!absenceType) {
+                showError('absenceType', 'Please select a type of absence.');
+                return false;
+            }
+            
+            if (absenceType.value === 'other' && !otherAbsenceInput.value.trim()) {
+                showError('absenceType', 'Please specify the type of absence.');
+                otherAbsenceInput.focus();
+                return false;
+            }
+            
+            clearError('absenceType');
+            return true;
+        }
+
+        /**
+         * Validate employee signature
+         */
+        function validateEmployeeSignature() {
+            if (!employeeSignaturePad || employeeSignaturePad.isEmpty()) {
+                showError('employeeSignature', 'Employee signature is required.');
+                return false;
+            }
+            
+            clearError('employeeSignature');
+            return true;
+        }
+
+        /**
+         * Validate entire form
+         */
+        function validateForm() {
+            let isValid = true;
+            
+            // Validate required fields
+            const requiredFields = ['employeeName', 'todaysDate', 'startDate', 'endDate', 'reason', 'employeeSignatureDate'];
+            requiredFields.forEach(fieldId => {
+                if (!validateField(fieldId)) {
+                    isValid = false;
+                }
+            });
+            
+            // Validate dates
+            if (!validateDates()) {
+                isValid = false;
+            }
+            
+            // Validate absence type
+            if (!validateAbsenceType()) {
+                isValid = false;
+            }
+            
+            // Validate employee signature
+            if (!validateEmployeeSignature()) {
+                isValid = false;
+            }
+            
+            return isValid;
+        }
+
+        /**
+         * Show error message
+         */
+        function showError(fieldId, message) {
+            const errorElement = document.getElementById(fieldId + 'Error');
+            const fieldElement = document.getElementById(fieldId);
+            
+            if (errorElement) {
+                errorElement.textContent = message;
+                errorElement.classList.add('show');
+            }
+            
+            if (fieldElement) {
+                fieldElement.parentElement.classList.add('error');
+            }
+        }
+
+        /**
+         * Clear error message
+         */
+        function clearError(fieldId) {
+            const errorElement = document.getElementById(fieldId + 'Error');
+            const fieldElement = document.getElementById(fieldId);
+            
+            if (errorElement) {
+                errorElement.textContent = '';
+                errorElement.classList.remove('show');
+            }
+            
+            if (fieldElement) {
+                fieldElement.parentElement.classList.remove('error');
+            }
+        }
+
+        /**
+         * Check if date is valid
+         */
+        function isValidDate(dateString) {
+            const date = new Date(dateString);
+            return date instanceof Date && !isNaN(date);
+        }
+
+        /**
+         * Collect form data
+         */
+        function collectFormData() {
+            const form = document.getElementById('timeOffForm');
+            const formData = new FormData(form);
+            const data = {};
+            
+            // Collect basic form data
+            for (let [key, value] of formData.entries()) {
+                data[key] = value;
+            }
+            
+            // Add signature data
+            data.employeeSignatureData = (!employeeSignaturePad || employeeSignaturePad.isEmpty()) ? null : employeeSignaturePad.toDataURL();
+            data.managerSignatureData = null; // Manager signature pad is not used
+            
+            // Add calculated fields
+            data.totalDays = calculateTotalDays(data.startDate, data.endDate);
+            data.submissionTimestamp = new Date().toISOString();
+            
+            // Handle partial day times
+            if (data.partialDay) {
+                data.leaveTime = document.getElementById('leaveTime').value;
+                data.returnTime = document.getElementById('returnTime').value;
+            }
+            
+            return data;
+        }
+
+        /**
+         * Calculate total days between two dates
+         */
+        function calculateTotalDays(startDate, endDate) {
+            if (!startDate || !endDate) return 0;
+            
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            const timeDiff = end.getTime() - start.getTime();
+            const daysDiff = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1; // Include both start and end days
+            
+            return daysDiff;
+        }
+
+        /**
+         * Handle form submission
+         */
+        function handleFormSubmit(event) {
+            event.preventDefault();
+            
+            // Validate form
+            if (!validateForm()) {
+                alert('Please correct the errors in the form before submitting.');
+                return;
+            }
+            
+            // Collect form data
+            const data = collectFormData();
+            
+            // Show loading state
+            const form = document.getElementById('timeOffForm');
+            const submitButton = form.querySelector('button[type="submit"]');
+            const originalText = submitButton.textContent;
+            
+            form.classList.add('form-loading');
+            submitButton.textContent = 'Submitting...';
+            submitButton.disabled = true;
+            
+            google.script.run
+                .withSuccessHandler(function(response) {
+                    if (response.success) {
+                        // Show success message
+                        document.getElementById('timeOffForm').style.display = 'none';
+                        document.getElementById('successMessage').style.display = 'block';
+                        document.getElementById('successMessage').scrollIntoView({ behavior: 'smooth' });
+                    } else {
+                        throw new Error(response.message || 'Submission failed');
+                    }
+                })
+                .withFailureHandler(function(error) {
+                    console.error('Form submission error:', error);
+                    alert('There was an error submitting your request. Please try again. Error: ' + error.message);
+                })
+                .withFinally(function() {
+                    // Reset loading state
+                    form.classList.remove('form-loading');
+                    submitButton.textContent = originalText;
+                    submitButton.disabled = false;
+                })
+                .processForm(data);
+        }
+    </script>
+</body>
+</html>

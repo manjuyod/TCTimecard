@@ -1,0 +1,49 @@
+{
+  "name": "time-card-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Replit-ready Vite React + Express scaffold with legacy branding applied globally.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
+    "dev:client": "npm run dev --prefix client",
+    "dev:server": "cross-env NODE_ENV=development tsx watch --tsconfig server/tsconfig.json server/index.ts",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "npm run build --prefix client",
+    "build:server": "tsc -p server/tsconfig.json",
+    "start": "cross-env NODE_ENV=production node server/dist/index.js"
+  },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "google-auth-library": "^9.14.2",
+    "helmet": "^7.0.0",
+    "luxon": "^3.7.2",
+    "morgan": "^1.10.0",
+    "mssql": "^12.2.0",
+    "nodemailer": "^7.0.11",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/compression": "^1.8.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/express-session": "^1.18.2",
+    "@types/luxon": "^3.7.1",
+    "@types/morgan": "^1.9.10",
+    "@types/mssql": "^9.1.8",
+    "@types/node": "^25.0.2",
+    "@types/nodemailer": "^7.0.4",
+    "@types/pg": "^8.16.0",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "nodemon": "^3.0.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

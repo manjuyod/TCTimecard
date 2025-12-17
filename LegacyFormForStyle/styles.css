@@ -1,0 +1,605 @@
+/* Reset and Base Styles */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+/* CSS Custom Properties for Header Background Colors
+ * 
+ * To customize header colors, change these values:
+ * --header-logo-bg: Background color for logo section (above the line)
+ * --header-title-bg: Background color for title section (below the line)
+ * --header-border-color: Color of the divider line between sections
+ * 
+ * Examples:
+ * --header-logo-bg: #f0f8ff; (light blue)
+ * --header-title-bg: #fffacd; (light yellow)
+ * --header-border-color: #4682b4; (steel blue)
+ */
+:root {
+    --header-logo-bg: #f8f9fa;
+    --header-title-bg: #ffffff;
+    --header-border-color: #e0e0e0;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.6;
+    color: #333;
+    background-color: #c9d7e0;
+    margin: 0;
+    padding: 0;
+}
+
+/*
+.container {
+    max-width: 800px;
+    margin: 325px auto 20px;
+    padding: 20px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+/* Header Styles */
+/*
+header {
+    text-align: center;
+    margin-bottom: 30px;
+    border-bottom: 2px solid var(--header-border-color);
+    position: relative;
+    padding: 0;
+}
+
+/* Header Logo Section (Above the divider line) */
+/*
+.header-logo-section {
+    background-color: var(--header-logo-bg);
+    padding: 20px;
+    margin: -20px -20px 0 -20px;
+    border-radius: 8px 8px 0 0;
+}
+
+/* Container Styles */
+.container {
+    max-width: 800px;
+    margin: 20px auto;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+}
+
+/* Main Header with Orange Background */
+.main-header {
+    background-color: #ff5f0e;
+    color: white;
+    padding: 30px;
+    text-align: center;
+}
+
+.main-header h1 {
+    color: white;
+    font-family: 'Times New Roman', Times, serif; /* Museo Slab fallback */
+    font-size: 2.2em;
+    margin-bottom: 10px;
+    font-weight: bold;
+}
+
+.main-header .instructions {
+    color: white;
+    font-size: 0.95em;
+    max-width: 600px;
+    margin: 0 auto;
+    line-height: 1.4;
+}
+
+/* Header Divider */
+.header-divider {
+    height: 3px;
+    background-color: #e0e0e0;
+    margin: 0;
+}
+
+/* Form Body with Blue Background */
+.form-body {
+    background-color: #487cb6;
+    padding: 40px;
+    min-height: 400px;
+}
+
+/* Logo Styles */
+.company-logo {
+    display: block;
+    text-align: center;
+    margin: 30px auto;
+    width: fit-content;
+    padding: 30px;
+}
+
+.company-logo svg {
+    height: 240px; /* Golden ratio applied: increased from 150px */
+    width: auto;
+    max-width: 485px; /* Golden ratio: 300px * 1.618 */
+    display: block;
+    margin: 0 auto;
+}
+
+/* Form Section Styles - Updated for Blue Background */
+.form-section {
+    background: rgba(255, 255, 255, 0.95);
+    padding: 25px;
+    border-radius: 8px;
+    border: none;
+    margin-bottom: 25px;
+    opacity: 0;
+    transform: translateY(20px);
+    transition: all 0.5s ease-in-out;
+}
+
+.form-section.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.form-section h3 {
+    color: #2c3e50;
+    margin-bottom: 20px;
+    font-size: 1.4em;
+    border-bottom: 2px solid #487cb6;
+    padding-bottom: 10px;
+}
+
+/* Form Styles */
+.time-off-form {
+    display: flex;
+    flex-direction: column;
+    gap: 25px;
+}
+
+/* Email Preview Styles */
+.email-preview {
+    background: rgba(255, 255, 255, 0.9);
+    padding: 20px;
+    border-radius: 6px;
+    border: 2px solid #487cb6;
+}
+
+.email-preview p {
+    margin-bottom: 10px;
+    font-size: 0.9em;
+}
+
+.email-actions {
+    display: flex;
+    gap: 15px;
+    margin-top: 20px;
+    justify-content: center;
+}
+
+.submit-btn, .print-btn {
+    padding: 12px 30px;
+    border: none;
+    border-radius: 6px;
+    font-size: 1em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.submit-btn {
+    background-color: #28a745;
+    color: white;
+}
+
+.submit-btn:hover {
+    background-color: #218838;
+    transform: translateY(-2px);
+}
+
+.print-btn {
+    background-color: #6c757d;
+    color: white;
+}
+
+.print-btn:hover {
+    background-color: #545b62;
+    transform: translateY(-2px);
+}
+
+/* Success Message Styles */
+.success-message {
+    background: rgba(40, 167, 69, 0.1);
+    border: 2px solid #28a745;
+    border-radius: 8px;
+    padding: 30px;
+    text-align: center;
+    margin-top: 20px;
+}
+
+.success-message h3 {
+    color: #155724;
+    margin-bottom: 10px;
+}
+
+.success-message p {
+    color: #155724;
+    margin: 0;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+
+.form-row {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.form-row .form-group {
+    flex: 1;
+    min-width: 200px;
+}
+
+label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+input[type="text"],
+input[type="date"],
+input[type="time"],
+textarea {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+    transition: border-color 0.3s ease;
+}
+
+input[type="text"]:focus,
+input[type="date"]:focus,
+input[type="time"]:focus,
+textarea:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+}
+
+textarea {
+    resize: vertical;
+    min-height: 80px;
+}
+
+/* Radio Button Styles */
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    padding: 8px;
+    border-radius: 4px;
+    transition: background-color 0.2s ease;
+}
+
+.radio-label:hover {
+    background-color: #f0f0f0;
+}
+
+.radio-label input[type="radio"] {
+    display: none;
+}
+
+.radio-custom {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #ddd;
+    border-radius: 50%;
+    margin-right: 10px;
+    position: relative;
+    transition: all 0.2s ease;
+}
+
+.radio-label input[type="radio"]:checked + .radio-custom {
+    border-color: #3498db;
+    background-color: #3498db;
+}
+
+.radio-label input[type="radio"]:checked + .radio-custom::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 8px;
+    height: 8px;
+    background-color: white;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+}
+
+/* Checkbox Styles */
+input[type="checkbox"] {
+    margin-right: 8px;
+    transform: scale(1.2);
+}
+
+/* Signature Styles */
+.signature-group {
+    position: relative;
+}
+
+.signature-container {
+    position: relative;
+    border: 2px solid #ddd;
+    border-radius: 4px;
+    background: white;
+    display: block;
+    width: 100%;
+}
+
+.signature-container canvas {
+    display: block;
+    cursor: crosshair;
+    width: 100%;
+    height: 150px; /* You can adjust this height as needed */
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.clear-signature {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    background: #e74c3c;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background-color 0.2s ease;
+}
+
+.clear-signature:hover {
+    background: #c0392b;
+}
+
+/* Partial Day Section */
+.partial-day-section {
+    margin-top: 10px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    border: 1px solid #e9ecef;
+}
+
+/* Error Messages */
+.error-message {
+    color: #e74c3c;
+    font-size: 0.85em;
+    margin-top: 5px;
+    display: none;
+}
+
+.error-message.show {
+    display: block;
+}
+
+.form-group.error input,
+.form-group.error textarea {
+    border-color: #e74c3c;
+}
+
+/* Success Message */
+.success-message {
+    text-align: center;
+    padding: 30px;
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+    border-radius: 6px;
+    margin-top: 20px;
+}
+
+.success-message h3 {
+    margin-bottom: 10px;
+    color: #155724;
+}
+
+/* Form Actions */
+.form-actions {
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #e0e0e0;
+}
+
+.btn {
+    padding: 12px 30px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 600;
+    transition: all 0.3s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.btn-primary {
+    background: #3498db;
+    color: white;
+}
+
+.btn-primary:hover {
+    background: #2980b9;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
+.btn-secondary {
+    background: #95a5a6;
+    color: white;
+}
+
+.btn-secondary:hover {
+    background: #7f8c8d;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .container {
+        margin: 120px auto 10px;
+        padding: 15px;
+    }
+
+    .company-logo svg {
+        height: 148px; /* Golden ratio applied: 60px * 1.618 * 1.5 */
+        max-width: 405px; /* Golden ratio: 250px * 1.618 */
+    }
+
+    .form-row {
+        flex-direction: column;
+    }
+
+    .form-row .form-group {
+        min-width: auto;
+    }
+
+    .signature-container canvas {
+        width: 100%;
+        max-width: 350px;
+    }
+
+    .form-actions {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .btn {
+        width: 100%;
+        max-width: 300px;
+    }
+
+    h1 {
+        font-size: 1.8em;
+    }
+}
+
+@media (max-width: 480px) {
+    .container {
+        margin: 100px auto 5px;
+        padding: 10px;
+    }
+
+    .company-logo svg {
+        height: 120px; /* Golden ratio applied: more generous mobile size */
+        max-width: 324px; /* Golden ratio: 200px * 1.618 */
+    }
+
+    .form-section {
+        padding: 15px;
+    }
+
+    .signature-container canvas {
+        width: 100%;
+        height: 120px;
+    }
+}
+
+/* Print Styles */
+@media print {
+    body {
+        background: white;
+        color: black;
+    }
+
+    .container {
+        box-shadow: none;
+        max-width: none;
+        margin: 0;
+        padding: 0;
+    }
+
+    .company-logo svg {
+        max-height: 60px;
+    }
+
+    .form-actions {
+        display: none;
+    }
+
+    .success-message {
+        display: none;
+    }
+
+    .clear-signature {
+        display: none;
+    }
+
+    .form-section {
+        background: white;
+        border: 1px solid #000;
+        margin-bottom: 20px;
+        page-break-inside: avoid;
+    }
+
+    .signature-container {
+        border: 1px solid #000;
+    }
+}
+
+/* Additional Accessibility */
+input:focus,
+textarea:focus,
+button:focus {
+    outline: 2px solid #3498db;
+    outline-offset: 2px;
+}
+
+.radio-label:focus-within .radio-custom {
+    box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.3);
+}
+
+/* Loading State */
+.form-loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.form-loading .btn {
+    position: relative;
+}
+
+.form-loading .btn::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 20px;
+    height: 20px;
+    border: 2px solid transparent;
+    border-top: 2px solid currentColor;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    transform: translate(-50%, -50%);
+}
+
+@keyframes spin {
+    0% { transform: translate(-50%, -50%) rotate(0deg); }
+    100% { transform: translate(-50%, -50%) rotate(360deg); }
+}

@@ -1,0 +1,186 @@
+{
+  "task": "extra_hours_request_approval_email",
+  "role": "backend_engineer",
+  "objective": "Implement extra hours request + approval workflow where tutors submit requests in-app, the app returns a prefilled email draft (mailto + Gmail compose URL) for the tutor to send to the center, and admins approve/deny via dashboard endpoints only. Maintain an append-only audit trail for every state transition.",
+  "constraints": {
+    "audit_trail_required": true,
+    "no_self_approval": true,
+    "no_schema_changes": true,
+    "no_startup_db_tests": true,
+    "timezone_correct": true,
+    "no_server_sent_submission_email": true,
+    "decision_email_optional": true,
+    "do_not_store_franchise_emails_in_postgres": true
+  },
+  "dependencies": {
+    "requires": [
+      "auth sessions (session.accountType, session.accountId, session.franchiseId)",
+      "Postgres connector for public.extrahours (no connect on import)",
+      "MSSQL connector for dbo.tblTutors and dbo.tblFranchies (no connect on import)",
+      "APP_ORIGIN env var for admin review links"
+    ],
+    "postgres_tables": ["public.extrahours"],
+    "mssql_tables": ["dbo.tblTutors", "dbo.tblFranchies"]
+  },
+  "status_model": {
+    "allowed_statuses": ["pending", "approved", "denied", "cancelled"],
+    "allowed_transitions": [
+      "pending -> approved",
+      "pending -> denied",
+      "pending -> cancelled"
+    ],
+    "terminal_states": ["approved", "denied", "cancelled"]
+  },
+  "validation_rules": [
+    "Tutor can only create requests for themselves (derive tutorId from session).",
+    "Tutor can only cancel their own requests and only if status='pending'.",
+    "Admin can approve/deny only requests for the franchiseId they are operating on (franchise scope required).",
+    "No self-approval: an admin cannot approve/deny a request if the request.tutorid equals the same person acting as tutor in that session context (at minimum: prevent if session.accountType is not ADMIN).",
+    "start_at must be < end_at.",
+    "Duration must be > 0 and <= MAX_EXTRA_HOURS_PER_REQUEST_HOURS env (default 12).",
+    "description required (min 5 chars), trim + sanitize."
+  ],
+  "email_draft_behavior": {
+    "goal": "After creating a pending request, return an email draft payload for the tutor to send using either Gmail in browser or their default mail app.",
+    "center_recipient_source": "MSSQL dbo.tblFranchies.FranchiesEmail by franchiseId from session.",
+    "tutor_identity_source": "MSSQL dbo.tblTutors (FirstName, LastName, Email) by tutorId from session.",
+    "must_return_fields": [
+      "to",
+      "subject",
+      "bodyText",
+      "mailtoUrl",
+      "gmailComposeUrl",
+      "adminReviewUrl"
+    ],
+    "admin_review_url_format": "{APP_ORIGIN}/admin/extra-hours?franchiseId={franchiseId}&requestId={requestId}",
+    "gmail_compose_url_rules": [
+      "Base: https://mail.google.com/mail/",
+      "Query params: view=cm, fs=1, to, su, body",
+      "URL-encode all user content"
+    ],
+    "mailto_rules": [
+      "Format: mailto:{to}?subject={encoded}&body={encoded}",
+      "URL-encode subject/body",
+      "Keep body reasonably short; include requestId and adminReviewUrl"
+    ]
+  },
+  "audit_trail_requirements": [
+    "Every create/cancel/approve/deny must produce an append-only audit entry containing: requestId, action, actorAccountType, actorAccountId, at (timestamp), previousStatus, newStatus, metadata (franchiseId, tutorId, startAt, endAt, durationHours).",
+    "If an audit table exists already, use it. If not, log JSON lines to server logs as an MVP audit trail (do not change schema)."
+  ],
+  "required_endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/extrahours",
+      "auth": "tutor",
+      "body": {
+        "startAt": "ISO timestamp",
+        "endAt": "ISO timestamp",
+        "description": "string"
+      },
+      "behavior": [
+        "Derive tutorId and franchiseId from session; ignore any client-provided IDs.",
+        "Normalize to timestamptz; compute duration.",
+        "Insert into Postgres extrahours with status='pending', created_at=now(), created_by=session.accountId.",
+        "Write audit entry action='created'.",
+        "Fetch center email from MSSQL tblFranchies.FranchiesEmail by franchiseId.",
+        "Fetch tutor name/email from MSSQL tblTutors by tutorId.",
+        "Return created request plus emailDraft payload including gmailComposeUrl and mailtoUrl."
+      ],
+      "response": {
+        "status": 201,
+        "body": {
+          "request": {
+            "id": "number",
+            "franchiseId": "number",
+            "tutorId": "number",
+            "startAt": "ISO timestamptz",
+            "endAt": "ISO timestamptz",
+            "description": "string",
+            "status": "pending",
+            "createdAt": "ISO timestamptz"
+          },
+          "emailDraft": {
+            "to": "string",
+            "subject": "string",
+            "bodyText": "string",
+            "mailtoUrl": "string",
+            "gmailComposeUrl": "string",
+            "adminReviewUrl": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/extrahours/me",
+      "auth": "tutor",
+      "query_params": {
+        "status": "pending|approved|denied|cancelled (optional)",
+        "from": "ISO timestamptz (optional)",
+        "to": "ISO timestamptz (optional)"
+      },
+      "behavior": [
+        "List the tutor's own requests filtered by optional params.",
+        "Sort by start_at desc."
+      ],
+      "response": { "status": 200, "body": { "requests": "array" } }
+    },
+    {
+      "method": "POST",
+      "path": "/api/extrahours/{id}/cancel",
+      "auth": "tutor",
+      "behavior": [
+        "Tutor can cancel only their own request and only if status='pending'.",
+        "Update status='cancelled', decided_at=now(), decided_by=session.accountId, decision_reason='cancelled by tutor'.",
+        "Write audit entry action='cancelled'.",
+        "Return updated request."
+      ],
+      "response": { "status": 200, "body": { "request": "object" } }
+    },
+    {
+      "method": "GET",
+      "path": "/api/extrahours/admin/pending",
+      "auth": "admin",
+      "query_params": {
+        "franchiseId": "number (required)",
+        "limit": "number (optional, default 100)"
+      },
+      "behavior": [
+        "Return pending requests for the franchiseId.",
+        "Include tutor name/email via a single batched MSSQL lookup by tutor IDs (no per-row calls).",
+        "Sort by created_at asc."
+      ],
+      "response": { "status": 200, "body": { "requests": "array" } }
+    },
+    {
+      "method": "POST",
+      "path": "/api/extrahours/{id}/decide",
+      "auth": "admin",
+      "body": {
+        "decision": "approve|deny",
+        "reason": "string (optional; required if deny)"
+      },
+      "behavior": [
+        "Fetch request by id from Postgres.",
+        "Authorize: request.franchiseid must equal franchiseId provided by admin context (or query param if that is your existing convention).",
+        "Enforce no self-approval.",
+        "Only allow if status='pending'.",
+        "Update status to approved/denied; set decided_at=now(), decided_by=session.accountId, decision_reason=body.reason.",
+        "Write audit entry action='approved' or 'denied'.",
+        "Do NOT send submission emails from server (already handled by tutor draft).",
+        "Optionally send decision email if EMAIL_SEND_ENABLED=true and DECISION_EMAIL_ENABLED=true (if email plumbing exists); otherwise do nothing.",
+        "Return updated request."
+      ],
+      "response": { "status": 200, "body": { "request": "object" } }
+    }
+  ],
+  "acceptance_criteria": [
+    "Submission creates a pending request and returns emailDraft with gmailComposeUrl + mailtoUrl.",
+    "No server-sent submission email occurs.",
+    "Admin approves/denies only via dashboard endpoints.",
+    "No self-approval enforced.",
+    "Audit trail exists for every state change (append-only) without schema changes.",
+    "Admin pending list uses batched MSSQL lookup for tutor identities."
+  ]
+}
