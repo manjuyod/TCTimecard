@@ -19,14 +19,16 @@ dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
 
-try {
-  validateDbEnv();
-} catch (err) {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error('[startup] Database environment validation failed:', message);
-  process.exit(1);
+if (process.env.SKIP_DB_VALIDATION !== 'true') {
+  try {
+    validateDbEnv();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[startup] Database environment validation failed:', message);
+    console.error('[startup] Set SKIP_DB_VALIDATION=true to skip this check for development without databases.');
+    process.exit(1);
+  }
 }
 
 if (!process.env.SESSION_SECRET) {
@@ -40,7 +42,9 @@ app.set('trust proxy', 1);
 app.use(helmet());
 app.use(
   cors({
-    origin: CLIENT_ORIGIN,
+    origin: (origin, callback) => {
+      callback(null, true);
+    },
     credentials: true
   })
 );
