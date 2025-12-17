@@ -14,3 +14,6 @@ dist
 # OS/Editor
 .DS_Store
 Thumbs.db
+
+# Local Agentic Files
+AgentPrompts
