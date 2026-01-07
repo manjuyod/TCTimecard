@@ -131,7 +131,7 @@ export function TutorTimeOffPage(): JSX.Element {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Time Off</h1>
+          <h1 className="text-2xl font-semibold text-foreground">Time Off</h1>
           <p className="text-sm text-muted-foreground">
             Request time away and track approvals synced to Google Calendar.
           </p>

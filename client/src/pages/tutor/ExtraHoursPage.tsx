@@ -143,7 +143,7 @@ export function TutorExtraHoursPage(): JSX.Element {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Extra Hours</h1>
+          <h1 className="text-2xl font-semibold text-foreground">Extra Hours</h1>
           <p className="text-sm text-muted-foreground">
             Track overtime requests and submit new entries with email drafts.
           </p>

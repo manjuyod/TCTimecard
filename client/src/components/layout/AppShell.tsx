@@ -17,7 +17,7 @@ import Logo from '../Logo';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { cn } from '../../lib/utils';
-import { toast } from '../ui/toast';
+import { useTheme } from '../../theme/useTheme';
 
 export type AppRole = 'TUTOR' | 'ADMIN';
 
@@ -55,6 +55,8 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
   const [mobileOpen, setMobileOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
 
+  const { theme, toggleTheme } = useTheme();
+
   const activePath = location.pathname;
   const resolvedItems = useMemo(() => navItems ?? [], [navItems]);
 
@@ -71,8 +73,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
   const renderNavItems = () =>
     resolvedItems.map((item) => {
       const Icon = iconMap[item.icon] ?? LayoutDashboard;
-      const isActive =
-        activePath === item.path || (item.path !== '/' && activePath.startsWith(item.path));
+      const isActive = activePath === item.path || (item.path !== '/' && activePath.startsWith(item.path));
 
       return (
         <NavLink
@@ -83,14 +84,14 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
               'group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold transition-colors',
               navActive || isActive
                 ? 'bg-primary/10 text-primary'
-                : 'text-slate-600 hover:bg-muted hover:text-slate-900'
+                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
             )
           }
           onClick={() => setMobileOpen(false)}
         >
           <span
             className={cn(
-              'inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white shadow-sm',
+              'inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-card shadow-sm',
               isCollapsed ? 'mx-auto' : ''
             )}
           >
@@ -105,7 +106,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
     <div className="relative flex min-h-screen">
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-40 hidden h-full bg-white/90 shadow-lg ring-1 ring-border backdrop-blur-sm transition-all duration-200 md:flex',
+          'fixed inset-y-0 left-0 z-40 hidden h-full bg-card/90 shadow-lg ring-1 ring-border backdrop-blur-sm transition-all duration-200 md:flex',
           isCollapsed ? 'w-20' : 'w-64'
         )}
       >
@@ -117,7 +118,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
               </div>
               {!isCollapsed && (
                 <div>
-                  <p className="text-sm font-semibold text-slate-900 leading-4">Tutoring Club</p>
+                  <p className="text-sm font-semibold text-foreground leading-4">Tutoring Club</p>
                   <p className="text-xs text-muted-foreground leading-4">Time Tracking</p>
                 </div>
               )}
@@ -139,7 +140,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
             <p className="text-xs font-semibold text-muted-foreground">Signed in</p>
             {!isCollapsed && (
               <>
-                <p className="text-sm font-semibold text-slate-900">{userName || 'User'}</p>
+                <p className="text-sm font-semibold text-foreground">{userName || 'User'}</p>
                 <Badge variant="secondary" className="mt-1">
                   {roleLabel[role]}
                 </Badge>
@@ -155,7 +156,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
 
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-40 flex h-full w-72 flex-col gap-4 bg-white/95 p-4 shadow-xl ring-1 ring-border transition-transform duration-200 md:hidden',
+          'fixed inset-y-0 left-0 z-40 flex h-full w-72 flex-col gap-4 bg-card/95 p-4 shadow-xl ring-1 ring-border transition-transform duration-200 md:hidden',
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
@@ -163,7 +164,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
           <div className="flex items-center gap-3">
             <Logo className="h-9 w-auto" />
             <div>
-              <p className="text-sm font-semibold text-slate-900 leading-4">Tutoring Club</p>
+              <p className="text-sm font-semibold text-foreground leading-4">Tutoring Club</p>
               <p className="text-xs text-muted-foreground leading-4">Time Tracking</p>
             </div>
           </div>
@@ -175,7 +176,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
       </aside>
 
       <div className="flex min-h-screen flex-1 flex-col md:pl-20 lg:pl-64">
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b bg-white/80 px-4 backdrop-blur supports-[backdrop-filter]:bg-white/70 md:px-6">
+        <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b bg-card/80 px-4 backdrop-blur supports-[backdrop-filter]:bg-card/70 md:px-6">
           <div className="flex items-center gap-3">
             <Button
               variant="ghost"
@@ -188,23 +189,25 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
             </Button>
             <div className="flex items-center gap-2 rounded-full bg-muted/70 px-3 py-1">
               <Badge variant="secondary">{roleLabel[role]}</Badge>
-              <span className="text-sm font-semibold text-slate-800">{userName || 'User'}</span>
+              <span className="text-sm font-semibold text-foreground">{userName || 'User'}</span>
             </div>
           </div>
+
           <div className="flex items-center gap-2">
             <Button
               variant="ghost"
               size="icon"
-              title="Theme toggle placeholder"
-              onClick={() => toast('Dark mode coming soon. Light theme stays on for now.')}
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              onClick={toggleTheme}
             >
-              <Sun className="h-4 w-4" />
-              <span className="sr-only">Theme toggle</span>
+              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              <span className="sr-only">Toggle theme</span>
             </Button>
+
             <Button
               variant="ghost"
               size="icon"
-              className="text-slate-700"
+              className="text-muted-foreground hover:text-foreground"
               onClick={handleLogout}
               disabled={loggingOut}
             >
@@ -213,6 +216,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
             </Button>
           </div>
         </header>
+
         <main className="flex-1 px-4 py-6 md:px-6">
           <div className="mx-auto max-w-7xl">{children}</div>
         </main>

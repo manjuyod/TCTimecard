@@ -65,7 +65,7 @@ export function TutorDashboardPage(): JSX.Element {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Tutor Dashboard</h1>
+          <h1 className="text-2xl font-semibold text-foreground">Tutor Dashboard</h1>
           <p className="text-sm text-muted-foreground">Track your hours and stay ahead on requests.</p>
         </div>
         <div className="flex gap-2">
