@@ -26,7 +26,7 @@ export function StatusBadge({ status }: { status: RequestStatus }): JSX.Element 
       variant={variant}
       className={cn(
        
-        'text-foreground',
+        'text foreground',
         'ring-1 ring-border'
       )}
     >
