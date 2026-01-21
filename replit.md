@@ -1,7 +1,7 @@
 # Time Card App
 
 ## Overview
-A Vite + React (TypeScript) client and Express (TypeScript) API for tutoring franchises to track tutoring hours, submit extra hours, request time off, and process approvals. UI is Tailwind + shadcn/ui with FullCalendar.
+A Vite + React (TypeScript) client and Express (TypeScript) API for tutoring franchises to track manually entered tutoring hours, enforce approvals on any variance from scheduled blocks (zero tolerance), collect weekly attestations, request time off, and process approvals. UI is Tailwind + shadcn/ui with FullCalendar.
 
 ## Project Structure
 - `client/` - Vite React app (TSX) with React Router, Tailwind, shadcn/ui, FullCalendar
@@ -9,7 +9,7 @@ A Vite + React (TypeScript) client and Express (TypeScript) API for tutoring fra
 - `LegacyFormForStyle/` - legacy assets for branding tokens
 
 ## Development
-Run `npm run dev` to start both client (Vite on port 5000) and server (Express on port 3000) concurrently.
+Run `npm run dev` to start both client (Vite on port 5000) and server (Express on port 3000) concurrently. Manual time entry, approval requests on mismatches, and weekly attestation are the current focus (the old extra-hours page is removed; requests are surfaced inline in the dashboard/calendar flows).
 
 The Vite dev server proxies `/api` requests to the Express backend.
 

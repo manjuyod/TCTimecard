@@ -5,18 +5,17 @@ import { SelectAccountPage } from './pages/auth/SelectAccountPage';
 import { TimeoutPage } from './pages/auth/TimeoutPage';
 import { TutorDashboardPage } from './pages/tutor/Dashboard';
 import { TutorCalendarPage } from './pages/tutor/CalendarPage';
-import { TutorExtraHoursPage } from './pages/tutor/ExtraHoursPage';
 import { TutorTimeOffPage } from './pages/tutor/TimeOffPage';
 import { AdminDashboardPage } from './pages/admin/Dashboard';
 import { ApprovalsPage } from './pages/admin/ApprovalsPage';
 import { PayPeriodSummaryPage } from './pages/admin/PayPeriodSummaryPage';
 import { AppShell, NavItem } from './components/layout/AppShell';
+import { WeeklyAttestationGate } from './components/tutor/WeeklyAttestationGate';
 import { useAuth } from './providers/AuthProvider';
 
 const tutorNav: NavItem[] = [
   { label: 'Dashboard', path: '/tutor/dashboard', icon: 'LayoutDashboard' },
-  { label: 'Calendar', path: '/tutor/calendar', icon: 'Calendar' },
-  { label: 'Extra Hours', path: '/tutor/extra-hours', icon: 'Clock' },
+  { label: 'Time Entry', path: '/tutor/calendar', icon: 'Calendar' },
   { label: 'Time Off', path: '/tutor/time-off', icon: 'Umbrella' }
 ];
 
@@ -30,6 +29,7 @@ function TutorLayout(): JSX.Element {
   const { session, logout } = useAuth();
   return (
     <AppShell navItems={tutorNav} role="TUTOR" userName={session?.displayName ?? null} onLogout={logout}>
+      <WeeklyAttestationGate />
       <Outlet />
     </AppShell>
   );
@@ -59,7 +59,7 @@ function App(): JSX.Element {
           <Route element={<TutorLayout />}>
             <Route path="/tutor/dashboard" element={<TutorDashboardPage />} />
             <Route path="/tutor/calendar" element={<TutorCalendarPage />} />
-            <Route path="/tutor/extra-hours" element={<TutorExtraHoursPage />} />
+            <Route path="/tutor/extra-hours" element={<Navigate to="/tutor/calendar" replace />} />
             <Route path="/tutor/time-off" element={<TutorTimeOffPage />} />
           </Route>
         </Route>

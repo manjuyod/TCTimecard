@@ -1,10 +1,10 @@
 # Time Card App
 
-A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring franchises to track tutoring hours, submit extra hours, request time off, and process approvals. UI is Tailwind + shadcn/ui with FullCalendar, and legacy branding tokens are applied globally.
+A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring franchises to track manually entered tutoring hours, enforce approvals on any variance from the scheduled blocks, collect weekly attestations, request time off, and process approvals. UI is Tailwind + shadcn/ui with FullCalendar, and legacy branding tokens are applied globally.
 
-## What’s included
-- Tutor: dashboard hour totals (week / pay period / month), calendar view (schedule + time off overlay), submit/cancel extra hours, submit/cancel time off.
-- Admin: approvals inbox (extra hours + time off), current pay period display, pay period summary table (copy/export CSV).
+## What's included
+- Tutor: dashboard hour totals (week / pay period / month), calendar view (schedule + time off overlay), manual entry of arrival/departure (supporting break splits) with automatic approval requests on any mismatch to scheduled hours, weekly attestation (hard-blocking next-week entry until signed), submit/cancel time off.
+- Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary table (copy/export CSV) driven by approved manual entries.
 - Auth: MSSQL-backed login with optional multi-account selection; cookie sessions (rolling 15 minutes).
 - Data: tutoring schedule + tutor/franchise identity from MSSQL; requests + payroll config from Postgres.
 
@@ -32,7 +32,7 @@ Public:
 - `/login`, `/select-account`, `/timeout`
 
 Tutor:
-- `/tutor/dashboard`, `/tutor/calendar`, `/tutor/extra-hours`, `/tutor/time-off`
+- `/tutor/dashboard`, `/tutor/calendar`, `/tutor/time-off` (manual time entry and variance requests live in the dashboard/calendar; the old extra-hours page is removed)
 
 Admin:
 - `/admin/dashboard`, `/admin/approvals`, `/admin/pay-period-summary`
@@ -56,13 +56,20 @@ Tutor hours + calendar:
 - `GET /api/hours/me/pay-period`
 - `GET /api/hours/me/monthly?month=YYYY-MM`
 - `GET /api/calendar/me/month?month=YYYY-MM`
+- `GET /api/calendar/me/day/:workDate/snapshot`
 
-Extra hours:
-- `POST /api/extrahours`
-- `GET /api/extrahours/me`
-- `POST /api/extrahours/:id/cancel`
-- `GET /api/extrahours/admin/pending?franchiseId=...&limit=...`
-- `POST /api/extrahours/:id/decide`
+Manual time entry + approvals:
+- `PUT /api/time-entry/me/day/:workDate` (save sessions draft; multiple sessions per day allowed)
+- `GET /api/time-entry/me?start=YYYY-MM-DD&end=YYYY-MM-DD`
+- `POST /api/time-entry/me/day/:workDate/submit` (requires `scheduleSnapshot` from the calendar API (month/day snapshot endpoints); zero-tolerance match auto-approves, otherwise pending)
+- `GET /api/time-entry/admin/pending?franchiseId=...&limit=...`
+- `POST /api/time-entry/admin/day/:id/decide` (body: `decision=approve|deny`, optional `reason`)
+- `PUT /api/time-entry/admin/day/:id` (admin edits/overrides; resets to pending)
+
+Weekly attestation:
+- `GET /api/attestation/me/status` (last closed workweek)
+- `GET /api/attestation/me/reminder` (blocking flag + missing `weekEnd`)
+- `POST /api/attestation/me/sign` (body: `typedName`)
 
 Time off:
 - `POST /api/timeoff`
@@ -98,6 +105,10 @@ MSSQL (required)
 Payroll / pay period resolution
 - `BIWEEKLY_ANCHOR_DATE` (optional, default `2024-01-01`) - anchor date for computed biweekly periods.
 
+Manual entry + approvals
+- `SCHEDULE_SNAPSHOT_SIGNING_SECRET` (optional) - when set, calendar responses include signed schedule snapshots and manual entry submission requires a valid signature.
+- `SCHEDULE_SLOT_MINUTES` (optional, default `60`) - minutes per schedule slot when deriving schedule intervals from `TimeLabel`.
+
 Feature flags / guardrails
 - `MAX_EXTRA_HOURS_PER_REQUEST_HOURS` (or `MAX_EXTRA_HOURS_PER_REQUEST`) - max hours per extra-hours request (default `12`).
 - `MAX_TIME_OFF_DURATION_HOURS` (or `MAX_TIME_OFF_DURATION`) - max hours per time-off request (default `336`).
@@ -121,6 +132,14 @@ This repo expects these Postgres tables to exist (DDL is captured in `AgentPromp
 - `public.franchise_pay_period_overrides`
 - `public.time_off_requests`
 - `public.time_off_audit`
+- `public.time_entry_days`
+- `public.time_entry_sessions`
+- `public.time_entry_audit`
+- `public.weekly_attestations`
+
+### Postgres migrations
+- Run: `npm run db:migrate`
+- Migration SQL lives in `server/db/migrations/` and is tracked in `public.schema_migrations`.
 
 MSSQL tables/fields referenced by the API:
 - `dbo.tblSessionSchedule` + `dbo.tblTimes` (tutoring calendar and hour aggregation)

@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
+import { DateTime } from 'luxon';
 import {
   ExtraHoursRequest,
+  TimeEntryDay,
   TimeOffRequest,
+  decideTimeEntryDay,
   decideExtraHours,
   decideTimeOff,
   fetchAdminPendingExtraHours,
+  fetchAdminPendingTimeEntries,
   fetchAdminPendingTimeOff
 } from '../../lib/api';
 import { useAuth } from '../../providers/AuthProvider';
@@ -33,13 +37,45 @@ import { Textarea } from '../../components/ui/textarea';
 
 type DenyContext =
   | { type: 'extra'; request: ExtraHoursRequest }
-  | { type: 'timeoff'; request: TimeOffRequest };
+  | { type: 'timeoff'; request: TimeOffRequest }
+  | { type: 'timeentry'; day: TimeEntryDay };
+
+const toComparisonTotals = (
+  day: TimeEntryDay
+): { manualMinutes: number | null; scheduledMinutes: number | null; matches: boolean | null } => {
+  if (!day.comparison || typeof day.comparison !== 'object') return { manualMinutes: null, scheduledMinutes: null, matches: null };
+  const comparison = day.comparison as Record<string, unknown>;
+  const matches = typeof comparison.matches === 'boolean' ? (comparison.matches as boolean) : null;
+
+  const manual = comparison.manual && typeof comparison.manual === 'object' ? (comparison.manual as Record<string, unknown>) : null;
+  const scheduled = comparison.scheduled && typeof comparison.scheduled === 'object' ? (comparison.scheduled as Record<string, unknown>) : null;
+
+  const manualMinutes = manual && typeof manual.totalMinutes === 'number' ? (manual.totalMinutes as number) : null;
+  const scheduledMinutes = scheduled && typeof scheduled.totalMinutes === 'number' ? (scheduled.totalMinutes as number) : null;
+  return { manualMinutes, scheduledMinutes, matches };
+};
+
+const parseSnapshotIntervals = (snapshot: unknown): Array<{ startAt: string; endAt: string }> => {
+  if (!snapshot || typeof snapshot !== 'object') return [];
+  const record = snapshot as Record<string, unknown>;
+  const intervalsRaw = record.intervals;
+  if (!Array.isArray(intervalsRaw)) return [];
+  return intervalsRaw
+    .map((raw) => {
+      if (!raw || typeof raw !== 'object') return null;
+      const r = raw as Record<string, unknown>;
+      const startAt = typeof r.startAt === 'string' ? r.startAt : '';
+      const endAt = typeof r.endAt === 'string' ? r.endAt : '';
+      return startAt && endAt ? { startAt, endAt } : null;
+    })
+    .filter(Boolean) as Array<{ startAt: string; endAt: string }>;
+};
 
 export function ApprovalsPage(): JSX.Element {
   const { session } = useAuth();
   const sessionFranchiseId = getSessionFranchiseId(session);
   const selectorAllowed = isSelectorAllowed(session);
-  const [activeTab, setActiveTab] = useState<'extra' | 'timeoff'>('extra');
+  const [activeTab, setActiveTab] = useState<'extra' | 'timeoff' | 'timeentry'>('timeentry');
   const [franchiseInput, setFranchiseInput] = useState<string>(
     sessionFranchiseId !== null ? String(sessionFranchiseId) : ''
   );
@@ -48,12 +84,15 @@ export function ApprovalsPage(): JSX.Element {
     Array<ExtraHoursRequest & { tutorName?: string; tutorEmail?: string; tutorId?: number }>
   >([]);
   const [timeOffRequests, setTimeOffRequests] = useState<TimeOffRequest[]>([]);
+  const [timeEntryDays, setTimeEntryDays] = useState<TimeEntryDay[]>([]);
   const [loadingExtra, setLoadingExtra] = useState(false);
   const [loadingTimeOff, setLoadingTimeOff] = useState(false);
+  const [loadingTimeEntry, setLoadingTimeEntry] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [denyDialog, setDenyDialog] = useState<DenyContext | null>(null);
   const [denyReason, setDenyReason] = useState('');
   const [actingId, setActingId] = useState<number | null>(null);
+  const [selectedDay, setSelectedDay] = useState<TimeEntryDay | null>(null);
 
   useEffect(() => {
     if (!selectorAllowed) {
@@ -118,10 +157,26 @@ export function ApprovalsPage(): JSX.Element {
     }
   };
 
+  const loadTimeEntries = async (id: number) => {
+    setLoadingTimeEntry(true);
+    setError(null);
+    try {
+      const data = await fetchAdminPendingTimeEntries({ franchiseId: id, limit: 500 });
+      setTimeEntryDays(data);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to load time entry variances';
+      setError(message);
+      toast.error(message);
+    } finally {
+      setLoadingTimeEntry(false);
+    }
+  };
+
   useEffect(() => {
     if (franchiseId !== null) {
       void loadExtra(franchiseId);
       void loadTimeOff(franchiseId);
+      void loadTimeEntries(franchiseId);
     }
   }, [franchiseId]);
 
@@ -157,7 +212,9 @@ export function ApprovalsPage(): JSX.Element {
       return;
     }
 
-    setActingId(denyDialog.type === 'extra' ? denyDialog.request.id : denyDialog.request.id);
+    setActingId(
+      denyDialog.type === 'extra' ? denyDialog.request.id : denyDialog.type === 'timeoff' ? denyDialog.request.id : denyDialog.day.id
+    );
     try {
       const targetFranchiseId = franchiseId ?? sessionFranchiseId;
       if (targetFranchiseId === null) {
@@ -173,7 +230,7 @@ export function ApprovalsPage(): JSX.Element {
           franchiseId: targetFranchiseId
         });
         setExtraRequests((prev) => prev.filter((item) => item.id !== denyDialog.request.id));
-      } else {
+      } else if (denyDialog.type === 'timeoff') {
         await decideTimeOff({
           id: denyDialog.request.id,
           decision: 'deny',
@@ -181,6 +238,15 @@ export function ApprovalsPage(): JSX.Element {
           franchiseId: targetFranchiseId
         });
         setTimeOffRequests((prev) => prev.filter((item) => item.id !== denyDialog.request.id));
+      } else {
+        await decideTimeEntryDay({
+          id: denyDialog.day.id,
+          decision: 'deny',
+          reason: denyReason.trim(),
+          franchiseId: targetFranchiseId
+        });
+        setTimeEntryDays((prev) => prev.filter((item) => item.id !== denyDialog.day.id));
+        setSelectedDay((prev) => (prev?.id === denyDialog.day.id ? null : prev));
       }
       toast.success('Request denied');
       setDenyDialog(null);
@@ -215,6 +281,32 @@ export function ApprovalsPage(): JSX.Element {
       toast.success('Time off approved');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to approve request';
+      toast.error(message);
+    } finally {
+      setActingId(null);
+    }
+  };
+
+  const handleApproveTimeEntry = async (day: TimeEntryDay) => {
+    if (franchiseId === null && sessionFranchiseId === null) {
+      toast.error('Franchise ID required');
+      return;
+    }
+
+    setActingId(day.id);
+    try {
+      const targetFranchiseId = franchiseId ?? sessionFranchiseId;
+      if (targetFranchiseId === null) {
+        toast.error('Franchise ID required');
+        return;
+      }
+
+      await decideTimeEntryDay({ id: day.id, decision: 'approve', franchiseId: targetFranchiseId });
+      setTimeEntryDays((prev) => prev.filter((item) => item.id !== day.id));
+      setSelectedDay((prev) => (prev?.id === day.id ? null : prev));
+      toast.success('Time entry approved');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to approve time entry';
       toast.error(message);
     } finally {
       setActingId(null);
@@ -345,6 +437,91 @@ export function ApprovalsPage(): JSX.Element {
     );
   }, [actingId, loadingTimeOff, timeOffRequests]);
 
+  const timeEntryContent = useMemo(() => {
+    if (loadingTimeEntry) {
+      return <p className="text-sm text-muted-foreground">Loading pending time entry variances...</p>;
+    }
+    if (!timeEntryDays.length) {
+      return <EmptyState title="No pending time entries" description="All time entry variances have been reviewed." />;
+    }
+
+    return (
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Tutor</TableHead>
+            <TableHead>Work Date</TableHead>
+            <TableHead>Delta</TableHead>
+            <TableHead>Flags</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {timeEntryDays.map((day) => {
+            const totals = toComparisonTotals(day);
+            const delta =
+              totals.manualMinutes !== null && totals.scheduledMinutes !== null
+                ? totals.manualMinutes - totals.scheduledMinutes
+                : null;
+            const editedAfterApproval = Boolean(day.history?.wasEverApproved);
+
+            return (
+              <TableRow key={day.id}>
+                <TableCell>
+                  <p className="font-semibold text-slate-900">{day.tutorName || `Tutor #${day.tutorId}`}</p>
+                  <p className="text-xs text-muted-foreground">{day.tutorEmail || 'Email unavailable'}</p>
+                </TableCell>
+                <TableCell>
+                  <p className="text-sm font-semibold">{day.workDate}</p>
+                  <p className="text-xs text-muted-foreground">{day.submittedAt ? formatDateTime(day.submittedAt) : ''}</p>
+                </TableCell>
+                <TableCell>
+                  {delta === null ? (
+                    <Badge variant="muted">n/a</Badge>
+                  ) : (
+                    <Badge variant={delta === 0 ? 'success' : delta > 0 ? 'warning' : 'secondary'}>
+                      {delta > 0 ? '+' : ''}
+                      {delta} min
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <div className="flex flex-wrap gap-2">
+                    {editedAfterApproval ? <Badge variant="warning">Edited after approval</Badge> : null}
+                    {day.history?.lastAudit?.action ? (
+                      <Badge variant="muted">Last: {day.history.lastAudit.action}</Badge>
+                    ) : null}
+                  </div>
+                </TableCell>
+                <TableCell className="text-right">
+                  <div className="flex justify-end gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setSelectedDay(day)}>
+                      Review
+                    </Button>
+                    <Button size="sm" onClick={() => void handleApproveTimeEntry(day)} disabled={actingId === day.id}>
+                      Approve
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setDenyDialog({ type: 'timeentry', day });
+                        setDenyReason('');
+                      }}
+                      disabled={actingId === day.id}
+                    >
+                      Deny
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    );
+  }, [actingId, loadingTimeEntry, timeEntryDays]);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -359,6 +536,7 @@ export function ApprovalsPage(): JSX.Element {
             if (targetId !== null) {
               void loadExtra(targetId);
               void loadTimeOff(targetId);
+              void loadTimeEntries(targetId);
             }
           }}
         >
@@ -395,9 +573,10 @@ export function ApprovalsPage(): JSX.Element {
         </Card>
       ) : null}
 
-      <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val as 'extra' | 'timeoff')}>
+      <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val as 'extra' | 'timeoff' | 'timeentry')}>
         <TabsList>
           <TabsTrigger value="extra">Extra Hours</TabsTrigger>
+          <TabsTrigger value="timeentry">Time Entry Variances</TabsTrigger>
           <TabsTrigger value="timeoff">Time Off</TabsTrigger>
         </TabsList>
 
@@ -411,6 +590,19 @@ export function ApprovalsPage(): JSX.Element {
               <StatusBadge status="pending" />
             </CardHeader>
             <CardContent>{extraContent}</CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="timeentry" className="mt-4">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between gap-2">
+              <div>
+                <CardTitle>Time Entry Variances</CardTitle>
+                <CardDescription>Review and approve or deny mismatched manual time entries.</CardDescription>
+              </div>
+              <StatusBadge status="pending" />
+            </CardHeader>
+            <CardContent>{timeEntryContent}</CardContent>
           </Card>
         </TabsContent>
 
@@ -448,6 +640,123 @@ export function ApprovalsPage(): JSX.Element {
               Submit denial
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(selectedDay)} onOpenChange={(open) => !open && setSelectedDay(null)}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          {selectedDay ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Time Entry Variance – {selectedDay.workDate}</DialogTitle>
+                <DialogDescription>
+                  {selectedDay.tutorName || `Tutor #${selectedDay.tutorId}`} · {selectedDay.tutorEmail || 'Email unavailable'}
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-4 text-sm">
+                <div className="flex flex-wrap gap-2">
+                  {selectedDay.history?.wasEverApproved ? <Badge variant="warning">Edited after approval</Badge> : null}
+                  {selectedDay.history?.lastAudit?.action ? (
+                    <Badge variant="muted">
+                      Last audit: {selectedDay.history.lastAudit.action} ·{' '}
+                      {DateTime.fromISO(selectedDay.history.lastAudit.at).toFormat('MMM d, h:mm a')}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                <div className="rounded-lg border bg-white p-4">
+                  <p className="font-semibold text-slate-900">Variance totals</p>
+                  {(() => {
+                    const totals = toComparisonTotals(selectedDay);
+                    const delta =
+                      totals.manualMinutes !== null && totals.scheduledMinutes !== null
+                        ? totals.manualMinutes - totals.scheduledMinutes
+                        : null;
+                    return (
+                      <div className="mt-2 grid gap-2 md:grid-cols-4">
+                        <div>
+                          <p className="text-xs text-muted-foreground">Scheduled</p>
+                          <p className="font-semibold text-slate-900">
+                            {totals.scheduledMinutes !== null ? `${totals.scheduledMinutes} min` : 'n/a'}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Entered</p>
+                          <p className="font-semibold text-slate-900">
+                            {totals.manualMinutes !== null ? `${totals.manualMinutes} min` : 'n/a'}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Delta</p>
+                          <p className="font-semibold text-slate-900">{delta !== null ? `${delta} min` : 'n/a'}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Exact match</p>
+                          <p className="font-semibold text-slate-900">
+                            {totals.matches === null ? 'n/a' : totals.matches ? 'Yes' : 'No'}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-lg border bg-white p-4">
+                    <p className="font-semibold text-slate-900">Scheduled blocks</p>
+                    <div className="mt-2 space-y-2">
+                      {parseSnapshotIntervals(selectedDay.scheduleSnapshot).length ? (
+                        parseSnapshotIntervals(selectedDay.scheduleSnapshot).map((i) => (
+                          <Badge key={`${i.startAt}-${i.endAt}`} variant="secondary">
+                            {DateTime.fromISO(i.startAt, { setZone: true }).setZone(selectedDay.timezone).toFormat('h:mm a')} -{' '}
+                            {DateTime.fromISO(i.endAt, { setZone: true }).setZone(selectedDay.timezone).toFormat('h:mm a')}
+                          </Badge>
+                        ))
+                      ) : (
+                        <p className="text-xs text-muted-foreground">No schedule snapshot available.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border bg-white p-4">
+                    <p className="font-semibold text-slate-900">Entered sessions</p>
+                    <div className="mt-2 space-y-2">
+                      {selectedDay.sessions?.length ? (
+                        selectedDay.sessions.map((s) => (
+                          <Badge key={`${s.startAt}-${s.endAt}-${s.sortOrder}`} variant="muted">
+                            {DateTime.fromISO(s.startAt, { setZone: true }).setZone(selectedDay.timezone).toFormat('h:mm a')} -{' '}
+                            {DateTime.fromISO(s.endAt, { setZone: true }).setZone(selectedDay.timezone).toFormat('h:mm a')}
+                          </Badge>
+                        ))
+                      ) : (
+                        <p className="text-xs text-muted-foreground">No sessions found.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button variant="outline" onClick={() => setSelectedDay(null)}>
+                    Close
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setDenyDialog({ type: 'timeentry', day: selectedDay });
+                      setDenyReason('');
+                    }}
+                    disabled={actingId === selectedDay.id}
+                  >
+                    Deny
+                  </Button>
+                  <Button onClick={() => void handleApproveTimeEntry(selectedDay)} disabled={actingId === selectedDay.id}>
+                    Approve
+                  </Button>
+                </div>
+              </div>
+            </>
+          ) : null}
         </DialogContent>
       </Dialog>
     </div>

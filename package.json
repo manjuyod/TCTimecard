@@ -10,6 +10,7 @@
     "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
     "dev:client": "npm run dev --prefix client",
     "dev:server": "cross-env NODE_ENV=development tsx watch --tsconfig server/tsconfig.json server/index.ts",
+    "db:migrate": "tsx --tsconfig server/tsconfig.json server/db/migrate.ts",
     "build": "npm run build:client && npm run build:server",
     "build:client": "npm run build --prefix client",
     "build:server": "tsc -p server/tsconfig.json",
