@@ -93,6 +93,72 @@ export interface CalendarEntry {
   timeLabel: string;
 }
 
+export type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
+
+export interface TimeEntrySession {
+  startAt: string;
+  endAt: string;
+  sortOrder: number;
+}
+
+export interface TimeEntryHistoryAudit {
+  action: string;
+  actorAccountType: string;
+  actorAccountId: number | null;
+  at: string;
+  previousStatus: string | null;
+  newStatus: string;
+}
+
+export interface TimeEntryHistory {
+  wasEverApproved: boolean;
+  lastAudit: TimeEntryHistoryAudit | null;
+}
+
+export interface TimeEntryDay {
+  id: number;
+  franchiseId: number;
+  tutorId: number;
+  workDate: string;
+  timezone: string;
+  status: TimeEntryStatus;
+  scheduleSnapshot: unknown | null;
+  comparison: unknown | null;
+  submittedAt: string | null;
+  decidedBy: number | null;
+  decidedAt: string | null;
+  decisionReason: string | null;
+  sessions: TimeEntrySession[];
+  tutorName?: string | null;
+  tutorEmail?: string | null;
+  history?: TimeEntryHistory;
+}
+
+export interface WeeklyAttestationStatus {
+  timezone: string;
+  weekStart: string;
+  weekEnd: string;
+  signed: boolean;
+  signedAt: string | null;
+  typedName: string | null;
+  attestationText: string;
+  attestationTextVersion: string;
+  copy: {
+    workweekDefinition: string;
+    timekeepingQuotes: string[];
+    attestationQuote: string;
+    weeklyAttestationStatement: string;
+  };
+}
+
+export interface WeeklyAttestationReminder {
+  timezone: string;
+  missingWeekEnd: string | null;
+  weekStart: string;
+  weekEnd: string;
+  blocking: boolean;
+}
+
 const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, {
     credentials: 'include',
@@ -180,9 +246,16 @@ export const fetchMonthlyHours = async (month?: string): Promise<HoursSummary> =
 
 export const fetchTutorCalendar = async (month?: string) => {
   const query = month ? `?month=${encodeURIComponent(month)}` : '';
-  return apiFetch<{ range: { month: string; startDate: string; endDate: string; timezone: string }; entries: CalendarEntry[] }>(
-    `/api/calendar/me/month${query}`
-  );
+  return apiFetch<{
+    range: { month: string; startDate: string; endDate: string; timezone: string };
+    entries: CalendarEntry[];
+    snapshotsByDate?: Record<string, unknown>;
+  }>(`/api/calendar/me/month${query}`);
+};
+
+export const fetchTutorScheduleSnapshot = async (workDate: string): Promise<unknown> => {
+  const result = await apiFetch<{ snapshot: unknown }>(`/api/calendar/me/day/${encodeURIComponent(workDate)}/snapshot`);
+  return result.snapshot;
 };
 
 export const fetchExtraHours = async (): Promise<ExtraHoursRequest[]> => {
@@ -313,3 +386,73 @@ export interface AdminSummaryRow {
   extraHours: number;
   totalHours: number;
 }
+
+export const fetchTimeEntries = async (args: { start: string; end: string; limit?: number }) => {
+  const params = new URLSearchParams({ start: args.start, end: args.end });
+  if (args.limit) params.set('limit', String(args.limit));
+  const result = await apiFetch<{ days: TimeEntryDay[] }>(`/api/time-entry/me?${params.toString()}`);
+  return result.days ?? [];
+};
+
+export const saveTimeEntryDay = async (args: { workDate: string; sessions: Array<{ startAt: string; endAt: string }> }) => {
+  const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/me/day/${encodeURIComponent(args.workDate)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ sessions: args.sessions })
+  });
+  return result.day;
+};
+
+export const submitTimeEntryDay = async (args: { workDate: string; scheduleSnapshot: unknown }) => {
+  const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/me/day/${encodeURIComponent(args.workDate)}/submit`, {
+    method: 'POST',
+    body: JSON.stringify({ scheduleSnapshot: args.scheduleSnapshot })
+  });
+  return result.day;
+};
+
+export const fetchAdminPendingTimeEntries = async (args: { franchiseId: number; limit?: number }) => {
+  const params = new URLSearchParams({ franchiseId: String(args.franchiseId) });
+  if (args.limit) params.set('limit', String(args.limit));
+  const result = await apiFetch<{ days: TimeEntryDay[] }>(`/api/time-entry/admin/pending?${params.toString()}`);
+  return result.days ?? [];
+};
+
+export const decideTimeEntryDay = async (args: {
+  franchiseId: number;
+  id: number;
+  decision: 'approve' | 'deny';
+  reason?: string | null;
+}) => {
+  const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/admin/day/${args.id}/decide`, {
+    method: 'POST',
+    body: JSON.stringify({ decision: args.decision, reason: args.reason ?? '' , franchiseId: args.franchiseId })
+  });
+  return result.day;
+};
+
+export const adminEditTimeEntryDay = async (args: {
+  franchiseId: number;
+  id: number;
+  sessions: Array<{ startAt: string; endAt: string }>;
+}) => {
+  const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/admin/day/${args.id}?franchiseId=${args.franchiseId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ sessions: args.sessions })
+  });
+  return result.day;
+};
+
+export const fetchWeeklyAttestationStatus = async (): Promise<WeeklyAttestationStatus> => {
+  return apiFetch<WeeklyAttestationStatus>('/api/attestation/me/status');
+};
+
+export const fetchWeeklyAttestationReminder = async (): Promise<WeeklyAttestationReminder> => {
+  return apiFetch<WeeklyAttestationReminder>('/api/attestation/me/reminder');
+};
+
+export const signWeeklyAttestation = async (typedName?: string): Promise<WeeklyAttestationStatus> => {
+  return apiFetch<WeeklyAttestationStatus>('/api/attestation/me/sign', {
+    method: 'POST',
+    body: JSON.stringify({ typedName })
+  });
+};
