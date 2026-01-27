@@ -131,7 +131,7 @@ export function TutorTimeOffPage(): JSX.Element {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Time Off</h1>
+          <h1 className="text-2xl font-semibold text-foreground">Time Off</h1>
           <p className="text-sm text-muted-foreground">
             Request time away and track approvals synced to Google Calendar.
           </p>
@@ -203,12 +203,12 @@ export function TutorTimeOffPage(): JSX.Element {
                       <p className="mt-1 text-sm font-semibold text-slate-900">
                         {formatDateRange(request.startAt, request.endAt)}
                       </p>
-                      <p className="text-sm text-muted-foreground">
+                      <p className="text-sm  text-slate-900">
                         Duration: {hoursBetween(request.startAt, request.endAt).toFixed(2)} hours
                       </p>
-                      {request.notes ? <p className="mt-2 text-sm text-slate-800">{request.notes}</p> : null}
+                      {request.notes ? <p className="mt-2 text-sm  text-slate-900">{request.notes}</p> : null}
                       {request.decisionReason ? (
-                        <p className="mt-1 text-xs text-muted-foreground">Decision: {request.decisionReason}</p>
+                        <p className="mt-1 text-sm  text-slate-400">Decision: {request.decisionReason}</p>
                       ) : null}
                       {request.googleCalendarEventId ? (
                         <p className="mt-1 text-xs text-muted-foreground">

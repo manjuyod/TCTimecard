@@ -4,6 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Time Card App</title>
+
+    <!-- Prevent theme flash: set dark class before CSS/React loads -->
+    <script>
+      (function () {
+        try {
+          var key = "theme";
+          var saved = localStorage.getItem(key);
+          var prefersDark =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+          var theme =
+            saved === "dark" || saved === "light"
+              ? saved
+              : prefersDark
+              ? "dark"
+              : "light";
+
+          if (theme === "dark") document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
