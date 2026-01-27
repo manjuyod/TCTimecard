@@ -3,31 +3,79 @@
 @tailwind utilities;
 
 @layer base {
+  /* =========================
+     LIGHT THEME (DEFAULT)
+     ========================= */
   :root {
     --background: 210 33% 98%;
     --foreground: 210 29% 18%;
+
     --muted: 210 25% 95%;
     --muted-foreground: 215 15% 45%;
+
     --popover: 0 0% 100%;
     --popover-foreground: 210 29% 18%;
+
     --card: 0 0% 100%;
     --card-foreground: 210 29% 18%;
+
     --border: 210 20% 88%;
     --input: 210 20% 88%;
+
     --primary: 212 43% 50%;
     --primary-foreground: 0 0% 100%;
+
     --secondary: 20 100% 53%;
     --secondary-foreground: 0 0% 100%;
+
     --accent: 203 27% 88%;
     --accent-foreground: 210 29% 20%;
+
     --destructive: 0 72% 50%;
     --destructive-foreground: 0 0% 98%;
+
     --ring: 212 43% 50%;
     --radius: 12px;
+
+    /* Brand colors */
     --brand-cream: #c9d7e0;
     --brand-blue: #487cb6;
     --brand-orange: #ff5f0e;
     --brand-navy: #2c3e50;
+  }
+
+  /* =========================
+     DARK THEME
+     ========================= */
+  .dark {
+    --background: 220 18% 10%;
+    --foreground: 210 20% 96%;
+
+    --muted: 220 16% 16%;
+    --muted-foreground: 215 15% 70%;
+
+    --popover: 220 18% 12%;
+    --popover-foreground: 210 20% 96%;
+
+    --card: 220 18% 12%;
+    --card-foreground: 210 20% 96%;
+
+    --border: 220 14% 22%;
+    --input: 220 14% 22%;
+
+    --primary: 212 43% 60%;
+    --primary-foreground: 220 18% 10%;
+
+    --secondary: 20 100% 60%;
+    --secondary-foreground: 220 18% 10%;
+
+    --accent: 220 14% 18%;
+    --accent-foreground: 210 20% 96%;
+
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 210 20% 96%;
+
+    --ring: 212 43% 60%;
   }
 
   * {
@@ -37,9 +85,18 @@
   body {
     @apply bg-background text-foreground antialiased;
     font-family: 'Segoe UI', system-ui, -apple-system, 'Inter', sans-serif;
+
+    /* Light background */
     background: radial-gradient(circle at 10% 20%, rgba(72, 124, 182, 0.12), transparent 22%),
       radial-gradient(circle at 80% 0%, rgba(255, 95, 14, 0.12), transparent 30%),
       linear-gradient(180deg, #f7f9fb 0%, #f0f4f8 40%, var(--brand-cream) 100%);
+  }
+
+  .dark body {
+    /* Dark background */
+    background: radial-gradient(circle at 10% 20%, rgba(72, 124, 182, 0.18), transparent 28%),
+      radial-gradient(circle at 80% 0%, rgba(255, 95, 14, 0.12), transparent 34%),
+      linear-gradient(180deg, #0b1220 0%, #0b1220 40%, #0a0f1a 100%);
   }
 
   h1,
@@ -49,7 +106,7 @@
   h5,
   h6 {
     font-family: 'Segoe UI', 'Inter', system-ui, sans-serif;
-    @apply text-slate-900;
+    @apply text-foreground;
   }
 
   a {
@@ -57,19 +114,23 @@
   }
 
   ::selection {
-    background-color: rgba(72, 124, 182, 0.15);
+    background-color: rgba(72, 124, 182, 0.25);
   }
 }
 
 @layer components {
   .glass-panel {
-    @apply rounded-xl bg-white/80 shadow-lg ring-1 ring-border backdrop-blur-sm;
+    @apply rounded-xl bg-card/80 text-card-foreground shadow-lg ring-1 ring-border backdrop-blur-sm;
   }
 
   .page-grid {
     @apply grid gap-4 md:gap-6;
   }
 }
+
+/* =========================
+   FULLCALENDAR STYLES
+   ========================= */
 
 .fc .fc-event {
   border-radius: 10px;
@@ -78,32 +139,49 @@
   font-weight: 600;
 }
 
+/* Scheduled sessions */
 .fc .fc-event.fc-event-schedule {
   background-color: rgba(72, 124, 182, 0.15);
   border-color: #487cb6;
   color: #1d4c7d;
 }
 
+.dark .fc .fc-event.fc-event-schedule {
+  background-color: rgba(72, 124, 182, 0.25);
+  border-color: #487cb6;
+  color: #dbeafe;
+}
+
+/* Time off – pending */
 .fc .fc-event.fc-event-timeoff-pending {
   background-color: #fef3c7;
   border-color: #facc15;
   color: #854d0e;
 }
 
+/* Time off – approved */
 .fc .fc-event.fc-event-timeoff-approved {
   background-color: #dcfce7;
   border-color: #22c55e;
   color: #166534;
 }
 
+/* Time off – denied */
 .fc .fc-event.fc-event-timeoff-denied {
   background-color: #fee2e2;
   border-color: #ef4444;
   color: #991b1b;
 }
 
+/* Time off – cancelled */
 .fc .fc-event.fc-event-timeoff-cancelled {
   background-color: #e2e8f0;
   border-color: #cbd5e1;
   color: #475569;
+}
+
+.dark .fc .fc-event.fc-event-timeoff-cancelled {
+  background-color: rgba(148, 163, 184, 0.18);
+  border-color: rgba(203, 213, 225, 0.35);
+  color: #e2e8f0;
 }
