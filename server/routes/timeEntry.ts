@@ -387,6 +387,10 @@ router.put(
         timezone,
         workDate
       });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
       if (!attestationGate.ok) {
         res.status(409).json({
           error: 'Weekly attestation is required before entering time for the new workweek.',
@@ -629,6 +633,10 @@ router.post(
         timezone,
         workDate
       });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
       if (!attestationGate.ok) {
         res.status(409).json({
           error: 'Weekly attestation is required before entering time for the new workweek.',
@@ -1201,7 +1209,7 @@ router.put(
                 decided_by = NULL,
                 decided_at = NULL,
                 decision_reason = NULL,
-                clock_state = 1,
+                clock_state = 0,
                 updated_at = NOW()
             WHERE id = $2
             RETURNING

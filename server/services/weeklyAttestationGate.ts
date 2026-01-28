@@ -2,7 +2,10 @@ import { DateTime } from 'luxon';
 import { getPostgresPool } from '../db/postgres';
 import { computeLastClosedWorkweek, computeSundayWeekStart } from './workweek';
 
-export type WeeklyAttestationGateResult = { ok: true } | { ok: false; weekEnd: string };
+export type WeeklyAttestationGateResult =
+  | { ok: true }
+  | { ok: false; weekEnd: string }
+  | { ok: false; error: string };
 
 export const enforcePriorWeekAttestation = async (params: {
   franchiseId: number;
@@ -11,7 +14,11 @@ export const enforcePriorWeekAttestation = async (params: {
   workDate: string;
 }): Promise<WeeklyAttestationGateResult> => {
   const workLocal = DateTime.fromISO(params.workDate, { zone: params.timezone, setZone: true }).startOf('day');
-  if (!workLocal.isValid) return { ok: true };
+  if (!workLocal.isValid) {
+    const message = `[attestation] Invalid workDate "${params.workDate}" for timezone "${params.timezone}".`;
+    console.error(message);
+    return { ok: false, error: message };
+  }
 
   const nowLocal = DateTime.now().setZone(params.timezone);
   const currentWeekStart = computeSundayWeekStart(nowLocal);
@@ -20,7 +27,11 @@ export const enforcePriorWeekAttestation = async (params: {
 
   const required = computeLastClosedWorkweek(params.timezone);
   const requiredWeekEnd = required.weekEnd.toISODate();
-  if (!requiredWeekEnd) return { ok: true };
+  if (!requiredWeekEnd) {
+    const message = `[attestation] Unable to resolve last closed workweek end for timezone "${params.timezone}".`;
+    console.error(message);
+    return { ok: false, error: message };
+  }
 
   const pool = getPostgresPool();
   const result = await pool.query(
@@ -38,4 +49,3 @@ export const enforcePriorWeekAttestation = async (params: {
   if (result.rowCount) return { ok: true };
   return { ok: false, weekEnd: requiredWeekEnd };
 };
-

@@ -101,7 +101,7 @@ export interface TimeEntrySession {
   sortOrder: number;
 }
 
-export type ClockStateValue = 0 | 1;
+export type ClockStateValue = 0 | 1; // 0 = clocked out, 1 = clocked in
 
 export interface ClockState {
   timezone: string;

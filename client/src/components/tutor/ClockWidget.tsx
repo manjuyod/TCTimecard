@@ -60,7 +60,7 @@ export function ClockWidget(): JSX.Element {
 
   const statusLabel = useMemo(() => {
     if (!state) return '—';
-    return state.clockState === 0 ? 'Clocked in' : 'Clocked out';
+    return state.clockState === 1 ? 'Clocked in' : 'Clocked out';
   }, [state]);
 
   const startedLabel = useMemo(() => {
@@ -89,7 +89,7 @@ export function ClockWidget(): JSX.Element {
 
     setActing(true);
     try {
-      if (state.clockState === 1) {
+      if (state.clockState === 0) {
         const next = await clockIn();
         setState(next);
         toast.success('Clocked in.');
@@ -112,9 +112,10 @@ export function ClockWidget(): JSX.Element {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         requestOpenWeeklyAttestation();
+      } else {
+        const message = err instanceof Error ? err.message : 'Clock action failed';
+        toast.error(message);
       }
-      const message = err instanceof Error ? err.message : 'Clock action failed';
-      toast.error(message);
       await load();
     } finally {
       setActing(false);
@@ -137,9 +138,10 @@ export function ClockWidget(): JSX.Element {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         requestOpenWeeklyAttestation();
+      } else {
+        const message = err instanceof Error ? err.message : 'Unable to submit';
+        toast.error(message);
       }
-      const message = err instanceof Error ? err.message : 'Unable to submit';
-      toast.error(message);
       await load();
     } finally {
       setActing(false);
@@ -155,7 +157,7 @@ export function ClockWidget(): JSX.Element {
             <CardDescription>Server-time, minute-accurate.</CardDescription>
           </div>
           <div className="flex items-center gap-2">
-            <Badge variant={state?.clockState === 0 ? 'success' : 'muted'}>{statusLabel}</Badge>
+            <Badge variant={state?.clockState === 1 ? 'success' : 'muted'}>{statusLabel}</Badge>
             {dayStatusBadge}
           </div>
         </CardHeader>
@@ -163,7 +165,7 @@ export function ClockWidget(): JSX.Element {
           <div className="text-sm text-muted-foreground">
             {loading ? (
               'Loading...'
-            ) : state?.clockState === 0 ? (
+            ) : state?.clockState === 1 ? (
               <>
                 Clocked in{startedLabel ? ` since ${startedLabel}` : ''} · {state.timezone}
               </>
@@ -190,7 +192,7 @@ export function ClockWidget(): JSX.Element {
             ) : null}
 
             <Button onClick={() => void toggle()} disabled={loading || acting || !state || state.attestationBlocking}>
-              {acting ? 'Working…' : state?.clockState === 0 ? 'Clock Out' : 'Clock In'}
+              {acting ? 'Working…' : state?.clockState === 1 ? 'Clock Out' : 'Clock In'}
             </Button>
           </div>
         </CardContent>
@@ -217,4 +219,3 @@ export function ClockWidget(): JSX.Element {
     </>
   );
 }
-

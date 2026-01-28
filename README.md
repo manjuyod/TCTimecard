@@ -71,8 +71,8 @@ Manual time entry + approvals:
 - `GET /api/time-entry/me?start=YYYY-MM-DD&end=YYYY-MM-DD`
 - `POST /api/time-entry/me/day/:workDate/submit` (requires `scheduleSnapshot` from the calendar API (month/day snapshot endpoints); zero-tolerance match auto-approves, otherwise pending)
 - `GET /api/time-entry/admin/pending?franchiseId=...&limit=...`
-- `POST /api/time-entry/admin/day/:id/decide` (body: `decision=approve|deny`, `reason` required for `deny`)
-- `PUT /api/time-entry/admin/day/:id` (admin fixes time errors; requires `reason`; resets to pending)
+- `POST /api/time-entry/admin/day/:id/decide` (body: `decision=approve|deny`, `reason` required for `deny`, min 5 chars)
+- `PUT /api/time-entry/admin/day/:id` (admin fixes time errors; requires `reason` (min 5 chars); resets to pending)
 
 Weekly attestation:
 - `GET /api/attestation/me/status` (last closed workweek)
@@ -150,7 +150,7 @@ This repo expects these Postgres tables to exist (DDL is captured in `AgentPromp
 - Migration SQL lives in `server/db/migrations/` and is tracked in `public.schema_migrations`.
 
 Clock state model (Postgres):
-- `public.time_entry_days.clock_state`: `0 = clocked in`, `1 = clocked out` (default `1`).
+- `public.time_entry_days.clock_state`: `0 = clocked out`, `1 = clocked in` (default `0`).
 - `public.time_entry_sessions.end_at` is nullable for an open session.
 - A partial unique index enforces at most one open session per day (`entry_day_id` where `end_at IS NULL`).
 

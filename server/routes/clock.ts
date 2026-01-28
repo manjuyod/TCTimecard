@@ -13,7 +13,7 @@ import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
 import { computeTimeEntryComparisonV1 } from '../services/timeEntryComparison';
 
 type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
-type ClockStateValue = 0 | 1; // 0 = clocked in, 1 = clocked out
+type ClockStateValue = 0 | 1; // 0 = clocked out, 1 = clocked in
 
 type TimeEntryDayRow = {
   id: number;
@@ -63,7 +63,7 @@ const getTutorContext = (req: Request): { tutorId: number; franchiseId: number }
   return { tutorId, franchiseId };
 };
 
-const normalizeClockState = (value: unknown): ClockStateValue => (Number(value) === 0 ? 0 : 1);
+const normalizeClockState = (value: unknown): ClockStateValue => (Number(value) === 1 ? 1 : 0);
 
 const appendAudit = async (client: PoolClient, entry: {
   dayId: number;
@@ -99,8 +99,8 @@ const buildClockStateResponse = (params: {
   openSession: OpenSessionRow | null;
   attestationGate: { ok: true } | { ok: false; weekEnd: string };
 }): ClockStateResponse => {
-  const persistedClockState: ClockStateValue = normalizeClockState(params.day?.clock_state ?? 1);
-  const authoritativeClockState: ClockStateValue = params.openSession ? 0 : 1;
+  const persistedClockState: ClockStateValue = normalizeClockState(params.day?.clock_state ?? 0);
+  const authoritativeClockState: ClockStateValue = params.openSession ? 1 : 0;
 
   return {
     timezone: params.timezone,
@@ -239,6 +239,10 @@ router.get(
         timezone,
         workDate
       });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
 
       const day = await fetchDay(context.franchiseId, context.tutorId, workDate);
 
@@ -293,6 +297,10 @@ router.post(
         timezone,
         workDate
       });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
       if (!attestationGate.ok) {
         res.status(409).json({
           error: 'Weekly attestation is required before entering time for the new workweek.',
@@ -381,11 +389,11 @@ router.post(
 
         const openSession = await fetchOpenSession(client, day.id, true);
         if (openSession) {
-          if (normalizeClockState(day.clock_state) !== 0) {
+          if (normalizeClockState(day.clock_state) !== 1) {
             const updated = await client.query<TimeEntryDayRow>(
               `
                 UPDATE public.time_entry_days
-                SET clock_state = 0,
+                SET clock_state = 1,
                     timezone = $1,
                     updated_at = NOW()
                 WHERE id = $2
@@ -443,7 +451,7 @@ router.post(
         const updatedDayResult = await client.query<TimeEntryDayRow>(
           `
             UPDATE public.time_entry_days
-            SET clock_state = 0,
+            SET clock_state = 1,
                 timezone = $1,
                 updated_at = NOW()
             WHERE id = $2
@@ -481,7 +489,7 @@ router.post(
             sessionId: session.id,
             startedAt: new Date(session.start_at).toISOString(),
             previousClockState,
-            newClockState: 0
+            newClockState: 1
           }
         });
 
@@ -529,6 +537,10 @@ router.post(
         timezone,
         workDate
       });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
       if (!attestationGate.ok) {
         res.status(409).json({
           error: 'Weekly attestation is required before entering time for the new workweek.',
@@ -670,7 +682,7 @@ router.post(
           const updatedDayResult = await client.query<TimeEntryDayRow>(
             `
               UPDATE public.time_entry_days
-              SET clock_state = 1,
+              SET clock_state = 0,
                   timezone = $1,
                   updated_at = NOW()
               WHERE id = $2
@@ -709,14 +721,14 @@ router.post(
               startedAt: closedSession.startAt,
               endedAt: closedSession.endAt,
               previousClockState,
-              newClockState: 1
+              newClockState: 0
             }
           });
-        } else if (previousClockState !== 1) {
+        } else if (previousClockState !== 0) {
           const updatedDayResult = await client.query<TimeEntryDayRow>(
             `
               UPDATE public.time_entry_days
-              SET clock_state = 1,
+              SET clock_state = 0,
                   timezone = $1,
                   updated_at = NOW()
               WHERE id = $2
@@ -766,10 +778,14 @@ router.post(
 
           if (!computed.ok) {
             const isStoredSessionError = computed.error.toLowerCase().includes('session');
+            try {
+              await client.query('ROLLBACK');
+            } catch (rollbackErr) {
+              console.error('[clock] Failed to rollback after invalid session comparison:', rollbackErr);
+            }
             res.status(400).json({
               error: isStoredSessionError ? 'Stored sessions are invalid; re-save your day sessions.' : computed.error
             });
-            await client.query('ROLLBACK');
             return;
           }
 
@@ -790,7 +806,7 @@ router.post(
                   decided_by = NULL,
                   decided_at = $5,
                   decision_reason = $6,
-                  clock_state = 1,
+                  clock_state = 0,
                   updated_at = NOW()
               WHERE id = $7
               RETURNING

@@ -63,12 +63,13 @@ BEGIN
 END $$;
 
 UPDATE public.time_entry_days
-SET clock_state = 1
+SET clock_state = 0
 WHERE clock_state IS NULL;
 
 ALTER TABLE public.time_entry_days
-  ALTER COLUMN clock_state SET DEFAULT 1;
+  ALTER COLUMN clock_state SET DEFAULT 0;
 
 ALTER TABLE public.time_entry_days
   ALTER COLUMN clock_state SET NOT NULL;
 
+COMMENT ON COLUMN public.time_entry_days.clock_state IS '0 = clocked out, 1 = clocked in';

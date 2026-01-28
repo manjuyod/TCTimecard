@@ -22,7 +22,7 @@ export type ScheduleSnapshotV1 = {
   slotMinutes: number;
   entries: ScheduleSnapshotEntry[];
   intervals: ScheduleSnapshotInterval[];
-  issuedAt: string; // ISO timestamp (UTC)
+  issuedAt?: string; // ISO timestamp (UTC)
   signature?: string;
 };
 
@@ -61,6 +61,15 @@ const parseIsoDateOnly = (value: unknown): string | null => {
   return dt.toISODate() ?? null;
 };
 
+const parseIsoTimestamp = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!trimmed.includes('T')) return null;
+  if (Number.isNaN(Date.parse(trimmed))) return null;
+  return trimmed;
+};
+
 export const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | null => {
   if (!isPlainObject(value)) return null;
   if (value.version !== 1) return null;
@@ -80,7 +89,7 @@ export const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | nu
 
   const entriesRaw = record.entries;
   const intervalsRaw = record.intervals;
-  const issuedAt = typeof record.issuedAt === 'string' ? record.issuedAt : '';
+  const issuedAt = parseIsoTimestamp(record.issuedAt);
 
   if (!Array.isArray(entriesRaw) || !Array.isArray(intervalsRaw)) return null;
 
@@ -111,7 +120,7 @@ export const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | nu
     slotMinutes,
     entries,
     intervals,
-    issuedAt,
+    issuedAt: issuedAt ?? undefined,
     signature
   };
 };
