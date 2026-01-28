@@ -17,6 +17,7 @@ import { toast } from '../ui/toast';
 
 const CENTRAL_TIMEZONE = 'America/Chicago';
 const NAG_STORAGE_KEY = 'timecard.weeklyAttestationNag.v1';
+export const WEEKLY_ATTESTATION_UPDATED_EVENT = 'timecard:weekly-attestation-updated';
 
 const computeNagSlotKey = (nowCentral: DateTime): string => {
   const date = nowCentral.toFormat('yyyy-LL-dd');
@@ -101,6 +102,7 @@ export function WeeklyAttestationGate(): JSX.Element | null {
       await signWeeklyAttestation(value);
       toast.success('Weekly attestation signed.');
       setOpen(false);
+      window.dispatchEvent(new Event(WEEKLY_ATTESTATION_UPDATED_EVENT));
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to sign attestation';

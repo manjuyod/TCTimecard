@@ -18,6 +18,7 @@ import { Skeleton } from '../../components/ui/skeleton';
 import { toast } from '../../components/ui/toast';
 import { formatDateOnly } from '../../lib/utils';
 import { Badge } from '../../components/ui/badge';
+import { ClockWidget } from '../../components/tutor/ClockWidget';
 
 const formatHours = (value?: number): string => (value ?? 0).toFixed(2);
 
@@ -87,6 +88,8 @@ export function TutorDashboardPage(): JSX.Element {
           </Button>
         </div>
       </div>
+
+      <ClockWidget />
 
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard

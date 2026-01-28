@@ -273,6 +273,7 @@ const fetchSessionsByDayIds = async (dayIds: number[]): Promise<Map<number, Appr
       SELECT entry_day_id, start_at, end_at
       FROM public.time_entry_sessions
       WHERE entry_day_id = ANY($1::int[])
+        AND end_at IS NOT NULL
       ORDER BY entry_day_id ASC, start_at ASC
     `,
     [dayIds]

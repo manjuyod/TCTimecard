@@ -3,7 +3,7 @@
 A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring franchises to track manually entered tutoring hours, enforce approvals on any variance from the scheduled blocks, collect weekly attestations, request time off, and process approvals. UI is Tailwind + shadcn/ui with FullCalendar, and legacy branding tokens are applied globally.
 
 ## What's included
-- Tutor: dashboard hour totals (week / pay period / month), calendar view (schedule + time off overlay), manual entry of arrival/departure (supporting break splits) with automatic approval requests on any mismatch to scheduled hours, weekly attestation (hard-blocking next-week entry until signed), submit/cancel time off.
+- Tutor: dashboard hour totals (week / pay period / month), clock in/out (server-time minute precision) + status widget, calendar view (schedule + time off overlay), manual entry of arrival/departure (supporting break splits) with automatic approval requests on any mismatch to scheduled hours, weekly attestation (hard-blocking next-week entry until signed), submit/cancel time off.
 - Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary table (copy/export CSV) driven by approved manual entries.
 - Auth: MSSQL-backed login with optional multi-account selection; cookie sessions (rolling 15 minutes).
 - Data: tutoring schedule + tutor/franchise identity from MSSQL; requests + payroll config from Postgres.
@@ -17,6 +17,9 @@ A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring 
 - `npm run dev` - run client (Vite) and server (Express via `tsx watch`) concurrently for local/Replit development.
 - `npm run build` - build the client into `client/dist` and the server into `server/dist`.
 - `npm run build:client` / `npm run build:server` - build either side individually.
+- `npm run typecheck` - typecheck server + client (no emit).
+- `npm run lint` - currently aliases `typecheck`.
+- `npm test` - runs server unit tests (`node --test` via `tsx` loader).
 - `npm start` - serve the built client and API from Express using the compiled `server/dist`.
 
 ## Local dev
@@ -58,13 +61,18 @@ Tutor hours + calendar:
 - `GET /api/calendar/me/month?month=YYYY-MM`
 - `GET /api/calendar/me/day/:workDate/snapshot`
 
+Clock in/out:
+- `GET /api/clock/me/state`
+- `POST /api/clock/me/in`
+- `POST /api/clock/me/out` (body: `{ finalize?: boolean, scheduleSnapshot?: ScheduleSnapshotV1 }`)
+
 Manual time entry + approvals:
 - `PUT /api/time-entry/me/day/:workDate` (save sessions draft; multiple sessions per day allowed)
 - `GET /api/time-entry/me?start=YYYY-MM-DD&end=YYYY-MM-DD`
 - `POST /api/time-entry/me/day/:workDate/submit` (requires `scheduleSnapshot` from the calendar API (month/day snapshot endpoints); zero-tolerance match auto-approves, otherwise pending)
 - `GET /api/time-entry/admin/pending?franchiseId=...&limit=...`
-- `POST /api/time-entry/admin/day/:id/decide` (body: `decision=approve|deny`, optional `reason`)
-- `PUT /api/time-entry/admin/day/:id` (admin edits/overrides; resets to pending)
+- `POST /api/time-entry/admin/day/:id/decide` (body: `decision=approve|deny`, `reason` required for `deny`, min 5 chars)
+- `PUT /api/time-entry/admin/day/:id` (admin fixes time errors; requires `reason` (min 5 chars); resets to pending)
 
 Weekly attestation:
 - `GET /api/attestation/me/status` (last closed workweek)
@@ -141,6 +149,11 @@ This repo expects these Postgres tables to exist (DDL is captured in `AgentPromp
 - Run: `npm run db:migrate`
 - Migration SQL lives in `server/db/migrations/` and is tracked in `public.schema_migrations`.
 
+Clock state model (Postgres):
+- `public.time_entry_days.clock_state`: `0 = clocked out`, `1 = clocked in` (default `0`).
+- `public.time_entry_sessions.end_at` is nullable for an open session.
+- A partial unique index enforces at most one open session per day (`entry_day_id` where `end_at IS NULL`).
+
 MSSQL tables/fields referenced by the API:
 - `dbo.tblSessionSchedule` + `dbo.tblTimes` (tutoring calendar and hour aggregation)
 - `dbo.tblTutors` (`ID`, `FirstName`, `LastName`, `Email`, `IsDeleted`)
@@ -162,3 +175,16 @@ MSSQL tables/fields referenced by the API:
 
 ### Windows install tips
 - If `npm install --prefix client` fails with locked files, close editors/Explorer in `client/node_modules`, then `npx rimraf client\\node_modules` and retry.
+
+## How to test (manual QA)
+Clock in/out:
+1. Tutor dashboard → Clock → `Clock In` (creates an open session with server time truncated to the minute).
+2. `Clock Out` (closes the open session with server time truncated to the minute).
+3. If the day still has scheduled blocks remaining, choose:
+   - **Break** (do not finalize), or
+   - **Ending early** (finalize submits with a signed schedule snapshot; auto-approves on exact match, otherwise routes to pending).
+
+Admin fixes:
+1. Admin → Approvals → Time Entry Variances → Review a day.
+2. Click **Fix time errors**, adjust sessions, enter a reason (min 5 chars), save.
+3. Confirm the day remains pending and can be approved/denied; denial requires a reason.

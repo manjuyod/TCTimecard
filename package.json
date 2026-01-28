@@ -14,6 +14,9 @@
     "build": "npm run build:client && npm run build:server",
     "build:client": "npm run build --prefix client",
     "build:server": "tsc -p server/tsconfig.json",
+    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p client/tsconfig.json --noEmit",
+    "lint": "npm run typecheck",
+    "test": "node --test --import tsx \"server/tests/*.test.ts\"",
     "start": "cross-env NODE_ENV=production node server/dist/index.js"
   },
   "dependencies": {

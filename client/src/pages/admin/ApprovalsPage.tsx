@@ -4,6 +4,7 @@ import {
   ExtraHoursRequest,
   TimeEntryDay,
   TimeOffRequest,
+  adminEditTimeEntryDay,
   decideTimeEntryDay,
   decideExtraHours,
   decideTimeOff,
@@ -93,6 +94,10 @@ export function ApprovalsPage(): JSX.Element {
   const [denyReason, setDenyReason] = useState('');
   const [actingId, setActingId] = useState<number | null>(null);
   const [selectedDay, setSelectedDay] = useState<TimeEntryDay | null>(null);
+  const [fixDay, setFixDay] = useState<TimeEntryDay | null>(null);
+  const [fixSessions, setFixSessions] = useState<Array<{ start: string; end: string }>>([{ start: '', end: '' }]);
+  const [fixReason, setFixReason] = useState('');
+  const [fixError, setFixError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectorAllowed) {
@@ -308,6 +313,122 @@ export function ApprovalsPage(): JSX.Element {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to approve time entry';
       toast.error(message);
+    } finally {
+      setActingId(null);
+    }
+  };
+
+  const openFixDialog = (day: TimeEntryDay) => {
+    setFixDay(day);
+    setFixError(null);
+    setFixReason('');
+
+    if (day.sessions?.length) {
+      setFixSessions(
+        day.sessions.map((s) => ({
+          start: DateTime.fromISO(s.startAt, { setZone: true }).setZone(day.timezone).toFormat('HH:mm'),
+          end: DateTime.fromISO(s.endAt, { setZone: true }).setZone(day.timezone).toFormat('HH:mm')
+        }))
+      );
+      return;
+    }
+
+    setFixSessions([{ start: '', end: '' }]);
+  };
+
+  const buildFixSessionsPayload = (): { ok: true; sessions: Array<{ startAt: string; endAt: string }> } | { ok: false; error: string } => {
+    if (!fixDay) return { ok: false, error: 'No day selected' };
+
+    const baseDate = DateTime.fromISO(fixDay.workDate, { zone: fixDay.timezone, setZone: true }).startOf('day');
+    if (!baseDate.isValid) return { ok: false, error: 'Invalid work date/timezone' };
+
+    const parseTime = (value: string): { hour: number; minute: number } | null => {
+      const match = value.trim().match(/^(\d{2}):(\d{2})$/);
+      if (!match) return null;
+      const hour = Number(match[1]);
+      const minute = Number(match[2]);
+      if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+      if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+      return { hour, minute };
+    };
+
+    const normalized = fixSessions
+      .map((row) => {
+        const start = parseTime(row.start);
+        const end = parseTime(row.end);
+        if (!start || !end) return null;
+
+        const startLocal = baseDate.set({ hour: start.hour, minute: start.minute, second: 0, millisecond: 0 });
+        const endLocal = baseDate.set({ hour: end.hour, minute: end.minute, second: 0, millisecond: 0 });
+
+        if (!startLocal.isValid || !endLocal.isValid) return null;
+        if (endLocal <= startLocal) return null;
+
+        const startAt = startLocal.toUTC().toISO({ suppressMilliseconds: true }) ?? '';
+        const endAt = endLocal.toUTC().toISO({ suppressMilliseconds: true }) ?? '';
+        if (!startAt || !endAt) return null;
+
+        const startMinute = Math.floor(startLocal.toUTC().toMillis() / 60000);
+        const endMinute = Math.floor(endLocal.toUTC().toMillis() / 60000);
+        if (!Number.isFinite(startMinute) || !Number.isFinite(endMinute) || endMinute <= startMinute) return null;
+
+        return { startAt, endAt, startMinute, endMinute };
+      })
+      .filter(Boolean) as Array<{ startAt: string; endAt: string; startMinute: number; endMinute: number }>;
+
+    if (normalized.length !== fixSessions.length) {
+      return { ok: false, error: 'Each session must include start/end times (HH:mm), with end after start.' };
+    }
+
+    const sorted = normalized.slice().sort((a, b) => a.startMinute - b.startMinute || a.endMinute - b.endMinute);
+    for (let idx = 1; idx < sorted.length; idx += 1) {
+      if (sorted[idx].startMinute < sorted[idx - 1].endMinute) {
+        return { ok: false, error: 'Sessions must not overlap.' };
+      }
+    }
+
+    return { ok: true, sessions: normalized.map((s) => ({ startAt: s.startAt, endAt: s.endAt })) };
+  };
+
+  const saveFix = async () => {
+    if (!fixDay) return;
+
+    const targetFranchiseId = franchiseId ?? sessionFranchiseId;
+    if (targetFranchiseId === null) {
+      toast.error('Franchise ID required');
+      return;
+    }
+
+    const reason = fixReason.trim();
+    if (reason.length < 5) {
+      setFixError('Reason is required (min 5 characters).');
+      return;
+    }
+
+    const payload = buildFixSessionsPayload();
+    if (!payload.ok) {
+      setFixError(payload.error);
+      return;
+    }
+
+    setFixError(null);
+    setActingId(fixDay.id);
+    try {
+      const updated = await adminEditTimeEntryDay({
+        franchiseId: targetFranchiseId,
+        id: fixDay.id,
+        sessions: payload.sessions,
+        reason
+      });
+
+      setTimeEntryDays((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setFixDay(null);
+      setSelectedDay(updated);
+      toast.success('Time entry updated. Routed to pending approval.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to save time entry fix';
+      toast.error(message);
+      setFixError(message);
     } finally {
       setActingId(null);
     }
@@ -743,6 +864,16 @@ export function ApprovalsPage(): JSX.Element {
                   <Button
                     variant="outline"
                     onClick={() => {
+                      openFixDialog(selectedDay);
+                      setSelectedDay(null);
+                    }}
+                    disabled={actingId === selectedDay.id}
+                  >
+                    Fix time errors
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
                       setDenyDialog({ type: 'timeentry', day: selectedDay });
                       setDenyReason('');
                     }}
@@ -752,6 +883,83 @@ export function ApprovalsPage(): JSX.Element {
                   </Button>
                   <Button onClick={() => void handleApproveTimeEntry(selectedDay)} disabled={actingId === selectedDay.id}>
                     Approve
+                  </Button>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(fixDay)} onOpenChange={(open) => !open && setFixDay(null)}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          {fixDay ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Fix time errors – {fixDay.workDate}</DialogTitle>
+                <DialogDescription>
+                  Adjust session times and provide a reason. Saving routes the day to pending approval.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-4 text-sm">
+                {fixError ? <InlineError message={fixError} /> : null}
+
+                <div className="space-y-2">
+                  <p className="text-sm font-semibold text-slate-900">Sessions</p>
+                  {fixSessions.map((row, idx) => (
+                    <div key={idx} className="flex flex-wrap items-end gap-2 rounded-lg border bg-white p-3">
+                      <div className="flex-1 min-w-[140px] space-y-2">
+                        <Label>Start</Label>
+                        <Input
+                          type="time"
+                          value={row.start}
+                          onChange={(e) =>
+                            setFixSessions((prev) => prev.map((s, i) => (i === idx ? { ...s, start: e.target.value } : s)))
+                          }
+                        />
+                      </div>
+                      <div className="flex-1 min-w-[140px] space-y-2">
+                        <Label>End</Label>
+                        <Input
+                          type="time"
+                          value={row.end}
+                          onChange={(e) =>
+                            setFixSessions((prev) => prev.map((s, i) => (i === idx ? { ...s, end: e.target.value } : s)))
+                          }
+                        />
+                      </div>
+                      <Button
+                        variant="outline"
+                        onClick={() => setFixSessions((prev) => prev.filter((_, i) => i !== idx))}
+                        disabled={fixSessions.length <= 1}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                  <Button variant="outline" onClick={() => setFixSessions((prev) => [...prev, { start: '', end: '' }])}>
+                    Add segment
+                  </Button>
+                </div>
+
+                <div className="space-y-2">
+                  <Label requiredMark>Reason</Label>
+                  <Textarea
+                    placeholder="Why are you changing this day? (required)"
+                    value={fixReason}
+                    onChange={(e) => setFixReason(e.target.value)}
+                    className="min-h-[100px]"
+                  />
+                  <p className="text-xs text-muted-foreground">Minimum 5 characters.</p>
+                </div>
+
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button variant="outline" onClick={() => setFixDay(null)} disabled={actingId === fixDay.id}>
+                    Cancel
+                  </Button>
+                  <Button onClick={() => void saveFix()} disabled={actingId === fixDay.id}>
+                    {actingId === fixDay.id ? 'Saving…' : 'Save fix'}
                   </Button>
                 </div>
               </div>

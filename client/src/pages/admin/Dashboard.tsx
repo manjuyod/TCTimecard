@@ -36,7 +36,7 @@ export function AdminDashboardPage(): JSX.Element {
   const load = async (forcedFranchiseId?: number | null) => {
     const franchiseIdNumber =
       forcedFranchiseId ?? (selectorAllowed ? Number(franchiseIdInput) : sessionFranchiseId);
-    if (!Number.isFinite(franchiseIdNumber)) {
+    if (franchiseIdNumber === null || !Number.isFinite(franchiseIdNumber)) {
       setError('Franchise ID is required.');
       return;
     }

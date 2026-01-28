@@ -7,12 +7,12 @@ import { requireAdmin, requireTutor } from '../middleware/auth';
 import { enforceFranchiseScope } from '../middleware/franchiseScope';
 import { resolvePayPeriod } from '../payroll/payPeriodResolution';
 import {
-  type ScheduleSnapshotInterval,
-  type ScheduleSnapshotV1,
   getScheduleSnapshotSigningSecret,
+  parseScheduleSnapshotV1,
   verifyScheduleSnapshot
 } from '../services/scheduleSnapshot';
-import { computeLastClosedWorkweek, computeSundayWeekStart } from '../services/workweek';
+import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
+import { computeTimeEntryComparisonV1, parseTimestamptzMinute, toEpochMinute } from '../services/timeEntryComparison';
 
 type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
 
@@ -77,67 +77,6 @@ const parseLimit = (value: unknown, defaultValue: number, maxValue: number): num
   if (!Number.isInteger(parsed) || parsed <= 0) return defaultValue;
   return Math.min(parsed, maxValue);
 };
-
-const parseTimestamptzMinute = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  if (!/([zZ]|[+-]\d{2}:\d{2})$/.test(trimmed)) return null;
-
-  const parsed = DateTime.fromISO(trimmed, { setZone: true });
-  if (!parsed.isValid) return null;
-  if (parsed.second !== 0 || parsed.millisecond !== 0) return null;
-
-  const utc = parsed.toUTC();
-  const normalized = utc.toISO({ suppressMilliseconds: true });
-  return normalized ?? null;
-};
-
-const toEpochMinute = (isoUtc: string): number | null => {
-  const ms = Date.parse(isoUtc);
-  if (!Number.isFinite(ms)) return null;
-  if (ms % 60000 !== 0) return null;
-  return Math.floor(ms / 60000);
-};
-
-type MinuteInterval = { startMinute: number; endMinute: number };
-
-const normalizeIntervals = (intervals: MinuteInterval[]): MinuteInterval[] => {
-  if (!intervals.length) return [];
-  const sorted = intervals
-    .slice()
-    .sort((a, b) => a.startMinute - b.startMinute || a.endMinute - b.endMinute);
-
-  const merged: MinuteInterval[] = [];
-  for (const interval of sorted) {
-    if (!merged.length) {
-      merged.push({ ...interval });
-      continue;
-    }
-
-    const last = merged[merged.length - 1];
-    if (interval.startMinute > last.endMinute) {
-      merged.push({ ...interval });
-      continue;
-    }
-
-    last.endMinute = Math.max(last.endMinute, interval.endMinute);
-  }
-
-  return merged;
-};
-
-const intervalsEqual = (a: MinuteInterval[], b: MinuteInterval[]): boolean => {
-  if (a.length !== b.length) return false;
-  for (let idx = 0; idx < a.length; idx += 1) {
-    if (a[idx].startMinute !== b[idx].startMinute) return false;
-    if (a[idx].endMinute !== b[idx].endMinute) return false;
-  }
-  return true;
-};
-
-const minutesToIso = (minute: number): string => new Date(minute * 60000).toISOString();
 
 const getTutorContext = (req: Request): { tutorId: number; franchiseId: number; displayName: string } | null => {
   const auth = req.session.auth;
@@ -245,6 +184,7 @@ const fetchSessionsByDayId = async (client: PoolClient, dayId: number): Promise<
       SELECT id, entry_day_id, start_at, end_at, sort_order
       FROM public.time_entry_sessions
       WHERE entry_day_id = $1
+        AND end_at IS NOT NULL
       ORDER BY sort_order ASC, start_at ASC
     `,
     [dayId]
@@ -258,10 +198,13 @@ const appendAudit = async (client: PoolClient, entry: {
   action:
     | 'created'
     | 'saved'
+    | 'clock_in'
+    | 'clock_out'
     | 'submitted'
     | 'approved'
     | 'denied'
     | 'invalidated'
+    | 'admin_fixed'
     | 'admin_edited'
     | 'auto_approved';
   actorAccountType: 'TUTOR' | 'ADMIN' | 'SYSTEM';
@@ -286,116 +229,6 @@ const appendAudit = async (client: PoolClient, entry: {
       entry.metadata ?? {}
     ]
   );
-};
-
-const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | null => {
-  if (!isRecord(value)) return null;
-  if (value.version !== 1) return null;
-
-  const franchiseId = Number(value.franchiseId);
-  const tutorId = Number(value.tutorId);
-  const workDate = parseIsoDateOnly(value.workDate);
-  const timezone = typeof value.timezone === 'string' ? value.timezone.trim() : '';
-  const slotMinutes = Number(value.slotMinutes);
-
-  if (!Number.isFinite(franchiseId) || !Number.isFinite(tutorId)) return null;
-  if (!workDate) return null;
-  if (!timezone) return null;
-  if (!Number.isInteger(slotMinutes) || slotMinutes <= 0) return null;
-
-  const entriesRaw = (value.entries ?? []) as unknown;
-  const intervalsRaw = (value.intervals ?? []) as unknown;
-  const issuedAt = typeof value.issuedAt === 'string' ? value.issuedAt : '';
-
-  if (!Array.isArray(entriesRaw) || !Array.isArray(intervalsRaw)) return null;
-
-  const entries = entriesRaw
-    .filter((entry) => isRecord(entry))
-    .map((entry) => ({
-      timeId: Number((entry as Record<string, unknown>).timeId),
-      timeLabel: typeof (entry as Record<string, unknown>).timeLabel === 'string' ? String((entry as Record<string, unknown>).timeLabel) : ''
-    }))
-    .filter((entry) => Number.isFinite(entry.timeId));
-
-  const intervals = intervalsRaw
-    .filter((interval) => isRecord(interval))
-    .map((interval) => ({
-      startAt: typeof (interval as Record<string, unknown>).startAt === 'string' ? String((interval as Record<string, unknown>).startAt) : '',
-      endAt: typeof (interval as Record<string, unknown>).endAt === 'string' ? String((interval as Record<string, unknown>).endAt) : ''
-    }))
-    .filter((interval) => Boolean(interval.startAt) && Boolean(interval.endAt));
-
-  const signature = typeof value.signature === 'string' ? value.signature : undefined;
-
-  return {
-    version: 1,
-    franchiseId,
-    tutorId,
-    workDate,
-    timezone,
-    slotMinutes,
-    entries,
-    intervals,
-    issuedAt,
-    signature
-  };
-};
-
-const toUnionIntervals = (intervals: ScheduleSnapshotInterval[]): { ok: true; union: MinuteInterval[] } | { ok: false; error: string } => {
-  const minutes: MinuteInterval[] = [];
-
-  for (const interval of intervals) {
-    const startIso = parseTimestamptzMinute(interval.startAt);
-    const endIso = parseTimestamptzMinute(interval.endAt);
-    if (!startIso || !endIso) {
-      return { ok: false, error: 'Schedule snapshot intervals must be ISO timestamps with timezone offset, aligned to the minute' };
-    }
-
-    const startMinute = toEpochMinute(startIso);
-    const endMinute = toEpochMinute(endIso);
-    if (startMinute === null || endMinute === null || endMinute <= startMinute) {
-      return { ok: false, error: 'Schedule snapshot interval is invalid' };
-    }
-
-    minutes.push({ startMinute, endMinute });
-  }
-
-  return { ok: true, union: normalizeIntervals(minutes) };
-};
-
-const enforcePriorWeekAttestation = async (params: {
-  franchiseId: number;
-  tutorId: number;
-  timezone: string;
-  workDate: string;
-}): Promise<{ ok: true } | { ok: false; weekEnd: string }> => {
-  const workLocal = DateTime.fromISO(params.workDate, { zone: params.timezone, setZone: true }).startOf('day');
-  if (!workLocal.isValid) return { ok: true };
-
-  const nowLocal = DateTime.now().setZone(params.timezone);
-  const currentWeekStart = computeSundayWeekStart(nowLocal);
-
-  if (workLocal < currentWeekStart) return { ok: true };
-
-  const required = computeLastClosedWorkweek(params.timezone);
-  const requiredWeekEnd = required.weekEnd.toISODate();
-  if (!requiredWeekEnd) return { ok: true };
-
-  const pool = getPostgresPool();
-  const result = await pool.query(
-    `
-      SELECT 1
-      FROM public.weekly_attestations
-      WHERE franchiseid = $1
-        AND tutorid = $2
-        AND week_end = $3
-      LIMIT 1
-    `,
-    [params.franchiseId, params.tutorId, requiredWeekEnd]
-  );
-
-  if (result.rowCount) return { ok: true };
-  return { ok: false, weekEnd: requiredWeekEnd };
 };
 
 const mapDayRowToResponse = (day: TimeEntryDayRow, sessions: TimeEntrySessionRow[]) => ({
@@ -477,6 +310,7 @@ router.get(
             SELECT entry_day_id, start_at, end_at, sort_order
             FROM public.time_entry_sessions
             WHERE entry_day_id = ANY($1::int[])
+              AND end_at IS NOT NULL
             ORDER BY entry_day_id ASC, sort_order ASC, start_at ASC
           `,
           [ids]
@@ -553,6 +387,10 @@ router.put(
         timezone,
         workDate
       });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
       if (!attestationGate.ok) {
         res.status(409).json({
           error: 'Weekly attestation is required before entering time for the new workweek.',
@@ -633,25 +471,14 @@ router.put(
 
         if (existing && newStatus === 'pending' && existing.schedule_snapshot) {
           const snapshot = parseScheduleSnapshotV1(existing.schedule_snapshot);
-          const scheduleUnionResult = snapshot ? toUnionIntervals(snapshot.intervals) : null;
-          if (scheduleUnionResult?.ok) {
-            const manualUnion = normalizeIntervals(
-              normalizedSessions.map((s) => ({ startMinute: s.startMinute, endMinute: s.endMinute }))
-            );
-            const scheduleUnion = scheduleUnionResult.union;
-            comparison = {
-              version: 1,
-              computedAt: new Date().toISOString(),
-              matches: intervalsEqual(manualUnion, scheduleUnion),
-              manual: {
-                union: manualUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-                totalMinutes: manualUnion.reduce((acc, i) => acc + (i.endMinute - i.startMinute), 0)
-              },
-              scheduled: {
-                union: scheduleUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-                totalMinutes: scheduleUnion.reduce((acc, i) => acc + (i.endMinute - i.startMinute), 0)
-              }
-            };
+          if (snapshot) {
+            const computed = computeTimeEntryComparisonV1({
+              sessions: normalizedSessions.map((s) => ({ startAt: s.startAt, endAt: s.endAt })),
+              snapshotIntervals: snapshot.intervals
+            });
+            if (computed.ok) {
+              comparison = computed.comparison;
+            }
           }
         }
 
@@ -806,6 +633,10 @@ router.post(
         timezone,
         workDate
       });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
       if (!attestationGate.ok) {
         res.status(409).json({
           error: 'Weekly attestation is required before entering time for the new workweek.',
@@ -823,12 +654,6 @@ router.post(
         }
       }
 
-      const scheduleUnionResult = toUnionIntervals(snapshot.intervals);
-      if (!scheduleUnionResult.ok) {
-        res.status(400).json({ error: scheduleUnionResult.error });
-        return;
-      }
-
       const pool = getPostgresPool();
       const client = await pool.connect();
       try {
@@ -843,42 +668,26 @@ router.post(
 
         const sessions = await fetchSessionsByDayId(client, existing.id);
 
-        const manualIntervals: MinuteInterval[] = [];
-        for (const session of sessions) {
-          const startIso = parseTimestamptzMinute(new Date(session.start_at).toISOString());
-          const endIso = parseTimestamptzMinute(new Date(session.end_at).toISOString());
-          if (!startIso || !endIso) {
-            res.status(400).json({ error: 'Stored sessions are invalid; re-save your day sessions.' });
-            await client.query('ROLLBACK');
-            return;
-          }
-          const startMinute = toEpochMinute(startIso);
-          const endMinute = toEpochMinute(endIso);
-          if (startMinute === null || endMinute === null || endMinute <= startMinute) {
-            res.status(400).json({ error: 'Stored sessions are invalid; re-save your day sessions.' });
-            await client.query('ROLLBACK');
-            return;
-          }
-          manualIntervals.push({ startMinute, endMinute });
+        const sessionPayload = sessions.map((row) => ({
+          startAt: new Date(row.start_at).toISOString(),
+          endAt: new Date(row.end_at).toISOString()
+        }));
+
+        const computed = computeTimeEntryComparisonV1({
+          sessions: sessionPayload,
+          snapshotIntervals: snapshot.intervals
+        });
+
+        if (!computed.ok) {
+          const isStoredSessionError = computed.error.toLowerCase().includes('session');
+          res.status(400).json({
+            error: isStoredSessionError ? 'Stored sessions are invalid; re-save your day sessions.' : computed.error
+          });
+          await client.query('ROLLBACK');
+          return;
         }
 
-        const manualUnion = normalizeIntervals(manualIntervals);
-        const scheduleUnion = scheduleUnionResult.union;
-        const matches = intervalsEqual(manualUnion, scheduleUnion);
-
-        const comparison = {
-          version: 1,
-          computedAt: new Date().toISOString(),
-          matches,
-          manual: {
-            union: manualUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-            totalMinutes: manualUnion.reduce((acc, i) => acc + (i.endMinute - i.startMinute), 0)
-          },
-          scheduled: {
-            union: scheduleUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-            totalMinutes: scheduleUnion.reduce((acc, i) => acc + (i.endMinute - i.startMinute), 0)
-          }
-        };
+        const { matches, comparison } = computed;
 
         const nextStatus: TimeEntryStatus = matches ? 'approved' : 'pending';
         const decidedAt = matches ? new Date().toISOString() : null;
@@ -1000,6 +809,7 @@ router.get(
             SELECT id, entry_day_id, start_at, end_at, sort_order
             FROM public.time_entry_sessions
             WHERE entry_day_id = ANY($1::int[])
+              AND end_at IS NOT NULL
             ORDER BY entry_day_id ASC, sort_order ASC, start_at ASC
           `,
           [ids]
@@ -1132,6 +942,11 @@ router.post(
       return;
     }
 
+    if (decision === 'deny' && !reason) {
+      res.status(400).json({ error: 'reason is required when denying a request' });
+      return;
+    }
+
     try {
       const pool = getPostgresPool();
       const client = await pool.connect();
@@ -1254,6 +1069,17 @@ router.put(
       return;
     }
 
+    const reasonRaw = (req.body as Record<string, unknown>)?.reason;
+    const reason = typeof reasonRaw === 'string' ? reasonRaw.trim() : '';
+    if (reason.length > 2000) {
+      res.status(400).json({ error: 'reason must be 2000 characters or fewer' });
+      return;
+    }
+    if (reason.length < 5) {
+      res.status(400).json({ error: 'reason is required (min 5 characters)' });
+      return;
+    }
+
     const sessionsRaw = (req.body as Record<string, unknown>)?.sessions;
     if (!Array.isArray(sessionsRaw)) {
       res.status(400).json({ error: 'sessions must be an array' });
@@ -1362,34 +1188,28 @@ router.put(
         const previousSessions = await fetchSessionsByDayId(client, existingDay.id);
 
         const snapshot = parseScheduleSnapshotV1(existingDay.schedule_snapshot);
-        const scheduleUnionResult = snapshot ? toUnionIntervals(snapshot.intervals) : null;
-        const manualUnion = normalizeIntervals(normalizedSessions.map((s) => ({ startMinute: s.startMinute, endMinute: s.endMinute })));
-        const scheduleUnion = scheduleUnionResult && scheduleUnionResult.ok ? scheduleUnionResult.union : [];
 
-        const comparison = snapshot
-          ? {
-              version: 1,
-              computedAt: new Date().toISOString(),
-              matches: scheduleUnionResult?.ok ? intervalsEqual(manualUnion, scheduleUnion) : false,
-              manual: {
-                union: manualUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-                totalMinutes: manualUnion.reduce((acc, i) => acc + (i.endMinute - i.startMinute), 0)
-              },
-              scheduled: {
-                union: scheduleUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-                totalMinutes: scheduleUnion.reduce((acc, i) => acc + (i.endMinute - i.startMinute), 0)
-              }
-            }
-          : existingDay.comparison;
+        let comparison: unknown | null = existingDay.comparison;
+        if (snapshot) {
+          const computed = computeTimeEntryComparisonV1({
+            sessions: normalizedSessions.map((s) => ({ startAt: s.startAt, endAt: s.endAt })),
+            snapshotIntervals: snapshot.intervals
+          });
+          if (computed.ok) {
+            comparison = computed.comparison;
+          }
+        }
 
         const update = await client.query<TimeEntryDayRow>(
           `
             UPDATE public.time_entry_days
             SET status = 'pending',
                 comparison = $1,
+                submitted_at = NOW(),
                 decided_by = NULL,
                 decided_at = NULL,
                 decision_reason = NULL,
+                clock_state = 0,
                 updated_at = NOW()
             WHERE id = $2
             RETURNING
@@ -1408,8 +1228,8 @@ router.put(
               created_at,
               updated_at
           `,
-          [comparison, existingDay.id]
-        );
+            [comparison, existingDay.id]
+          );
 
         const updatedDay = update.rows[0];
 
@@ -1432,9 +1252,21 @@ router.put(
           );
         }
 
+        if (existingDay.status === 'approved') {
+          await appendAudit(client, {
+            dayId: existingDay.id,
+            action: 'invalidated',
+            actorAccountType: 'ADMIN',
+            actorAccountId: admin.adminId,
+            previousStatus: existingDay.status,
+            newStatus: updatedDay.status,
+            metadata: { workDate, timezone, reason, kind: 'admin_fixed' }
+          });
+        }
+
         await appendAudit(client, {
           dayId: existingDay.id,
-          action: existingDay.status === 'approved' ? 'invalidated' : 'admin_edited',
+          action: 'admin_fixed',
           actorAccountType: 'ADMIN',
           actorAccountId: admin.adminId,
           previousStatus: existingDay.status,
@@ -1442,6 +1274,7 @@ router.put(
           metadata: {
             workDate,
             timezone,
+            reason,
             previousSessions: previousSessions.map((row) => ({
               startAt: new Date(row.start_at).toISOString(),
               endAt: new Date(row.end_at).toISOString(),
