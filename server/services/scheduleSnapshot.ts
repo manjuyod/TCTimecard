@@ -50,6 +50,72 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
   return proto === Object.prototype || proto === null;
 };
 
+const parseIsoDateOnly = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const dt = DateTime.fromISO(trimmed, { zone: 'UTC', setZone: true });
+  if (!dt.isValid) return null;
+
+  return dt.toISODate() ?? null;
+};
+
+export const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | null => {
+  if (!isPlainObject(value)) return null;
+  if (value.version !== 1) return null;
+
+  const record = value as Record<string, unknown>;
+
+  const franchiseId = Number(record.franchiseId);
+  const tutorId = Number(record.tutorId);
+  const workDate = parseIsoDateOnly(record.workDate);
+  const timezone = typeof record.timezone === 'string' ? record.timezone.trim() : '';
+  const slotMinutes = Number(record.slotMinutes);
+
+  if (!Number.isFinite(franchiseId) || !Number.isFinite(tutorId)) return null;
+  if (!workDate) return null;
+  if (!timezone) return null;
+  if (!Number.isInteger(slotMinutes) || slotMinutes <= 0) return null;
+
+  const entriesRaw = record.entries;
+  const intervalsRaw = record.intervals;
+  const issuedAt = typeof record.issuedAt === 'string' ? record.issuedAt : '';
+
+  if (!Array.isArray(entriesRaw) || !Array.isArray(intervalsRaw)) return null;
+
+  const entries = entriesRaw
+    .filter((entry) => isPlainObject(entry))
+    .map((entry) => ({
+      timeId: Number((entry as Record<string, unknown>).timeId),
+      timeLabel: typeof (entry as Record<string, unknown>).timeLabel === 'string' ? String((entry as Record<string, unknown>).timeLabel) : ''
+    }))
+    .filter((entry) => Number.isFinite(entry.timeId));
+
+  const intervals = intervalsRaw
+    .filter((interval) => isPlainObject(interval))
+    .map((interval) => ({
+      startAt: typeof (interval as Record<string, unknown>).startAt === 'string' ? String((interval as Record<string, unknown>).startAt) : '',
+      endAt: typeof (interval as Record<string, unknown>).endAt === 'string' ? String((interval as Record<string, unknown>).endAt) : ''
+    }))
+    .filter((interval) => Boolean(interval.startAt) && Boolean(interval.endAt));
+
+  const signature = typeof record.signature === 'string' ? record.signature : undefined;
+
+  return {
+    version: 1,
+    franchiseId,
+    tutorId,
+    workDate,
+    timezone,
+    slotMinutes,
+    entries,
+    intervals,
+    issuedAt,
+    signature
+  };
+};
+
 const canonicalizeJson = (value: unknown): unknown => {
   if (Array.isArray(value)) {
     return value.map(canonicalizeJson);

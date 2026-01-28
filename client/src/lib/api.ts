@@ -101,6 +101,21 @@ export interface TimeEntrySession {
   sortOrder: number;
 }
 
+export type ClockStateValue = 0 | 1;
+
+export interface ClockState {
+  timezone: string;
+  workDate: string;
+  dayId: number | null;
+  dayStatus: TimeEntryStatus | null;
+  clockState: ClockStateValue;
+  persistedClockState: ClockStateValue;
+  openSessionId: number | null;
+  startedAt: string | null;
+  attestationBlocking: boolean;
+  missingWeekEnd: string | null;
+}
+
 export interface TimeEntryHistoryAudit {
   action: string;
   actorAccountType: string;
@@ -394,6 +409,27 @@ export const fetchTimeEntries = async (args: { start: string; end: string; limit
   return result.days ?? [];
 };
 
+export const fetchClockState = async (): Promise<ClockState> => {
+  const result = await apiFetch<{ state: ClockState }>('/api/clock/me/state');
+  return result.state;
+};
+
+export const clockIn = async (): Promise<ClockState> => {
+  const result = await apiFetch<{ state: ClockState }>('/api/clock/me/in', { method: 'POST' });
+  return result.state;
+};
+
+export const clockOut = async (args?: { finalize?: boolean; scheduleSnapshot?: unknown }): Promise<ClockState> => {
+  const result = await apiFetch<{ state: ClockState }>('/api/clock/me/out', {
+    method: 'POST',
+    body: JSON.stringify({
+      finalize: Boolean(args?.finalize),
+      scheduleSnapshot: args?.scheduleSnapshot
+    })
+  });
+  return result.state;
+};
+
 export const saveTimeEntryDay = async (args: { workDate: string; sessions: Array<{ startAt: string; endAt: string }> }) => {
   const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/me/day/${encodeURIComponent(args.workDate)}`, {
     method: 'PUT',
@@ -434,10 +470,11 @@ export const adminEditTimeEntryDay = async (args: {
   franchiseId: number;
   id: number;
   sessions: Array<{ startAt: string; endAt: string }>;
+  reason: string;
 }) => {
   const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/admin/day/${args.id}?franchiseId=${args.franchiseId}`, {
     method: 'PUT',
-    body: JSON.stringify({ sessions: args.sessions })
+    body: JSON.stringify({ sessions: args.sessions, reason: args.reason })
   });
   return result.day;
 };

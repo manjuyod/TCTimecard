@@ -23,7 +23,7 @@ import { StatusBadge } from '../../components/shared/StatusBadge';
 import { Skeleton } from '../../components/ui/skeleton';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog';
 import { toast } from '../../components/ui/toast';
-import { formatDateRange, formatDateTime, hoursBetween } from '../../lib/utils';
+import { formatDateRange, hoursBetween } from '../../lib/utils';
 import { ApiError } from '../../lib/errors';
 import { requestOpenWeeklyAttestation } from '../../components/tutor/WeeklyAttestationGate';
 import { Input } from '../../components/ui/input';
@@ -485,6 +485,18 @@ export function TutorCalendarPage(): JSX.Element {
                 </Button>
               </div>
             </div>
+
+            {activeDay?.status === 'pending' ? (
+              <div className="rounded-lg border border-amber-300/60 bg-amber-50 p-3 text-sm text-amber-900">
+                Pending days do not count toward payroll until approved.
+              </div>
+            ) : null}
+
+            {activeDay?.status === 'denied' && activeDay.decisionReason ? (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                Denied: {activeDay.decisionReason}
+              </div>
+            ) : null}
 
             {activeSnapshotIntervals.length ? (
               <div className="rounded-lg border bg-muted/40 p-3">

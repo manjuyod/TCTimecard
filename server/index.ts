@@ -14,6 +14,7 @@ import extraHoursRoutes from './routes/extrahours';
 import timeOffRoutes from './routes/timeoff';
 import timeEntryRoutes from './routes/timeEntry';
 import attestationRoutes from './routes/attestation';
+import clockRoutes from './routes/clock';
 import { validateDbEnv } from './config/env';
 import { SESSION_COOKIE_NAME, SESSION_SECRET, SESSION_SAME_SITE, SESSION_SECURE, SESSION_TTL_MS } from './config/session';
 
@@ -83,6 +84,7 @@ app.use('/api', extraHoursRoutes);
 app.use('/api', timeOffRoutes);
 app.use('/api', timeEntryRoutes);
 app.use('/api', attestationRoutes);
+app.use('/api', clockRoutes);
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 
 const serverRoot = path.basename(__dirname) === 'dist' ? path.resolve(__dirname, '..') : __dirname;
