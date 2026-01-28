@@ -419,11 +419,10 @@ export const clockIn = async (): Promise<ClockState> => {
   return result.state;
 };
 
-export const clockOut = async (args?: { finalize?: boolean; scheduleSnapshot?: unknown }): Promise<ClockState> => {
+export const clockOut = async (args?: { scheduleSnapshot?: unknown }): Promise<ClockState> => {
   const result = await apiFetch<{ state: ClockState }>('/api/clock/me/out', {
     method: 'POST',
     body: JSON.stringify({
-      finalize: Boolean(args?.finalize),
       scheduleSnapshot: args?.scheduleSnapshot
     })
   });

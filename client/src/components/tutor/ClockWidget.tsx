@@ -39,7 +39,6 @@ export function ClockWidget(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
-  const [promptSnapshot, setPromptSnapshot] = useState<unknown | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -72,9 +71,17 @@ export function ClockWidget(): JSX.Element {
   const dayStatusBadge = useMemo(() => {
     if (!state?.dayStatus) return null;
     const variant = state.dayStatus === 'approved' ? 'success' : state.dayStatus === 'pending' ? 'warning' : state.dayStatus === 'denied' ? 'danger' : 'muted';
+    const label =
+      state.dayStatus === 'approved'
+        ? 'Approved'
+        : state.dayStatus === 'pending'
+          ? 'Pending Approval'
+          : state.dayStatus === 'denied'
+            ? 'Denied'
+            : 'Draft';
     return (
-      <Badge variant={variant} className="capitalize">
-        {state.dayStatus}
+      <Badge variant={variant}>
+        {label}
       </Badge>
     );
   }, [state?.dayStatus]);
@@ -96,50 +103,34 @@ export function ClockWidget(): JSX.Element {
         return;
       }
 
-      const next = await clockOut({ finalize: false });
-      setState(next);
-      toast.success('Clocked out.');
-
+      let snapshot: unknown;
       try {
-        const snapshot = await fetchTutorScheduleSnapshot(next.workDate);
-        if (hasScheduledTimeRemaining(snapshot, next.timezone)) {
-          setPromptSnapshot(snapshot);
-          setPromptOpen(true);
-        }
+        snapshot = await fetchTutorScheduleSnapshot(state.workDate);
       } catch {
-        // If schedule snapshot can't be fetched, skip the break/end prompt and keep as draft.
+        toast.error('Schedule snapshot unavailable. Try again from the calendar.');
+        return;
+      }
+
+      const next = await clockOut({ scheduleSnapshot: snapshot });
+      setState(next);
+      if (next.dayStatus === 'pending') {
+        toast.success(
+          'This time was automatically submitted for director approval because it falls outside scheduled hours.'
+        );
+      } else if (next.dayStatus === 'approved') {
+        toast.success('Clocked out and auto-approved.');
+      } else {
+        toast.success('Clocked out.');
+      }
+
+      if (hasScheduledTimeRemaining(snapshot, next.timezone)) {
+        setPromptOpen(true);
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         requestOpenWeeklyAttestation();
       } else {
         const message = err instanceof Error ? err.message : 'Clock action failed';
-        toast.error(message);
-      }
-      await load();
-    } finally {
-      setActing(false);
-    }
-  };
-
-  const finalizeEarly = async () => {
-    if (!promptSnapshot) {
-      toast.error('Schedule snapshot unavailable. Try again from the calendar.');
-      setPromptOpen(false);
-      return;
-    }
-
-    setActing(true);
-    try {
-      const next = await clockOut({ finalize: true, scheduleSnapshot: promptSnapshot });
-      setState(next);
-      toast.success(next.dayStatus === 'approved' ? 'Submitted and auto-approved.' : 'Submitted for review.');
-      setPromptOpen(false);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        requestOpenWeeklyAttestation();
-      } else {
-        const message = err instanceof Error ? err.message : 'Unable to submit';
         toast.error(message);
       }
       await load();
@@ -182,6 +173,12 @@ export function ClockWidget(): JSX.Element {
                 Weekly attestation required{state.missingWeekEnd ? ` (missing week ending ${state.missingWeekEnd}).` : '.'}
               </p>
             ) : null}
+
+            {state?.dayStatus === 'pending' ? (
+              <p className="mt-1 text-xs text-amber-900">
+                This time was automatically submitted for director approval because it falls outside scheduled hours.
+              </p>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap gap-2">
@@ -203,15 +200,16 @@ export function ClockWidget(): JSX.Element {
           <DialogHeader>
             <DialogTitle>Are you taking a break?</DialogTitle>
             <DialogDescription>
-              You still have scheduled time remaining today. If you are ending early, submit your day for review now.
+              You still have scheduled time remaining today. If you are ending early, your time was automatically
+              submitted for director approval because it falls outside scheduled hours.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setPromptOpen(false)} disabled={acting}>
-              Break
+              I&apos;m taking a break
             </Button>
-            <Button onClick={() => void finalizeEarly()} disabled={acting}>
-              {acting ? 'Submitting…' : 'Ending early'}
+            <Button onClick={() => setPromptOpen(false)} disabled={acting}>
+              I&apos;m done for today
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -11,6 +11,7 @@ import {
 } from '../services/scheduleSnapshot';
 import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
 import { computeTimeEntryComparisonV1 } from '../services/timeEntryComparison';
+import { resolveClockOutSubmission, shouldInvalidateClockDayStatus } from '../services/clockSubmission';
 
 type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
 type ClockStateValue = 0 | 1; // 0 = clocked out, 1 = clocked in
@@ -520,7 +521,7 @@ router.post(
       return;
     }
 
-    const finalize = Boolean((req.body as Record<string, unknown> | null | undefined)?.finalize);
+    const requestSnapshotRaw = (req.body as Record<string, unknown> | null | undefined)?.scheduleSnapshot;
 
     try {
       const payPeriod = await resolvePayPeriod(context.franchiseId, null);
@@ -549,33 +550,6 @@ router.post(
         return;
       }
 
-      const snapshot = finalize ? parseScheduleSnapshotV1((req.body as Record<string, unknown>)?.scheduleSnapshot) : null;
-      if (finalize && !snapshot) {
-        res.status(400).json({ error: 'scheduleSnapshot (v1) is required when finalize=true' });
-        return;
-      }
-
-      if (snapshot) {
-        if (snapshot.franchiseId !== context.franchiseId || snapshot.tutorId !== context.tutorId) {
-          res.status(403).json({ error: 'scheduleSnapshot does not match your session scope' });
-          return;
-        }
-
-        if (snapshot.workDate !== workDate) {
-          res.status(400).json({ error: 'scheduleSnapshot.workDate must match today in franchise timezone' });
-          return;
-        }
-
-        const signingSecret = getScheduleSnapshotSigningSecret();
-        if (signingSecret) {
-          const verify = verifyScheduleSnapshot(snapshot, signingSecret);
-          if (!verify.ok) {
-            res.status(400).json({ error: verify.error });
-            return;
-          }
-        }
-      }
-
       const pool = getPostgresPool();
       const client = await pool.connect();
 
@@ -585,10 +559,6 @@ router.post(
         const existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
         if (!existing) {
           await client.query('ROLLBACK');
-          if (finalize) {
-            res.status(404).json({ error: 'No time entry day found to finalize' });
-            return;
-          }
           res.status(200).json({
             state: buildClockStateResponse({
               timezone,
@@ -628,7 +598,7 @@ router.post(
             endAt: new Date(row.end_at).toISOString()
           };
 
-          if (day.status === 'approved' || day.status === 'denied') {
+          if (shouldInvalidateClockDayStatus(day.status)) {
             const invalidated = await client.query<TimeEntryDayRow>(
               `
                 UPDATE public.time_entry_days
@@ -754,7 +724,53 @@ router.post(
           day = updatedDayResult.rows[0];
         }
 
-        if (snapshot) {
+        if (closedSession) {
+          const storedSnapshot = parseScheduleSnapshotV1(day.schedule_snapshot);
+          let snapshot =
+            storedSnapshot &&
+            storedSnapshot.franchiseId === context.franchiseId &&
+            storedSnapshot.tutorId === context.tutorId &&
+            storedSnapshot.workDate === workDate
+              ? storedSnapshot
+              : null;
+
+          if (!snapshot) {
+            const parsed = parseScheduleSnapshotV1(requestSnapshotRaw);
+            if (!parsed) {
+              try {
+                await client.query('ROLLBACK');
+              } catch (rollbackErr) {
+                console.error('[clock] Failed to rollback after missing schedule snapshot:', rollbackErr);
+              }
+              res.status(400).json({ error: 'scheduleSnapshot (v1) is required to submit clocked time.' });
+              return;
+            }
+
+            if (parsed.franchiseId !== context.franchiseId || parsed.tutorId !== context.tutorId) {
+              await client.query('ROLLBACK');
+              res.status(403).json({ error: 'scheduleSnapshot does not match your session scope' });
+              return;
+            }
+
+            if (parsed.workDate !== workDate) {
+              await client.query('ROLLBACK');
+              res.status(400).json({ error: 'scheduleSnapshot.workDate must match today in franchise timezone' });
+              return;
+            }
+
+            const signingSecret = getScheduleSnapshotSigningSecret();
+            if (signingSecret) {
+              const verify = verifyScheduleSnapshot(parsed, signingSecret);
+              if (!verify.ok) {
+                await client.query('ROLLBACK');
+                res.status(400).json({ error: verify.error });
+                return;
+              }
+            }
+
+            snapshot = parsed;
+          }
+
           const sessionResult = await client.query<ClosedSessionRow>(
             `
               SELECT id, start_at, end_at, sort_order
@@ -789,11 +805,12 @@ router.post(
             return;
           }
 
-          const { matches, comparison } = computed;
-
-          const nextStatus: TimeEntryStatus = matches ? 'approved' : 'pending';
-          const decidedAt = matches ? new Date().toISOString() : null;
-          const decisionReason = matches ? 'auto-approved (exact schedule match)' : null;
+          const decision = resolveClockOutSubmission({
+            snapshot,
+            comparison: computed.comparison,
+            workDate,
+            timezone
+          });
 
           const updated = await client.query<TimeEntryDayRow>(
             `
@@ -826,25 +843,27 @@ router.post(
                 created_at,
                 updated_at
             `,
-            [nextStatus, timezone, snapshot, comparison, decidedAt, decisionReason, day.id]
+            [
+              decision.nextStatus,
+              timezone,
+              snapshot,
+              computed.comparison,
+              decision.decidedAt,
+              decision.decisionReason,
+              day.id
+            ]
           );
 
           const finalizedDay = updated.rows[0];
 
           await appendAudit(client, {
             dayId: finalizedDay.id,
-            action: matches ? 'auto_approved' : 'submitted',
-            actorAccountType: matches ? 'SYSTEM' : 'TUTOR',
-            actorAccountId: matches ? null : context.tutorId,
+            action: decision.audit.action,
+            actorAccountType: decision.audit.actorAccountType,
+            actorAccountId: decision.audit.actorAccountId,
             previousStatus: day.status,
             newStatus: finalizedDay.status,
-            metadata: {
-              workDate,
-              timezone,
-              scheduleSnapshot: snapshot,
-              comparison,
-              finalize: true
-            }
+            metadata: decision.audit.metadata
           });
 
           day = finalizedDay;
