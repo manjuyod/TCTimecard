@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { DateTime } from 'luxon';
 import { ApiError } from '../../lib/errors';
 import { ClockState, clockIn, clockOut, fetchClockState, fetchTutorScheduleSnapshot } from '../../lib/api';
@@ -7,7 +7,7 @@ import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { toast } from '../ui/toast';
-import { requestOpenWeeklyAttestation } from './WeeklyAttestationGate';
+import { requestOpenWeeklyAttestation, WEEKLY_ATTESTATION_UPDATED_EVENT } from './WeeklyAttestationGate';
 
 const parseSnapshotIntervals = (snapshot: unknown): Array<{ startAt: string; endAt: string }> => {
   if (!snapshot || typeof snapshot !== 'object') return [];
@@ -40,7 +40,7 @@ export function ClockWidget(): JSX.Element {
   const [acting, setActing] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const next = await fetchClockState();
@@ -51,11 +51,19 @@ export function ClockWidget(): JSX.Element {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
+
+  useEffect(() => {
+    const handleAttestationUpdate = () => {
+      void load();
+    };
+    window.addEventListener(WEEKLY_ATTESTATION_UPDATED_EVENT, handleAttestationUpdate);
+    return () => window.removeEventListener(WEEKLY_ATTESTATION_UPDATED_EVENT, handleAttestationUpdate);
+  }, [load]);
 
   const statusLabel = useMemo(() => {
     if (!state) return '—';
