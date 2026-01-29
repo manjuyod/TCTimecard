@@ -170,7 +170,10 @@ export const computeTimeEntryComparisonV1 = (params: {
 
   const manualUnion = normalizeIntervals(manualIntervals);
   const scheduleUnion = scheduleUnionResult.union;
-  const matches = intervalsEqual(manualUnion, scheduleUnion);
+  const manualMinutes = sumMinutes(manualUnion);
+  const scheduledMinutes = sumMinutes(scheduleUnion);
+  const exactMatch = intervalsEqual(manualUnion, scheduleUnion);
+  const matches = manualMinutes === scheduledMinutes;
 
   const manualOnly = subtractIntervals(manualUnion, scheduleUnion);
   const scheduledOnly = subtractIntervals(scheduleUnion, manualUnion);
@@ -179,14 +182,14 @@ export const computeTimeEntryComparisonV1 = (params: {
     version: 1,
     computedAt: params.computedAt ?? new Date().toISOString(),
     matches,
-    exactMatch: matches,
+    exactMatch,
     manual: {
       union: manualUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-      totalMinutes: sumMinutes(manualUnion)
+      totalMinutes: manualMinutes
     },
     scheduled: {
       union: scheduleUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-      totalMinutes: sumMinutes(scheduleUnion)
+      totalMinutes: scheduledMinutes
     },
     diffs: {
       manualOnly: manualOnly.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
@@ -196,4 +199,3 @@ export const computeTimeEntryComparisonV1 = (params: {
 
   return { ok: true, matches, comparison };
 };
-

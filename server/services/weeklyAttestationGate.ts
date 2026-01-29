@@ -25,8 +25,16 @@ export const enforcePriorWeekAttestation = async (params: {
 
   if (workLocal < currentWeekStart) return { ok: true };
 
-  const required = computeLastClosedWorkweek(params.timezone);
-  const requiredWeekEnd = required.weekEnd.toISODate();
+  let required: ReturnType<typeof computeLastClosedWorkweek>;
+  let requiredWeekEnd: string | null;
+  try {
+    required = computeLastClosedWorkweek(params.timezone);
+    requiredWeekEnd = required.weekEnd.toISODate();
+  } catch (err) {
+    const message = `[attestation] Failed to compute last closed workweek for timezone "${params.timezone}": ${err instanceof Error ? err.message : err}`;
+    console.error(message);
+    return { ok: false, error: message };
+  }
   if (!requiredWeekEnd) {
     const message = `[attestation] Unable to resolve last closed workweek end for timezone "${params.timezone}".`;
     console.error(message);
@@ -34,18 +42,25 @@ export const enforcePriorWeekAttestation = async (params: {
   }
 
   const pool = getPostgresPool();
-  const result = await pool.query(
-    `
-      SELECT 1
-      FROM public.weekly_attestations
-      WHERE franchiseid = $1
-        AND tutorid = $2
-        AND week_end = $3
-      LIMIT 1
-    `,
-    [params.franchiseId, params.tutorId, requiredWeekEnd]
-  );
+  try {
+    const result = await pool.query(
+      `
+        SELECT 1
+        FROM public.weekly_attestations
+        WHERE franchiseid = $1
+          AND tutorid = $2
+          AND week_end = $3
+        LIMIT 1
+      `,
+      [params.franchiseId, params.tutorId, requiredWeekEnd]
+    );
 
-  if (result.rowCount) return { ok: true };
+    if (result.rowCount && result.rowCount > 0) return { ok: true };
+  } catch (err) {
+    const message = `[attestation] Database error checking attestation: ${err instanceof Error ? err.message : err}`;
+    console.error(message);
+    return { ok: false, error: message };
+  }
+
   return { ok: false, weekEnd: requiredWeekEnd };
 };

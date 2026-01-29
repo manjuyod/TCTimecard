@@ -72,6 +72,17 @@ const parseIsoDateOnly = (value: unknown): string | null => {
   return dt.toISODate() ?? null;
 };
 
+const normalizeWorkDate = (value: unknown): string | null => {
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return DateTime.fromJSDate(value, { zone: 'UTC' }).toISODate();
+  }
+  const parsed = parseIsoDateOnly(value);
+  if (parsed) return parsed;
+  if (typeof value !== 'string') return null;
+  const fallback = DateTime.fromISO(value, { zone: 'UTC' }).toISODate();
+  return fallback ?? null;
+};
+
 const parseLimit = (value: unknown, defaultValue: number, maxValue: number): number => {
   const parsed = typeof value === 'string' || typeof value === 'number' ? Number(value) : Number.NaN;
   if (!Number.isInteger(parsed) || parsed <= 0) return defaultValue;
@@ -235,7 +246,7 @@ const mapDayRowToResponse = (day: TimeEntryDayRow, sessions: TimeEntrySessionRow
   id: day.id,
   franchiseId: day.franchiseid,
   tutorId: day.tutorid,
-  workDate: day.work_date,
+  workDate: normalizeWorkDate(day.work_date) ?? String(day.work_date ?? ''),
   timezone: day.timezone,
   status: day.status,
   scheduleSnapshot: day.schedule_snapshot,
@@ -332,7 +343,7 @@ router.get(
           id: day.id,
           franchiseId: day.franchiseid,
           tutorId: day.tutorid,
-          workDate: day.work_date,
+          workDate: normalizeWorkDate(day.work_date) ?? String(day.work_date ?? ''),
           timezone: day.timezone,
           status: day.status,
           scheduleSnapshot: day.schedule_snapshot,
@@ -680,10 +691,13 @@ router.post(
 
         if (!computed.ok) {
           const isStoredSessionError = computed.error.toLowerCase().includes('session');
-          res.status(400).json({
-            error: isStoredSessionError ? 'Stored sessions are invalid; re-save your day sessions.' : computed.error
-          });
+          const errorMessage = isStoredSessionError
+            ? 'Stored sessions are invalid; re-save your day sessions.'
+            : computed.error;
           await client.query('ROLLBACK');
+          res.status(400).json({
+            error: errorMessage
+          });
           return;
         }
 
@@ -691,7 +705,7 @@ router.post(
 
         const nextStatus: TimeEntryStatus = matches ? 'approved' : 'pending';
         const decidedAt = matches ? new Date().toISOString() : null;
-        const decisionReason = matches ? 'auto-approved (exact schedule match)' : null;
+        const decisionReason = matches ? 'auto-approved (matching scheduled minutes)' : null;
 
         const updated = await client.query<TimeEntryDayRow>(
           `
@@ -1129,7 +1143,12 @@ router.put(
         }
 
         const existingDay = existingResult.rows[0];
-        const workDate = existingDay.work_date;
+        const workDate = normalizeWorkDate(existingDay.work_date);
+        if (!workDate) {
+          await client.query('ROLLBACK');
+          res.status(500).json({ error: 'Unable to resolve work date for this entry.' });
+          return;
+        }
         const timezone = existingDay.timezone;
 
         const normalizedSessions = sessionsRaw
@@ -1167,10 +1186,10 @@ router.put(
         }>;
 
         if (normalizedSessions.length !== sessionsRaw.length) {
+          await client.query('ROLLBACK');
           res.status(400).json({
             error: 'Each session must include startAt/endAt as ISO timestamps with timezone offset, aligned to the minute, within workDate in franchise timezone.'
           });
-          await client.query('ROLLBACK');
           return;
         }
 
@@ -1179,8 +1198,8 @@ router.put(
           .sort((a, b) => a.startMinute - b.startMinute || a.endMinute - b.endMinute);
         for (let idx = 1; idx < sorted.length; idx += 1) {
           if (sorted[idx].startMinute < sorted[idx - 1].endMinute) {
-            res.status(400).json({ error: 'Sessions must not overlap' });
             await client.query('ROLLBACK');
+            res.status(400).json({ error: 'Sessions must not overlap' });
             return;
           }
         }

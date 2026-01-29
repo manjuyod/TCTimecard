@@ -15,7 +15,7 @@ const baseSnapshot: ScheduleSnapshotV1 = {
   intervals: [{ startAt: '2026-01-02T09:00:00-06:00', endAt: '2026-01-02T10:00:00-06:00' }]
 };
 
-test('clock-out auto submission: out-of-schedule minutes -> pending with auto metadata', () => {
+test('clock-out auto submission: mismatched minutes -> pending with auto metadata', () => {
   const computed = computeTimeEntryComparisonV1({
     sessions: [{ startAt: '2026-01-02T09:00:00-06:00', endAt: '2026-01-02T10:30:00-06:00' }],
     snapshotIntervals: baseSnapshot.intervals
@@ -35,12 +35,33 @@ test('clock-out auto submission: out-of-schedule minutes -> pending with auto me
   assert.equal(decision.decisionReason, null);
   assert.equal(decision.audit.action, 'submitted');
   assert.equal(decision.audit.metadata.auto, true);
-  assert.equal(decision.audit.metadata.reason, 'outside_schedule');
+  assert.equal(decision.audit.metadata.reason, 'minutes_mismatch');
 });
 
-test('clock-out auto submission: exact match -> auto-approved', () => {
+test('clock-out auto submission: matching minutes -> auto-approved', () => {
   const computed = computeTimeEntryComparisonV1({
     sessions: [{ startAt: '2026-01-02T09:00:00-06:00', endAt: '2026-01-02T10:00:00-06:00' }],
+    snapshotIntervals: baseSnapshot.intervals
+  });
+
+  assert.equal(computed.ok, true);
+  if (!computed.ok) return;
+
+  const decision = resolveClockOutSubmission({
+    snapshot: baseSnapshot,
+    comparison: computed.comparison,
+    workDate: baseSnapshot.workDate,
+    timezone: baseSnapshot.timezone
+  });
+
+  assert.equal(decision.nextStatus, 'approved');
+  assert.equal(decision.audit.action, 'auto_approved');
+  assert.ok(decision.decidedAt);
+});
+
+test('clock-out auto submission: same minutes, different intervals -> auto-approved', () => {
+  const computed = computeTimeEntryComparisonV1({
+    sessions: [{ startAt: '2026-01-02T08:00:00-06:00', endAt: '2026-01-02T09:00:00-06:00' }],
     snapshotIntervals: baseSnapshot.intervals
   });
 

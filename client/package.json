@@ -9,10 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@fullcalendar/core": "^5.11.5",
-    "@fullcalendar/daygrid": "^5.11.5",
-    "@fullcalendar/interaction": "^5.11.5",
-    "@fullcalendar/react": "^5.11.5",
+    "@fullcalendar/core": "^6.1.0",
+    "@fullcalendar/daygrid": "^6.1.0",
+    "@fullcalendar/interaction": "^6.1.0",
+    "@fullcalendar/luxon3": "^6.1.0",
+    "@fullcalendar/react": "^6.1.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-slot": "^1.2.4",

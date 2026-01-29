@@ -54,6 +54,7 @@ const parseIsoDateOnly = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
 
   const dt = DateTime.fromISO(trimmed, { zone: 'UTC', setZone: true });
   if (!dt.isValid) return null;
@@ -68,6 +69,18 @@ const parseIsoTimestamp = (value: unknown): string | null => {
   if (!trimmed.includes('T')) return null;
   if (Number.isNaN(Date.parse(trimmed))) return null;
   return trimmed;
+};
+
+const ISO_TIMESTAMP_WITH_OFFSET =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+const parseIsoTimestampWithOffset = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!ISO_TIMESTAMP_WITH_OFFSET.test(trimmed)) return null;
+  const dt = DateTime.fromISO(trimmed, { setZone: true });
+  return dt.isValid ? trimmed : null;
 };
 
 export const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | null => {
@@ -85,7 +98,7 @@ export const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | nu
   if (!Number.isFinite(franchiseId) || !Number.isFinite(tutorId)) return null;
   if (!workDate) return null;
   if (!timezone) return null;
-  if (!Number.isInteger(slotMinutes) || slotMinutes <= 0) return null;
+  if (!Number.isInteger(slotMinutes) || slotMinutes <= 0 || slotMinutes > 1440) return null;
 
   const entriesRaw = record.entries;
   const intervalsRaw = record.intervals;
@@ -93,21 +106,25 @@ export const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | nu
 
   if (!Array.isArray(entriesRaw) || !Array.isArray(intervalsRaw)) return null;
 
-  const entries = entriesRaw
-    .filter((entry) => isPlainObject(entry))
-    .map((entry) => ({
-      timeId: Number((entry as Record<string, unknown>).timeId),
-      timeLabel: typeof (entry as Record<string, unknown>).timeLabel === 'string' ? String((entry as Record<string, unknown>).timeLabel) : ''
-    }))
-    .filter((entry) => Number.isFinite(entry.timeId));
+  const entries: ScheduleSnapshotEntry[] = [];
+  for (const entry of entriesRaw) {
+    if (!isPlainObject(entry)) return null;
+    const recordEntry = entry as Record<string, unknown>;
+    const timeId = Number(recordEntry.timeId);
+    const timeLabel = recordEntry.timeLabel;
+    if (!Number.isFinite(timeId) || typeof timeLabel !== 'string') return null;
+    entries.push({ timeId, timeLabel: String(timeLabel) });
+  }
 
-  const intervals = intervalsRaw
-    .filter((interval) => isPlainObject(interval))
-    .map((interval) => ({
-      startAt: typeof (interval as Record<string, unknown>).startAt === 'string' ? String((interval as Record<string, unknown>).startAt) : '',
-      endAt: typeof (interval as Record<string, unknown>).endAt === 'string' ? String((interval as Record<string, unknown>).endAt) : ''
-    }))
-    .filter((interval) => Boolean(interval.startAt) && Boolean(interval.endAt));
+  const intervals: ScheduleSnapshotInterval[] = [];
+  for (const interval of intervalsRaw) {
+    if (!isPlainObject(interval)) return null;
+    const recordInterval = interval as Record<string, unknown>;
+    const startAt = parseIsoTimestampWithOffset(recordInterval.startAt);
+    const endAt = parseIsoTimestampWithOffset(recordInterval.endAt);
+    if (!startAt || !endAt) return null;
+    intervals.push({ startAt, endAt });
+  }
 
   const signature = typeof record.signature === 'string' ? record.signature : undefined;
 

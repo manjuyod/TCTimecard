@@ -32,8 +32,24 @@ test('computeTimeEntryComparisonV1: adjacent schedule blocks merge to a match', 
   if (!result.ok) return;
 
   assert.equal(result.matches, true);
+  assert.equal(result.comparison.exactMatch, true);
   assert.deepEqual(result.comparison.diffs.manualOnly, []);
   assert.deepEqual(result.comparison.diffs.scheduledOnly, []);
+});
+
+test('computeTimeEntryComparisonV1: minute totals can match even when intervals differ', () => {
+  const result = computeTimeEntryComparisonV1({
+    sessions: [{ startAt: '2026-01-01T09:00:00-06:00', endAt: '2026-01-01T10:00:00-06:00' }],
+    snapshotIntervals: [{ startAt: '2026-01-01T08:00:00-06:00', endAt: '2026-01-01T09:00:00-06:00' }]
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.equal(result.matches, true);
+  assert.equal(result.comparison.exactMatch, false);
+  assert.equal(result.comparison.manual.totalMinutes, 60);
+  assert.equal(result.comparison.scheduled.totalMinutes, 60);
 });
 
 test('computeTimeEntryComparisonV1: manual-only time produces diffs', () => {
@@ -67,4 +83,3 @@ test('computeTimeEntryComparisonV1: rejects non-minute-aligned times', () => {
   if (result.ok) return;
   assert.match(result.error, /minute/i);
 });
-
