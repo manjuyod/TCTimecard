@@ -81,6 +81,16 @@ const formatWorkDate = (value: string): string => {
   return parsed.isValid ? parsed.toISODate() ?? value : value;
 };
 
+/**
+ * Render the Approvals Inbox UI for reviewing, approving, and denying tutor requests scoped to a franchise.
+ *
+ * Displays pending Extra Hours, Time Entry Variances, and Time Off requests; provides controls to approve or deny
+ * requests, review time-entry variances, and adjust sessions via a "Fix time errors" workflow that routes edits
+ * to pending approval. When a franchise selector is available, the page scopes requests to the entered franchise ID;
+ * otherwise it uses the session's franchise context.
+ *
+ * @returns A JSX element containing the approvals page UI.
+ */
 export function ApprovalsPage(): JSX.Element {
   const { session } = useAuth();
   const sessionFranchiseId = getSessionFranchiseId(session);
