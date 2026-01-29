@@ -72,10 +72,12 @@ const parseSnapshotIntervals = (snapshot: unknown): Array<{ startAt: string; end
     .filter(Boolean) as Array<{ startAt: string; endAt: string }>;
 };
 
-const browserTimeZone = DateTime.local().zoneName;
+const browserTimeZone = DateTime.local().zoneName ?? 'UTC';
 
 const formatWorkDate = (value: string): string => {
-  const parsed = DateTime.fromISO(value, { zone: browserTimeZone, setZone: true });
+  const parsed = browserTimeZone
+    ? DateTime.fromISO(value, { zone: browserTimeZone, setZone: true })
+    : DateTime.fromISO(value);
   return parsed.isValid ? parsed.toISODate() ?? value : value;
 };
 

@@ -54,6 +54,7 @@ const parseIsoDateOnly = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
 
   const dt = DateTime.fromISO(trimmed, { zone: 'UTC', setZone: true });
   if (!dt.isValid) return null;
@@ -85,7 +86,7 @@ export const parseScheduleSnapshotV1 = (value: unknown): ScheduleSnapshotV1 | nu
   if (!Number.isFinite(franchiseId) || !Number.isFinite(tutorId)) return null;
   if (!workDate) return null;
   if (!timezone) return null;
-  if (!Number.isInteger(slotMinutes) || slotMinutes <= 0) return null;
+  if (!Number.isInteger(slotMinutes) || slotMinutes <= 0 || slotMinutes > 1440) return null;
 
   const entriesRaw = record.entries;
   const intervalsRaw = record.intervals;

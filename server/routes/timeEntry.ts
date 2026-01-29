@@ -691,10 +691,13 @@ router.post(
 
         if (!computed.ok) {
           const isStoredSessionError = computed.error.toLowerCase().includes('session');
-          res.status(400).json({
-            error: isStoredSessionError ? 'Stored sessions are invalid; re-save your day sessions.' : computed.error
-          });
+          const errorMessage = isStoredSessionError
+            ? 'Stored sessions are invalid; re-save your day sessions.'
+            : computed.error;
           await client.query('ROLLBACK');
+          res.status(400).json({
+            error: errorMessage
+          });
           return;
         }
 
@@ -1142,8 +1145,8 @@ router.put(
         const existingDay = existingResult.rows[0];
         const workDate = normalizeWorkDate(existingDay.work_date);
         if (!workDate) {
-          res.status(500).json({ error: 'Unable to resolve work date for this entry.' });
           await client.query('ROLLBACK');
+          res.status(500).json({ error: 'Unable to resolve work date for this entry.' });
           return;
         }
         const timezone = existingDay.timezone;
@@ -1183,10 +1186,10 @@ router.put(
         }>;
 
         if (normalizedSessions.length !== sessionsRaw.length) {
+          await client.query('ROLLBACK');
           res.status(400).json({
             error: 'Each session must include startAt/endAt as ISO timestamps with timezone offset, aligned to the minute, within workDate in franchise timezone.'
           });
-          await client.query('ROLLBACK');
           return;
         }
 
@@ -1195,8 +1198,8 @@ router.put(
           .sort((a, b) => a.startMinute - b.startMinute || a.endMinute - b.endMinute);
         for (let idx = 1; idx < sorted.length; idx += 1) {
           if (sorted[idx].startMinute < sorted[idx - 1].endMinute) {
-            res.status(400).json({ error: 'Sessions must not overlap' });
             await client.query('ROLLBACK');
+            res.status(400).json({ error: 'Sessions must not overlap' });
             return;
           }
         }

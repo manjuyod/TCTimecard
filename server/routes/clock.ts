@@ -592,6 +592,11 @@ router.post(
           );
 
           const row = closed.rows[0];
+          if (!closed.rowCount || !row || !row.end_at) {
+            await client.query('ROLLBACK');
+            res.status(500).json({ error: 'Failed to close session' });
+            return;
+          }
           closedSession = {
             id: row.id,
             startAt: new Date(row.start_at).toISOString(),

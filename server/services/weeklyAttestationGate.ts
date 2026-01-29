@@ -34,18 +34,25 @@ export const enforcePriorWeekAttestation = async (params: {
   }
 
   const pool = getPostgresPool();
-  const result = await pool.query(
-    `
-      SELECT 1
-      FROM public.weekly_attestations
-      WHERE franchiseid = $1
-        AND tutorid = $2
-        AND week_end = $3
-      LIMIT 1
-    `,
-    [params.franchiseId, params.tutorId, requiredWeekEnd]
-  );
+  try {
+    const result = await pool.query(
+      `
+        SELECT 1
+        FROM public.weekly_attestations
+        WHERE franchiseid = $1
+          AND tutorid = $2
+          AND week_end = $3
+        LIMIT 1
+      `,
+      [params.franchiseId, params.tutorId, requiredWeekEnd]
+    );
 
-  if (result.rowCount) return { ok: true };
+    if (result.rowCount && result.rowCount > 0) return { ok: true };
+  } catch (err) {
+    const message = `[attestation] Database error checking attestation: ${err instanceof Error ? err.message : err}`;
+    console.error(message);
+    return { ok: false, error: message };
+  }
+
   return { ok: false, weekEnd: requiredWeekEnd };
 };
