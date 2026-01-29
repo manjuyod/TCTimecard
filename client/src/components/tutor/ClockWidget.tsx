@@ -34,6 +34,15 @@ const hasScheduledTimeRemaining = (snapshot: unknown, timezone: string): boolean
   });
 };
 
+/**
+ * Displays current clock status and controls for clocking in/out, handling schedule snapshots, and weekly attestation.
+ *
+ * Shows the user's clock state, started time, timezone, and day status badge; provides actions to clock in or out,
+ * automatically handles schedule snapshot submission and attestation blocking, and optionally prompts when scheduled
+ * time remains after clocking out.
+ *
+ * @returns A React element representing the clock UI.
+ */
 export function ClockWidget(): JSX.Element {
   const [state, setState] = useState<ClockState | null>(null);
   const [loading, setLoading] = useState(true);
