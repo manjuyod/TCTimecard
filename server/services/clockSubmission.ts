@@ -42,7 +42,7 @@ export const resolveClockOutSubmission = (params: {
         timezone: params.timezone,
         scheduleSnapshot: params.snapshot,
         comparison: params.comparison,
-        auto: matches,
+        auto: true,
         reason: matches ? 'minutes_match' : 'minutes_mismatch',
         source: 'clock_out'
       }

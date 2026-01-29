@@ -25,8 +25,16 @@ export const enforcePriorWeekAttestation = async (params: {
 
   if (workLocal < currentWeekStart) return { ok: true };
 
-  const required = computeLastClosedWorkweek(params.timezone);
-  const requiredWeekEnd = required.weekEnd.toISODate();
+  let required: ReturnType<typeof computeLastClosedWorkweek>;
+  let requiredWeekEnd: string | null;
+  try {
+    required = computeLastClosedWorkweek(params.timezone);
+    requiredWeekEnd = required.weekEnd.toISODate();
+  } catch (err) {
+    const message = `[attestation] Failed to compute last closed workweek for timezone "${params.timezone}": ${err instanceof Error ? err.message : err}`;
+    console.error(message);
+    return { ok: false, error: message };
+  }
   if (!requiredWeekEnd) {
     const message = `[attestation] Unable to resolve last closed workweek end for timezone "${params.timezone}".`;
     console.error(message);

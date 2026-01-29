@@ -115,6 +115,7 @@ export function ClockWidget(): JSX.Element {
       try {
         snapshot = await fetchTutorScheduleSnapshot(state.workDate);
       } catch {
+        setActing(false);
         toast.error('Schedule snapshot unavailable. Try again from the calendar.');
         return;
       }

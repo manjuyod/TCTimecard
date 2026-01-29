@@ -764,7 +764,14 @@ router.post(
             }
 
             const signingSecret = getScheduleSnapshotSigningSecret();
-            if (signingSecret) {
+            if (!signingSecret) {
+              if (process.env.NODE_ENV === 'production') {
+                await client.query('ROLLBACK');
+                res.status(500).json({ error: 'Schedule snapshot signing secret is required.' });
+                return;
+              }
+              console.warn('[clock] Missing schedule snapshot signing secret; accepting unsigned snapshot.');
+            } else {
               const verify = verifyScheduleSnapshot(parsed, signingSecret);
               if (!verify.ok) {
                 await client.query('ROLLBACK');
