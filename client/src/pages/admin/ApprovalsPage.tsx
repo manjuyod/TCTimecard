@@ -72,6 +72,13 @@ const parseSnapshotIntervals = (snapshot: unknown): Array<{ startAt: string; end
     .filter(Boolean) as Array<{ startAt: string; endAt: string }>;
 };
 
+const browserTimeZone = DateTime.local().zoneName;
+
+const formatWorkDate = (value: string): string => {
+  const parsed = DateTime.fromISO(value, { zone: browserTimeZone, setZone: true });
+  return parsed.isValid ? parsed.toISODate() ?? value : value;
+};
+
 export function ApprovalsPage(): JSX.Element {
   const { session } = useAuth();
   const sessionFranchiseId = getSessionFranchiseId(session);
@@ -326,8 +333,8 @@ export function ApprovalsPage(): JSX.Element {
     if (day.sessions?.length) {
       setFixSessions(
         day.sessions.map((s) => ({
-          start: DateTime.fromISO(s.startAt, { setZone: true }).setZone(day.timezone).toFormat('HH:mm'),
-          end: DateTime.fromISO(s.endAt, { setZone: true }).setZone(day.timezone).toFormat('HH:mm')
+          start: DateTime.fromISO(s.startAt, { setZone: true }).setZone(browserTimeZone).toFormat('HH:mm'),
+          end: DateTime.fromISO(s.endAt, { setZone: true }).setZone(browserTimeZone).toFormat('HH:mm')
         }))
       );
       return;
@@ -339,7 +346,7 @@ export function ApprovalsPage(): JSX.Element {
   const buildFixSessionsPayload = (): { ok: true; sessions: Array<{ startAt: string; endAt: string }> } | { ok: false; error: string } => {
     if (!fixDay) return { ok: false, error: 'No day selected' };
 
-    const baseDate = DateTime.fromISO(fixDay.workDate, { zone: fixDay.timezone, setZone: true }).startOf('day');
+    const baseDate = DateTime.fromISO(fixDay.workDate, { zone: browserTimeZone, setZone: true }).startOf('day');
     if (!baseDate.isValid) return { ok: false, error: 'Invalid work date/timezone' };
 
     const parseTime = (value: string): { hour: number; minute: number } | null => {
@@ -593,7 +600,7 @@ export function ApprovalsPage(): JSX.Element {
                   <p className="text-xs text-muted-foreground">{day.tutorEmail || 'Email unavailable'}</p>
                 </TableCell>
                 <TableCell>
-                  <p className="text-sm font-semibold">{day.workDate}</p>
+                  <p className="text-sm font-semibold">{formatWorkDate(day.workDate)}</p>
                   <p className="text-xs text-muted-foreground">{day.submittedAt ? formatDateTime(day.submittedAt) : ''}</p>
                 </TableCell>
                 <TableCell>
@@ -769,7 +776,7 @@ export function ApprovalsPage(): JSX.Element {
           {selectedDay ? (
             <>
               <DialogHeader>
-                <DialogTitle>Time Entry Variance – {selectedDay.workDate}</DialogTitle>
+                <DialogTitle>Time Entry Variance – {formatWorkDate(selectedDay.workDate)}</DialogTitle>
                 <DialogDescription>
                   {selectedDay.tutorName || `Tutor #${selectedDay.tutorId}`} · {selectedDay.tutorEmail || 'Email unavailable'}
                 </DialogDescription>
@@ -813,7 +820,7 @@ export function ApprovalsPage(): JSX.Element {
                           <p className="font-semibold text-slate-900">{delta !== null ? `${delta} min` : 'n/a'}</p>
                         </div>
                         <div>
-                          <p className="text-xs text-muted-foreground">Exact match</p>
+                          <p className="text-xs text-muted-foreground">Minutes match</p>
                           <p className="font-semibold text-slate-900">
                             {totals.matches === null ? 'n/a' : totals.matches ? 'Yes' : 'No'}
                           </p>
@@ -830,8 +837,8 @@ export function ApprovalsPage(): JSX.Element {
                       {parseSnapshotIntervals(selectedDay.scheduleSnapshot).length ? (
                         parseSnapshotIntervals(selectedDay.scheduleSnapshot).map((i) => (
                           <Badge key={`${i.startAt}-${i.endAt}`} variant="secondary">
-                            {DateTime.fromISO(i.startAt, { setZone: true }).setZone(selectedDay.timezone).toFormat('h:mm a')} -{' '}
-                            {DateTime.fromISO(i.endAt, { setZone: true }).setZone(selectedDay.timezone).toFormat('h:mm a')}
+                            {DateTime.fromISO(i.startAt, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')} -{' '}
+                            {DateTime.fromISO(i.endAt, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')}
                           </Badge>
                         ))
                       ) : (
@@ -846,8 +853,8 @@ export function ApprovalsPage(): JSX.Element {
                       {selectedDay.sessions?.length ? (
                         selectedDay.sessions.map((s) => (
                           <Badge key={`${s.startAt}-${s.endAt}-${s.sortOrder}`} variant="muted">
-                            {DateTime.fromISO(s.startAt, { setZone: true }).setZone(selectedDay.timezone).toFormat('h:mm a')} -{' '}
-                            {DateTime.fromISO(s.endAt, { setZone: true }).setZone(selectedDay.timezone).toFormat('h:mm a')}
+                            {DateTime.fromISO(s.startAt, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')} -{' '}
+                            {DateTime.fromISO(s.endAt, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')}
                           </Badge>
                         ))
                       ) : (
@@ -896,7 +903,7 @@ export function ApprovalsPage(): JSX.Element {
           {fixDay ? (
             <>
               <DialogHeader>
-                <DialogTitle>Fix time errors – {fixDay.workDate}</DialogTitle>
+                <DialogTitle>Fix time errors – {formatWorkDate(fixDay.workDate)}</DialogTitle>
                 <DialogDescription>
                   Adjust session times and provide a reason. Saving routes the day to pending approval.
                 </DialogDescription>
@@ -906,7 +913,10 @@ export function ApprovalsPage(): JSX.Element {
                 {fixError ? <InlineError message={fixError} /> : null}
 
                 <div className="space-y-2">
-                  <p className="text-sm font-semibold text-slate-900">Sessions</p>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-slate-900">Sessions</p>
+                    <Badge variant="muted">Local time ({browserTimeZone})</Badge>
+                  </div>
                   {fixSessions.map((row, idx) => (
                     <div key={idx} className="flex flex-wrap items-end gap-2 rounded-lg border bg-white p-3">
                       <div className="flex-1 min-w-[140px] space-y-2">

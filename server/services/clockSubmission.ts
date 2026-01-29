@@ -27,7 +27,7 @@ export const resolveClockOutSubmission = (params: {
   const matches = params.comparison.matches;
   const nextStatus: 'pending' | 'approved' = matches ? 'approved' : 'pending';
   const decidedAt = matches ? new Date().toISOString() : null;
-  const decisionReason = matches ? 'auto-approved (exact schedule match)' : null;
+  const decisionReason = matches ? 'auto-approved (matching scheduled minutes)' : null;
 
   return {
     nextStatus,
@@ -43,7 +43,7 @@ export const resolveClockOutSubmission = (params: {
         scheduleSnapshot: params.snapshot,
         comparison: params.comparison,
         auto: true,
-        reason: matches ? 'exact_match' : 'outside_schedule',
+        reason: matches ? 'minutes_match' : 'minutes_mismatch',
         source: 'clock_out'
       }
     }

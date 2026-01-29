@@ -123,7 +123,7 @@ export function ClockWidget(): JSX.Element {
       setState(next);
       if (next.dayStatus === 'pending') {
         toast.success(
-          'This time was automatically submitted for director approval because it falls outside scheduled hours.'
+          'This time was automatically submitted for admin approval because the recorded minutes do not match scheduled minutes.'
         );
       } else if (next.dayStatus === 'approved') {
         toast.success('Clocked out and auto-approved.');
@@ -184,7 +184,7 @@ export function ClockWidget(): JSX.Element {
 
             {state?.dayStatus === 'pending' ? (
               <p className="mt-1 text-xs text-amber-900">
-                This time was automatically submitted for director approval because it falls outside scheduled hours.
+                This time was automatically submitted for admin approval because the recorded minutes do not match scheduled minutes.
               </p>
             ) : null}
           </div>
@@ -209,7 +209,7 @@ export function ClockWidget(): JSX.Element {
             <DialogTitle>Are you taking a break?</DialogTitle>
             <DialogDescription>
               You still have scheduled time remaining today. If you are ending early, your time was automatically
-              submitted for director approval because it falls outside scheduled hours.
+              submitted for admin approval because the recorded minutes do not match scheduled minutes.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">

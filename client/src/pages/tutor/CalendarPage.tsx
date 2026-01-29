@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import FullCalendar, { DatesSetArg, EventClickArg } from '@fullcalendar/react';
+import FullCalendar from '@fullcalendar/react';
+import type { DatesSetArg, EventClickArg } from '@fullcalendar/core';
+import luxonPlugin from '@fullcalendar/luxon3';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import type { DateClickArg } from '@fullcalendar/interaction';
 import interactionPlugin from '@fullcalendar/interaction';
-import '@fullcalendar/daygrid/main.css';
 import { DateTime } from 'luxon';
 import {
   CalendarEntry,
@@ -91,7 +92,14 @@ export function TutorCalendarPage(): JSX.Element {
     void load(month);
   }, [month]);
 
-  const timezone = range?.timezone ?? 'UTC';
+  const browserTimeZone = useMemo(() => {
+    const zone = DateTime.local().zoneName;
+    const probe = DateTime.now().setZone(zone);
+    return probe.isValid ? zone : 'UTC';
+  }, []);
+  const calendarTimeZone = useMemo(() => {
+    return browserTimeZone;
+  }, [browserTimeZone]);
 
   const findDay = (workDate: string): TimeEntryDay | null => timeEntries.find((day) => day.workDate === workDate) ?? null;
 
@@ -111,9 +119,9 @@ export function TutorCalendarPage(): JSX.Element {
       .filter(Boolean) as Array<{ startAt: string; endAt: string }>;
   };
 
-  const formatTimeRange = (startAt: string, endAt: string): string => {
-    const start = DateTime.fromISO(startAt, { setZone: true }).setZone(timezone);
-    const end = DateTime.fromISO(endAt, { setZone: true }).setZone(timezone);
+  const formatTimeRange = (startAt: string, endAt: string, zone = browserTimeZone): string => {
+    const start = DateTime.fromISO(startAt, { setZone: true }).setZone(zone);
+    const end = DateTime.fromISO(endAt, { setZone: true }).setZone(zone);
     if (!start.isValid || !end.isValid) return `${startAt} - ${endAt}`;
     return `${start.toFormat('h:mm a')} - ${end.toFormat('h:mm a')}`;
   };
@@ -121,14 +129,15 @@ export function TutorCalendarPage(): JSX.Element {
   const openEntry = (workDate: string) => {
     setEntryDate(workDate);
     const existing = findDay(workDate);
+    const entryZone = browserTimeZone;
     if (existing?.sessions?.length) {
       setEntryDraftSessions(
         existing.sessions
           .slice()
           .sort((a, b) => a.sortOrder - b.sortOrder)
           .map((s) => ({
-            start: DateTime.fromISO(s.startAt, { setZone: true }).setZone(timezone).toFormat('HH:mm'),
-            end: DateTime.fromISO(s.endAt, { setZone: true }).setZone(timezone).toFormat('HH:mm')
+            start: DateTime.fromISO(s.startAt, { setZone: true }).setZone(entryZone).toFormat('HH:mm'),
+            end: DateTime.fromISO(s.endAt, { setZone: true }).setZone(entryZone).toFormat('HH:mm')
           }))
       );
     } else {
@@ -160,9 +169,10 @@ export function TutorCalendarPage(): JSX.Element {
 
   const buildSessionsPayload = (): { ok: true; sessions: Array<{ startAt: string; endAt: string }> } | { ok: false; error: string } => {
     if (!entryDate) return { ok: false, error: 'Select a day first.' };
-    if (!range?.timezone) return { ok: false, error: 'Timezone not available.' };
+    const entryZone = browserTimeZone;
+    if (!entryZone) return { ok: false, error: 'Timezone not available. Reload the calendar.' };
 
-    const base = DateTime.fromISO(entryDate, { zone: timezone, setZone: true }).startOf('day');
+    const base = DateTime.fromISO(entryDate, { zone: entryZone, setZone: true }).startOf('day');
     if (!base.isValid) return { ok: false, error: 'Invalid work date.' };
 
     const sessions = entryDraftSessions
@@ -354,9 +364,14 @@ export function TutorCalendarPage(): JSX.Element {
     }
   };
 
-  const timezoneLabel = range?.timezone ? `Times shown in ${range.timezone}` : 'Local time';
+  const timezoneLabel = `Times shown in ${browserTimeZone}`;
 
   const activeDay = entryDate ? findDay(entryDate) : null;
+  const entryDateLabel = useMemo(() => {
+    if (!entryDate) return null;
+    const parsed = DateTime.fromISO(entryDate, { zone: browserTimeZone, setZone: true });
+    return parsed.isValid ? parsed.toISODate() : entryDate;
+  }, [entryDate, browserTimeZone]);
   const activeSnapshot = entryDate ? snapshotsByDate[entryDate] : null;
   const activeSnapshotIntervals = parseSnapshotIntervals(activeSnapshot);
   const activeComparison = activeDay?.comparison && typeof activeDay.comparison === 'object' ? (activeDay.comparison as Record<string, unknown>) : null;
@@ -399,8 +414,9 @@ export function TutorCalendarPage(): JSX.Element {
         <CardContent>
           <div className="relative min-h-[500px]">
             <FullCalendar
-              plugins={[dayGridPlugin, interactionPlugin]}
+              plugins={[dayGridPlugin, interactionPlugin, luxonPlugin]}
               initialView="dayGridMonth"
+              timeZone={calendarTimeZone}
               events={events}
               height="auto"
               headerToolbar={{
@@ -432,7 +448,7 @@ export function TutorCalendarPage(): JSX.Element {
       <Dialog open={Boolean(entryDate)} onOpenChange={(open) => !open && setEntryDate(null)}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{entryDate ? `Time Entry – ${entryDate}` : 'Time Entry'}</DialogTitle>
+            <DialogTitle>{entryDateLabel ? `Time Entry – ${entryDateLabel}` : 'Time Entry'}</DialogTitle>
             <DialogDescription>Enter your actual start/end times (minute-accurate). Add split segments for breaks.</DialogDescription>
           </DialogHeader>
 
@@ -475,8 +491,8 @@ export function TutorCalendarPage(): JSX.Element {
                     }
                     setEntryDraftSessions(
                       activeSnapshotIntervals.map((i) => ({
-                        start: DateTime.fromISO(i.startAt, { setZone: true }).setZone(timezone).toFormat('HH:mm'),
-                        end: DateTime.fromISO(i.endAt, { setZone: true }).setZone(timezone).toFormat('HH:mm')
+                        start: DateTime.fromISO(i.startAt, { setZone: true }).setZone(browserTimeZone).toFormat('HH:mm'),
+                        end: DateTime.fromISO(i.endAt, { setZone: true }).setZone(browserTimeZone).toFormat('HH:mm')
                       }))
                     );
                   }}
@@ -504,7 +520,7 @@ export function TutorCalendarPage(): JSX.Element {
                 <div className="mt-2 flex flex-wrap gap-2">
                   {activeSnapshotIntervals.map((interval) => (
                     <Badge key={`${interval.startAt}-${interval.endAt}`} variant="secondary">
-                      {formatTimeRange(interval.startAt, interval.endAt)}
+                      {formatTimeRange(interval.startAt, interval.endAt, browserTimeZone)}
                     </Badge>
                   ))}
                 </div>
@@ -516,7 +532,10 @@ export function TutorCalendarPage(): JSX.Element {
             )}
 
             <div className="space-y-2">
-              <p className="text-sm font-semibold text-slate-900">Your entered sessions</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-900">Your entered sessions</p>
+                <Badge variant="muted">Local time ({browserTimeZone})</Badge>
+              </div>
               {entryDraftSessions.map((row, idx) => (
                 <div key={idx} className="flex flex-wrap items-end gap-2 rounded-lg border bg-white p-3">
                   <div className="flex-1 min-w-[140px] space-y-2">
@@ -580,7 +599,7 @@ export function TutorCalendarPage(): JSX.Element {
                   </div>
                 </div>
                 {matches !== null ? (
-                  <p className="mt-2 text-xs text-muted-foreground">Exact match: {matches ? 'Yes' : 'No'}</p>
+                  <p className="mt-2 text-xs text-muted-foreground">Minutes match: {matches ? 'Yes' : 'No'}</p>
                 ) : null}
               </div>
             ) : null}
@@ -608,7 +627,7 @@ export function TutorCalendarPage(): JSX.Element {
           <DialogHeader>
             <DialogTitle>Before you submit</DialogTitle>
             <DialogDescription>
-              Review the timekeeping handbook statement below. After submit, mismatches require admin approval.
+              Review the timekeeping handbook statement below. After submit, days with different minute totals require admin approval.
             </DialogDescription>
           </DialogHeader>
 

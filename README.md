@@ -69,7 +69,7 @@ Clock in/out:
 Manual time entry + approvals:
 - `PUT /api/time-entry/me/day/:workDate` (save sessions draft; multiple sessions per day allowed)
 - `GET /api/time-entry/me?start=YYYY-MM-DD&end=YYYY-MM-DD`
-- `POST /api/time-entry/me/day/:workDate/submit` (requires `scheduleSnapshot` from the calendar API (month/day snapshot endpoints); zero-tolerance match auto-approves, otherwise pending)
+- `POST /api/time-entry/me/day/:workDate/submit` (requires `scheduleSnapshot` from the calendar API (month/day snapshot endpoints); matching minute totals auto-approve, otherwise pending)
 - `GET /api/time-entry/admin/pending?franchiseId=...&limit=...`
 - `POST /api/time-entry/admin/day/:id/decide` (body: `decision=approve|deny`, `reason` required for `deny`, min 5 chars)
 - `PUT /api/time-entry/admin/day/:id` (admin fixes time errors; requires `reason` (min 5 chars); resets to pending)
@@ -182,7 +182,7 @@ Clock in/out:
 2. `Clock Out` (closes the open session with server time truncated to the minute).
 3. If the day still has scheduled blocks remaining, choose:
    - **Break** (do not finalize), or
-   - **Ending early** (finalize submits with a signed schedule snapshot; auto-approves on exact match, otherwise routes to pending).
+   - **Ending early** (finalize submits with a signed schedule snapshot; auto-approves when minute totals match, otherwise routes to pending).
 
 Admin fixes:
 1. Admin → Approvals → Time Entry Variances → Review a day.
