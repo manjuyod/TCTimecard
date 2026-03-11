@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  AdminDailySummaryRow,
   AdminSummaryRow,
   PayPeriod,
+  fetchPayPeriodDailySummary,
   fetchPayPeriodCurrent,
   fetchPayPeriodSummary
 } from '../../lib/api';
@@ -46,34 +48,46 @@ export function PayPeriodSummaryPage(): JSX.Element {
     return parsed;
   };
 
-  const resolveForDate = async (id: number): Promise<string | null> => {
-    if (picker === 'current') return null;
+  const resolveForDate = async (id: number): Promise<{ ok: true; forDate: string | null } | { ok: false }> => {
+    if (picker === 'current') return { ok: true, forDate: null };
     if (picker === 'custom') {
       if (!customDate) {
         setError('Choose a date to resolve pay period.');
-        return null;
+        return { ok: false };
       }
-      return customDate;
+      return { ok: true, forDate: customDate };
     }
     // previous: look up current and walk back one day
     const current = await fetchPayPeriodCurrent(id);
     const base = new Date(current.startDate);
     base.setDate(base.getDate() - 1);
-    return base.toISOString().slice(0, 10);
+    return { ok: true, forDate: base.toISOString().slice(0, 10) };
+  };
+
+  const resolveSelection = async (
+    forcedFranchiseId?: number | null
+  ): Promise<{ franchiseId: number; forDate: string | null } | null> => {
+    const id = forcedFranchiseId ?? validateFranchise();
+    if (id === null) return null;
+
+    const resolved = await resolveForDate(id);
+    if (!resolved.ok) return null;
+
+    return { franchiseId: id, forDate: resolved.forDate };
   };
 
   const load = async (forcedFranchiseId?: number | null) => {
-    const id = forcedFranchiseId ?? validateFranchise();
-    if (id === null) return;
-    setFranchiseId(id);
+    const selection = await resolveSelection(forcedFranchiseId);
+    if (!selection) return;
+
+    setFranchiseId(selection.franchiseId);
     setLoading(true);
     setError(null);
 
     try {
-      const forDate = await resolveForDate(id);
       const result = await fetchPayPeriodSummary({
-        franchiseId: id,
-        forDate,
+        franchiseId: selection.franchiseId,
+        forDate: selection.forDate,
         positiveOnly: showPositiveOnly
       });
       setRows(result.rows);
@@ -84,6 +98,43 @@ export function PayPeriodSummaryPage(): JSX.Element {
       toast.error(message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const exportDailyCsv = async () => {
+    const selection = await resolveSelection();
+    if (!selection) return;
+    setFranchiseId(selection.franchiseId);
+    setError(null);
+
+    try {
+      const result = await fetchPayPeriodDailySummary({
+        franchiseId: selection.franchiseId,
+        forDate: selection.forDate
+      });
+
+      if (!result.rows.length) {
+        toast.error('No daily hours to export');
+        return;
+      }
+
+      const header = 'Tutor,Date,Total Hours';
+      const lines = result.rows.map(
+        (row: AdminDailySummaryRow) =>
+          `"${row.lastName}, ${row.firstName}",${row.workDate},${row.totalHours.toFixed(2)}`
+      );
+      const csvContent = [header, ...lines].join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'pay-period-daily-summary.csv';
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to export daily pay period summary';
+      setError(message);
+      toast.error(message);
     }
   };
 
@@ -165,6 +216,9 @@ export function PayPeriodSummaryPage(): JSX.Element {
           </Button>
           <Button variant="outline" onClick={exportCsv} disabled={!displayRows.length}>
             Export CSV
+          </Button>
+          <Button variant="outline" onClick={() => void exportDailyCsv()}>
+            Export Daily CSV
           </Button>
         </div>
       </div>

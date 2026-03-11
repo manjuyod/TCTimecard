@@ -15,13 +15,21 @@ import timeOffRoutes from './routes/timeoff';
 import timeEntryRoutes from './routes/timeEntry';
 import attestationRoutes from './routes/attestation';
 import clockRoutes from './routes/clock';
-import { validateDbEnv } from './config/env';
+import { validateDbEnv, validateRuntimeEnv } from './config/env';
 import { SESSION_COOKIE_NAME, SESSION_SECRET, SESSION_SAME_SITE, SESSION_SECURE, SESSION_TTL_MS } from './config/session';
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+
+try {
+  validateRuntimeEnv();
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error('[startup] Runtime environment validation failed:', message);
+  process.exit(1);
+}
 
 if (process.env.SKIP_DB_VALIDATION !== 'true') {
   try {

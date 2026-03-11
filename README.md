@@ -114,7 +114,7 @@ Payroll / pay period resolution
 - `BIWEEKLY_ANCHOR_DATE` (optional, default `2024-01-01`) - anchor date for computed biweekly periods.
 
 Manual entry + approvals
-- `SCHEDULE_SNAPSHOT_SIGNING_SECRET` (optional) - when set, calendar responses include signed schedule snapshots and manual entry submission requires a valid signature.
+- `SCHEDULE_SNAPSHOT_SIGNING_SECRET` (required in production; optional in development) - calendar responses include signed schedule snapshots and clock-out/manual submission validation uses this signature.
 - `SCHEDULE_SLOT_MINUTES` (optional, default `60`) - minutes per schedule slot when deriving schedule intervals from `TimeLabel`.
 
 Feature flags / guardrails
