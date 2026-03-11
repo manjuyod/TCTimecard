@@ -134,3 +134,22 @@ export const validateDbEnv = () => ({
   postgres: getPostgresConfig(),
   mssql: getMssqlConfig()
 });
+
+const getTrimmed = (value: unknown): string => {
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+};
+
+export const validateRuntimeEnv = (): void => {
+  const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+  if (!isProduction) return;
+
+  const missing: string[] = [];
+  if (!getTrimmed(process.env.SESSION_SECRET)) missing.push('SESSION_SECRET');
+  if (!getTrimmed(process.env.SCHEDULE_SNAPSHOT_SIGNING_SECRET)) missing.push('SCHEDULE_SNAPSHOT_SIGNING_SECRET');
+
+  if (missing.length > 0) {
+    const suffix = missing.length > 1 ? 's' : '';
+    throw new Error(`[env] Missing required production environment variable${suffix}: ${missing.join(', ')}`);
+  }
+};

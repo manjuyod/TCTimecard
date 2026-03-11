@@ -1,6 +1,7 @@
 import { ApiError } from './errors';
 
 export type AccountType = 'ADMIN' | 'TUTOR';
+export type PayPeriodType = 'weekly' | 'biweekly' | 'semimonthly' | 'monthly' | 'custom_semimonthly';
 
 export interface Session {
   accountType: AccountType;
@@ -69,7 +70,7 @@ export interface TimeOffRequest {
 export interface PayPeriod {
   franchiseId: number;
   timezone: string;
-  periodType: string;
+  periodType: PayPeriodType;
   startDate: string;
   endDate: string;
   startAt: string;
@@ -77,6 +78,16 @@ export interface PayPeriod {
   source: 'override' | 'computed';
   overrideId: number | null;
   resolvedForDate: string;
+}
+
+export interface PayrollSettings {
+  franchiseId: number;
+  timezone: string;
+  payPeriodType: PayPeriodType;
+  customPeriod1StartDay: number | null;
+  customPeriod1EndDay: number | null;
+  customPeriod2StartDay: number | null;
+  customPeriod2EndDay: number | null;
 }
 
 export interface HoursSummary {
@@ -393,6 +404,37 @@ export const fetchPayPeriodSummary = async (args: {
   return result;
 };
 
+export const fetchPayrollSettings = async (franchiseId?: number | null) => {
+  const query = franchiseId !== undefined && franchiseId !== null ? `?franchiseId=${franchiseId}` : '';
+  const result = await apiFetch<{ settings: PayrollSettings }>(`/api/pay-period/settings${query}`);
+  return result.settings;
+};
+
+export const updatePayrollSettings = async (args: {
+  franchiseId?: number | null;
+  payPeriodType: PayPeriodType;
+  customPeriod1StartDay?: number;
+  customPeriod1EndDay?: number;
+  customPeriod2StartDay?: number;
+  customPeriod2EndDay?: number;
+}) => {
+  const payload: Record<string, unknown> = {
+    payPeriodType: args.payPeriodType
+  };
+
+  if (args.franchiseId !== undefined && args.franchiseId !== null) payload.franchiseId = args.franchiseId;
+  if (args.customPeriod1StartDay !== undefined) payload.customPeriod1StartDay = args.customPeriod1StartDay;
+  if (args.customPeriod1EndDay !== undefined) payload.customPeriod1EndDay = args.customPeriod1EndDay;
+  if (args.customPeriod2StartDay !== undefined) payload.customPeriod2StartDay = args.customPeriod2StartDay;
+  if (args.customPeriod2EndDay !== undefined) payload.customPeriod2EndDay = args.customPeriod2EndDay;
+
+  const result = await apiFetch<{ settings: PayrollSettings }>('/api/pay-period/settings', {
+    method: 'PUT',
+    body: JSON.stringify(payload)
+  });
+  return result.settings;
+};
+
 export interface AdminSummaryRow {
   tutorId: number;
   firstName: string;
@@ -401,6 +443,24 @@ export interface AdminSummaryRow {
   extraHours: number;
   totalHours: number;
 }
+
+export interface AdminDailySummaryRow {
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  workDate: string;
+  totalHours: number;
+}
+
+export const fetchPayPeriodDailySummary = async (args: { franchiseId: number; forDate?: string | null }) => {
+  const params = new URLSearchParams();
+  params.set('franchiseId', String(args.franchiseId));
+  if (args.forDate) params.set('forDate', args.forDate);
+  const result = await apiFetch<{ payPeriod: PayPeriod; rows: AdminDailySummaryRow[] }>(
+    `/api/hours/admin/pay-period/summary-daily?${params.toString()}`
+  );
+  return result;
+};
 
 export const fetchTimeEntries = async (args: { start: string; end: string; limit?: number }) => {
   const params = new URLSearchParams({ start: args.start, end: args.end });

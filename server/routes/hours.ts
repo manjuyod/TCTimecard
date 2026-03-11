@@ -54,6 +54,7 @@ type MinuteInterval = { startMinute: number; endMinute: number };
 type ApprovedEntryDayRow = {
   id: number;
   tutorid: number;
+  work_date: unknown;
   schedule_snapshot: unknown | null;
 };
 
@@ -226,7 +227,7 @@ const fetchApprovedDaysForTutor = async (
   const pool = getPostgresPool();
   const result = await pool.query<ApprovedEntryDayRow>(
     `
-      SELECT id, tutorid, schedule_snapshot
+      SELECT id, tutorid, work_date, schedule_snapshot
       FROM public.time_entry_days
       WHERE franchiseid = $1
         AND tutorid = $2
@@ -249,7 +250,7 @@ const fetchApprovedDaysForFranchise = async (
   const pool = getPostgresPool();
   const result = await pool.query<ApprovedEntryDayRow>(
     `
-      SELECT id, tutorid, schedule_snapshot
+      SELECT id, tutorid, work_date, schedule_snapshot
       FROM public.time_entry_days
       WHERE franchiseid = $1
         AND status = 'approved'
@@ -326,6 +327,22 @@ const formatMssqlDate = (value: unknown): string | null => {
   return null;
 };
 
+const formatDateOnly = (value: unknown): string | null => {
+  if (value instanceof Date) {
+    return DateTime.fromJSDate(value, { zone: 'utc' }).toISODate();
+  }
+
+  if (typeof value === 'string') {
+    const parsed = parseIsoDateOnly(value);
+    if (parsed) return parsed;
+
+    const dateTime = DateTime.fromISO(value, { zone: 'utc', setZone: true });
+    return dateTime.isValid ? dateTime.toISODate() : null;
+  }
+
+  return null;
+};
+
 const fetchCalendarEntries = async (
   tutorId: number,
   monthStartISO: string,
@@ -355,6 +372,22 @@ const fetchCalendarEntries = async (
 };
 
 type TutorName = { firstName: string; lastName: string };
+type TutorRollupTotals = { tutoringMinutes: number; extraMinutes: number; totalMinutes: number };
+type AdminSummaryRow = {
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  tutoringHours: number;
+  extraHours: number;
+  totalHours: number;
+};
+type AdminDailySummaryRow = {
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  workDate: string;
+  totalHours: number;
+};
 
 const fetchTutorNamesByIds = async (tutorIds: number[]): Promise<Map<number, TutorName>> => {
   if (!tutorIds.length) return new Map();
@@ -387,6 +420,95 @@ const fetchTutorNamesByIds = async (tutorIds: number[]): Promise<Map<number, Tut
   }
 
   return nameMap;
+};
+
+const compareTutorNames = (
+  a: { firstName: string; lastName: string },
+  b: { firstName: string; lastName: string }
+): number => {
+  const lastNameCompare = a.lastName.localeCompare(b.lastName);
+  if (lastNameCompare !== 0) return lastNameCompare;
+  return a.firstName.localeCompare(b.firstName);
+};
+
+const buildAdminSummaryRows = (
+  totalsByTutor: Map<number, TutorRollupTotals>,
+  namesById: Map<number, TutorName>,
+  positiveOnly: boolean
+): AdminSummaryRow[] => {
+  const rows = Array.from(totalsByTutor.entries())
+    .map(([tutorId, totals]) => {
+      const name = namesById.get(tutorId) ?? { firstName: '', lastName: '' };
+      return {
+        tutorId,
+        firstName: name.firstName,
+        lastName: name.lastName,
+        tutoringHours: roundHours2(totals.tutoringMinutes / 60),
+        extraHours: roundHours2(totals.extraMinutes / 60),
+        totalHours: roundHours2(totals.totalMinutes / 60)
+      };
+    });
+
+  const filteredRows = positiveOnly ? rows.filter((row) => row.totalHours > 0) : rows;
+
+  filteredRows.sort(compareTutorNames);
+  return filteredRows;
+};
+
+const buildAdminDailySummaryRows = (
+  approvedDays: ApprovedEntryDayRow[],
+  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>,
+  namesById: Map<number, TutorName>
+): AdminDailySummaryRow[] => {
+  const groupedTotals = new Map<string, { tutorId: number; workDate: string; totalMinutes: number }>();
+
+  for (const day of approvedDays) {
+    const workDate = formatDateOnly(day.work_date);
+    if (!workDate) continue;
+
+    const totals = computeRollupTotalsForDays([day], sessionsByDay);
+    if (totals.totalMinutes <= 0) continue;
+
+    const key = `${day.tutorid}:${workDate}`;
+    const current = groupedTotals.get(key) ?? { tutorId: day.tutorid, workDate, totalMinutes: 0 };
+    groupedTotals.set(key, {
+      ...current,
+      totalMinutes: current.totalMinutes + totals.totalMinutes
+    });
+  }
+
+  const rows = Array.from(groupedTotals.values()).map((row) => {
+    const name = namesById.get(row.tutorId) ?? { firstName: '', lastName: '' };
+    return {
+      tutorId: row.tutorId,
+      firstName: name.firstName,
+      lastName: name.lastName,
+      workDate: row.workDate,
+      totalHours: roundHours2(row.totalMinutes / 60)
+    };
+  });
+
+  rows.sort((a, b) => compareTutorNames(a, b) || a.workDate.localeCompare(b.workDate));
+  return rows;
+};
+
+const buildTutorTotalsByTutor = (
+  approvedDays: ApprovedEntryDayRow[],
+  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>
+): Map<number, TutorRollupTotals> => {
+  const totalsByTutor = new Map<number, TutorRollupTotals>();
+
+  for (const day of approvedDays) {
+    const totals = computeRollupTotalsForDays([day], sessionsByDay);
+    const current = totalsByTutor.get(day.tutorid) ?? { tutoringMinutes: 0, extraMinutes: 0, totalMinutes: 0 };
+    totalsByTutor.set(day.tutorid, {
+      tutoringMinutes: current.tutoringMinutes + totals.tutoringMinutes,
+      extraMinutes: current.extraMinutes + totals.extraMinutes,
+      totalMinutes: current.totalMinutes + totals.totalMinutes
+    });
+  }
+
+  return totalsByTutor;
 };
 
 router.get(
@@ -701,52 +823,10 @@ router.get(
 
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
       const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-
-      const totalsByTutor = new Map<number, { tutoringMinutes: number; extraMinutes: number; totalMinutes: number }>();
-      for (const day of approvedDays) {
-        const totals = computeRollupTotalsForDays([day], sessionsByDay);
-        const current = totalsByTutor.get(day.tutorid) ?? { tutoringMinutes: 0, extraMinutes: 0, totalMinutes: 0 };
-        totalsByTutor.set(day.tutorid, {
-          tutoringMinutes: current.tutoringMinutes + totals.tutoringMinutes,
-          extraMinutes: current.extraMinutes + totals.extraMinutes,
-          totalMinutes: current.totalMinutes + totals.totalMinutes
-        });
-      }
-
+      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay);
       const tutorIds = Array.from(totalsByTutor.keys());
       const namesById = await fetchTutorNamesByIds(tutorIds);
-
-      const rows = tutorIds
-        .map((tutorId) => {
-          const totals = totalsByTutor.get(tutorId);
-          if (!totals) return null;
-          const name = namesById.get(tutorId) ?? { firstName: '', lastName: '' };
-          const tutoringHoursRaw = totals.tutoringMinutes / 60;
-          const extraHoursRaw = totals.extraMinutes / 60;
-          const totalHoursRaw = totals.totalMinutes / 60;
-          return {
-            tutorId,
-            firstName: name.firstName,
-            lastName: name.lastName,
-            tutoringHours: roundHours2(tutoringHoursRaw),
-            extraHours: roundHours2(extraHoursRaw),
-            totalHours: roundHours2(totalHoursRaw)
-          };
-        })
-        .filter(Boolean) as Array<{
-        tutorId: number;
-        firstName: string;
-        lastName: string;
-        tutoringHours: number;
-        extraHours: number;
-        totalHours: number;
-      }>;
-
-      rows.sort((a, b) => {
-        const lastNameCompare = a.lastName.localeCompare(b.lastName);
-        if (lastNameCompare !== 0) return lastNameCompare;
-        return a.firstName.localeCompare(b.firstName);
-      });
+      const rows = buildAdminSummaryRows(totalsByTutor, namesById, false);
 
       res.status(200).json({ payPeriod, rows });
     } catch (err) {
@@ -777,55 +857,42 @@ router.get(
 
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
       const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-
-      const totalsByTutor = new Map<number, { tutoringMinutes: number; extraMinutes: number; totalMinutes: number }>();
-      for (const day of approvedDays) {
-        const totals = computeRollupTotalsForDays([day], sessionsByDay);
-        const current = totalsByTutor.get(day.tutorid) ?? { tutoringMinutes: 0, extraMinutes: 0, totalMinutes: 0 };
-        totalsByTutor.set(day.tutorid, {
-          tutoringMinutes: current.tutoringMinutes + totals.tutoringMinutes,
-          extraMinutes: current.extraMinutes + totals.extraMinutes,
-          totalMinutes: current.totalMinutes + totals.totalMinutes
-        });
-      }
-
+      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay);
       const tutorIds = Array.from(totalsByTutor.keys());
       const namesById = await fetchTutorNamesByIds(tutorIds);
+      const rows = buildAdminSummaryRows(totalsByTutor, namesById, true);
 
-      const rows: Array<{
-        tutorId: number;
-        firstName: string;
-        lastName: string;
-        tutoringHours: number;
-        extraHours: number;
-        totalHours: number;
-      }> = [];
+      res.status(200).json({ payPeriod, rows });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
-      for (const tutorId of tutorIds) {
-        const totals = totalsByTutor.get(tutorId);
-        if (!totals) continue;
+router.get(
+  '/hours/admin/pay-period/summary-daily',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
+    if (scope.error || scope.franchiseId === null) {
+      res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
+      return;
+    }
+    const franchiseId = scope.franchiseId;
 
-        const tutoringHoursRaw = totals.tutoringMinutes / 60;
-        const extraHoursRaw = totals.extraMinutes / 60;
-        const totalHoursRaw = totals.totalMinutes / 60;
-        if (totalHoursRaw <= 0) continue;
+    const { dateISO: forDate, isValid } = extractForDateParam((req.query as Record<string, unknown>).forDate);
+    if (!isValid) {
+      invalidForDate(res);
+      return;
+    }
 
-        const name = namesById.get(tutorId) ?? { firstName: '', lastName: '' };
-        rows.push({
-          tutorId,
-          firstName: name.firstName,
-          lastName: name.lastName,
-          tutoringHours: roundHours2(tutoringHoursRaw),
-          extraHours: roundHours2(extraHoursRaw),
-          totalHours: roundHours2(totalHoursRaw)
-        });
-      }
+    try {
+      const payPeriod = await resolvePayPeriod(franchiseId, forDate);
 
-      rows.sort((a, b) => {
-        const lastNameCompare = a.lastName.localeCompare(b.lastName);
-        if (lastNameCompare !== 0) return lastNameCompare;
-        return a.firstName.localeCompare(b.firstName);
-      });
+      const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
+      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
+      const namesById = await fetchTutorNamesByIds(approvedDays.map((day) => day.tutorid));
+      const rows = buildAdminDailySummaryRows(approvedDays, sessionsByDay, namesById);
 
       res.status(200).json({ payPeriod, rows });
     } catch (err) {

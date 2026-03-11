@@ -2,8 +2,10 @@ import { Pool } from 'pg';
 import { getPostgresConfig } from '../config/env';
 
 let pool: Pool | undefined;
+let poolOverride: Pool | undefined;
 
 export const getPostgresPool = (): Pool => {
+  if (poolOverride) return poolOverride;
   if (pool) return pool;
 
   const config = getPostgresConfig();
@@ -14,4 +16,8 @@ export const getPostgresPool = (): Pool => {
   });
 
   return pool;
+};
+
+export const setPostgresPoolOverride = (nextPool?: Pool): void => {
+  poolOverride = nextPool;
 };
