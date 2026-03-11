@@ -46,6 +46,13 @@ type TutorNameRow = {
   lastName: string;
 };
 
+type CalendarEntryRow = {
+  tutorId: number;
+  scheduleDate: string | Date;
+  timeId: number;
+  timeLabel: unknown;
+};
+
 type QueryResult = { rowCount: number; rows: Array<Record<string, unknown>> };
 
 afterEach(() => {
@@ -122,29 +129,47 @@ const createPostgresPool = (args: {
   };
 };
 
-const createMssqlPool = (tutors: TutorNameRow[]) => ({
+const createMssqlPool = (tutors: TutorNameRow[], calendarEntries: CalendarEntryRow[] = []) => ({
   request() {
-    const inputs = new Map<string, number>();
+    const inputs = new Map<string, unknown>();
     return {
-      input(name: string, _type: unknown, value: number) {
-        inputs.set(name, Number(value));
+      input(name: string, _type: unknown, value: unknown) {
+        inputs.set(name, value);
         return this;
       },
       async query(sqlText: string) {
-        if (!sqlText.includes('FROM dbo.tblTutors')) {
-          throw new Error(`Unexpected MSSQL query: ${sqlText}`);
+        if (sqlText.includes('FROM dbo.tblTutors')) {
+          const requestedIds = new Set(Array.from(inputs.values()).map(Number));
+          return {
+            recordset: tutors
+              .filter((row) => requestedIds.has(row.tutorId))
+              .map((row) => ({
+                TutorID: row.tutorId,
+                FirstName: row.firstName,
+                LastName: row.lastName
+              }))
+          };
         }
 
-        const requestedIds = new Set(Array.from(inputs.values()));
-        return {
-          recordset: tutors
-            .filter((row) => requestedIds.has(row.tutorId))
-            .map((row) => ({
-              TutorID: row.tutorId,
-              FirstName: row.firstName,
-              LastName: row.lastName
-            }))
-        };
+        if (sqlText.includes('FROM dbo.tblSessionSchedule')) {
+          const tutorId = Number(inputs.get('p_tutor_id'));
+          const monthStart = String(inputs.get('p_month_start') ?? '');
+          const nextMonthStart = String(inputs.get('p_next_month_start') ?? '');
+          return {
+            recordset: calendarEntries
+              .filter((row) => {
+                const scheduleDate = toDateOnly(row.scheduleDate);
+                return row.tutorId === tutorId && scheduleDate >= monthStart && scheduleDate < nextMonthStart;
+              })
+              .map((row) => ({
+                ScheduleDate: row.scheduleDate,
+                TimeID: row.timeId,
+                TimeLabel: row.timeLabel
+              }))
+          };
+        }
+
+        throw new Error(`Unexpected MSSQL query: ${sqlText}`);
       }
     };
   }
@@ -257,6 +282,84 @@ test('admin daily summary groups by tutor-day, filters zero totals, and sorts by
   });
 });
 
+test('admin pay-period summary uses scheduled snapshot totals for tutoring hours', async () => {
+  setPostgresPoolOverride(
+    createPostgresPool({
+      settings: [
+        {
+          franchiseid: 77,
+          policytype: 'strict_approval',
+          timezone: 'America/Los_Angeles',
+          pay_period_type: 'weekly',
+          auto_email_enabled: false,
+          custom_period_1_start_day: null,
+          custom_period_1_end_day: null,
+          custom_period_2_start_day: null,
+          custom_period_2_end_day: null
+        }
+      ],
+      approvedDays: [
+        {
+          id: 91,
+          franchiseid: 77,
+          tutorid: 10,
+          work_date: '2026-02-03',
+          schedule_snapshot: {
+            version: 1,
+            franchiseId: 77,
+            tutorId: 10,
+            workDate: '2026-02-03',
+            timezone: 'America/Los_Angeles',
+            slotMinutes: 60,
+            entries: [
+              { timeId: 1, timeLabel: '10:00 AM' },
+              { timeId: 2, timeLabel: '11:00 AM' }
+            ],
+            intervals: [
+              { startAt: '2026-02-03T10:00:00.000-08:00', endAt: '2026-02-03T11:00:00.000-08:00' },
+              { startAt: '2026-02-03T11:00:00.000-08:00', endAt: '2026-02-03T12:00:00.000-08:00' }
+            ]
+          }
+        }
+      ],
+      sessions: [
+        { entry_day_id: 91, start_at: '2026-02-03T18:05:00.000Z', end_at: '2026-02-03T19:00:00.000Z' },
+        { entry_day_id: 91, start_at: '2026-02-03T20:00:00.000Z', end_at: '2026-02-03T20:30:00.000Z' }
+      ]
+    }) as never
+  );
+  setMssqlPoolOverride(createMssqlPool([{ tutorId: 10, firstName: 'Ben', lastName: 'Baker' }]) as never);
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/hours/admin/pay-period/summary?franchiseId=77&forDate=2026-02-03`);
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      rows: Array<{
+        tutorId: number;
+        firstName: string;
+        lastName: string;
+        tutoringHours: number;
+        extraHours: number;
+        totalHours: number;
+      }>;
+    };
+
+    assert.deepEqual(body.rows, [
+      {
+        tutorId: 10,
+        firstName: 'Ben',
+        lastName: 'Baker',
+        tutoringHours: 2,
+        extraHours: 0.5,
+        totalHours: 2.5
+      }
+    ]);
+  });
+});
+
 test('daily summary rejects invalid forDate values', async () => {
   setPostgresPoolOverride(createPostgresPool({ settings: [], approvedDays: [], sessions: [] }) as never);
   setMssqlPoolOverride(createMssqlPool([]) as never);
@@ -323,6 +426,55 @@ test('selector-disabled admins are locked to their session franchise for daily s
     assert.equal(body.payPeriod.franchiseId, 9);
     assert.deepEqual(body.rows, [
       { tutorId: 41, firstName: 'Nina', lastName: 'North', workDate: '2026-02-02', totalHours: 2 }
+    ]);
+  });
+});
+
+test('calendar day snapshot normalizes MSSQL time values into usable intervals', async () => {
+  setPostgresPoolOverride(createPostgresPool({ settings: [], approvedDays: [], sessions: [] }) as never);
+  setMssqlPoolOverride(
+    createMssqlPool([], [
+      {
+        tutorId: 3228,
+        scheduleDate: '2026-03-07',
+        timeId: 3,
+        timeLabel: new Date('1970-01-01T10:00:00.000Z')
+      },
+      {
+        tutorId: 3228,
+        scheduleDate: '2026-03-07',
+        timeId: 5,
+        timeLabel: new Date('1970-01-01T11:00:00.000Z')
+      }
+    ]) as never
+  );
+
+  const app = createApp({ accountType: 'TUTOR', accountId: 3228, franchiseId: 87, displayName: 'Tutor User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/calendar/me/day/2026-03-07/snapshot`);
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      snapshot: {
+        entries: Array<{ timeId: number; timeLabel: string }>;
+        intervals: Array<{ startAt: string; endAt: string }>;
+      };
+    };
+
+    assert.deepEqual(body.snapshot.entries, [
+      { timeId: 3, timeLabel: '10:00 AM' },
+      { timeId: 5, timeLabel: '11:00 AM' }
+    ]);
+    assert.deepEqual(body.snapshot.intervals, [
+      {
+        startAt: '2026-03-07T10:00:00.000-08:00',
+        endAt: '2026-03-07T11:00:00.000-08:00'
+      },
+      {
+        startAt: '2026-03-07T11:00:00.000-08:00',
+        endAt: '2026-03-07T12:00:00.000-08:00'
+      }
     ]);
   });
 });

@@ -9,6 +9,7 @@ import { localDateRangeToUtcBounds, resolvePayPeriod, type PayPeriod } from '../
 import {
   deriveIntervalsFromEntries,
   getScheduleSlotMinutes,
+  normalizeScheduleTimeLabel,
   getScheduleSnapshotSigningSecret,
   signScheduleSnapshot,
   type ScheduleSnapshotEntry,
@@ -63,6 +64,8 @@ type ApprovedEntrySessionRow = {
   start_at: unknown;
   end_at: unknown;
 };
+
+type RollupMode = 'actual_overlap' | 'scheduled_snapshot';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -291,7 +294,8 @@ const fetchSessionsByDayIds = async (dayIds: number[]): Promise<Map<number, Appr
 
 const computeRollupTotalsForDays = (
   days: ApprovedEntryDayRow[],
-  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>
+  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>,
+  mode: RollupMode = 'actual_overlap'
 ): { tutoringMinutes: number; extraMinutes: number; totalMinutes: number } => {
   let tutoringMinutes = 0;
   let extraMinutes = 0;
@@ -303,12 +307,13 @@ const computeRollupTotalsForDays = (
     const manualMinutes = sumIntervalMinutes(manualUnion);
 
     const scheduleUnion = day.schedule_snapshot ? parseScheduleUnionFromSnapshot(day.schedule_snapshot) : [];
+    const scheduledMinutes = sumIntervalMinutes(scheduleUnion);
     const withinScheduledMinutes = scheduleUnion.length ? overlapMinutes(manualUnion, scheduleUnion) : 0;
     const outsideScheduledMinutes = Math.max(0, manualMinutes - withinScheduledMinutes);
 
-    tutoringMinutes += withinScheduledMinutes;
+    tutoringMinutes += mode === 'scheduled_snapshot' ? scheduledMinutes : withinScheduledMinutes;
     extraMinutes += outsideScheduledMinutes;
-    totalMinutes += manualMinutes;
+    totalMinutes += mode === 'scheduled_snapshot' ? scheduledMinutes + outsideScheduledMinutes : manualMinutes;
   }
 
   return { tutoringMinutes, extraMinutes, totalMinutes };
@@ -363,7 +368,7 @@ const fetchCalendarEntries = async (
 
     const timeId = toNumber((row as Record<string, unknown>).TimeID);
     const timeLabelRaw = (row as Record<string, unknown>).TimeLabel;
-    const timeLabel = timeLabelRaw !== undefined && timeLabelRaw !== null ? String(timeLabelRaw) : '';
+    const timeLabel = normalizeScheduleTimeLabel(timeLabelRaw);
 
     entries.push({ scheduleDate, timeId, timeLabel });
   }
@@ -466,7 +471,7 @@ const buildAdminDailySummaryRows = (
     const workDate = formatDateOnly(day.work_date);
     if (!workDate) continue;
 
-    const totals = computeRollupTotalsForDays([day], sessionsByDay);
+    const totals = computeRollupTotalsForDays([day], sessionsByDay, 'scheduled_snapshot');
     if (totals.totalMinutes <= 0) continue;
 
     const key = `${day.tutorid}:${workDate}`;
@@ -494,12 +499,13 @@ const buildAdminDailySummaryRows = (
 
 const buildTutorTotalsByTutor = (
   approvedDays: ApprovedEntryDayRow[],
-  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>
+  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>,
+  mode: RollupMode = 'actual_overlap'
 ): Map<number, TutorRollupTotals> => {
   const totalsByTutor = new Map<number, TutorRollupTotals>();
 
   for (const day of approvedDays) {
-    const totals = computeRollupTotalsForDays([day], sessionsByDay);
+    const totals = computeRollupTotalsForDays([day], sessionsByDay, mode);
     const current = totalsByTutor.get(day.tutorid) ?? { tutoringMinutes: 0, extraMinutes: 0, totalMinutes: 0 };
     totalsByTutor.set(day.tutorid, {
       tutoringMinutes: current.tutoringMinutes + totals.tutoringMinutes,
@@ -823,7 +829,7 @@ router.get(
 
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
       const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay);
+      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay, 'scheduled_snapshot');
       const tutorIds = Array.from(totalsByTutor.keys());
       const namesById = await fetchTutorNamesByIds(tutorIds);
       const rows = buildAdminSummaryRows(totalsByTutor, namesById, false);
@@ -857,7 +863,7 @@ router.get(
 
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
       const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay);
+      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay, 'scheduled_snapshot');
       const tutorIds = Array.from(totalsByTutor.keys());
       const namesById = await fetchTutorNamesByIds(tutorIds);
       const rows = buildAdminSummaryRows(totalsByTutor, namesById, true);
