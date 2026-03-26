@@ -4,7 +4,7 @@ A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring 
 
 ## What's included
 - Tutor: dashboard hour totals (week / pay period / month), clock in/out (server-time minute precision) + status widget, calendar view (schedule + time off overlay), manual entry of arrival/departure (supporting break splits) with automatic approval requests on any mismatch to scheduled hours, weekly attestation (hard-blocking next-week entry until signed), submit/cancel time off.
-- Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary table (copy/export CSV) driven by approved manual entries.
+- Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary comparison table (CRM reported hours vs approved logged hours), tutor drilldown modal by date, legacy clipboard copy, and grouped pay-period review export in Excel or CSV with spreadsheet-formula neutralization and oversized-export guardrails.
 - Auth: MSSQL-backed login with optional multi-account selection; cookie sessions (rolling 15 minutes).
 - Data: tutoring schedule + tutor/franchise identity from MSSQL; requests + payroll config from Postgres.
 
@@ -86,6 +86,11 @@ Time off:
 - `GET /api/timeoff/admin/pending?franchiseId=...&limit=...`
 - `POST /api/timeoff/:id/decide`
 
+Admin pay-period review:
+- `GET /api/hours/admin/pay-period/summary?franchiseId=...&forDate=...` (CRM-vs-logged tutor summary)
+- `GET /api/hours/admin/pay-period/summary-detail?franchiseId=...&tutorId=...&forDate=...` (daily tutor drilldown)
+- `GET /api/hours/admin/pay-period/export?franchiseId=...&forDate=...&format=xlsx|csv` (grouped Excel or flat CSV review export; spreadsheet-safe tutor names; rejects oversized datasets)
+
 ## Environment variables
 Use `.env` locally or Replit Secrets. `.env.example` includes a full template.
 
@@ -134,7 +139,7 @@ Google Calendar (optional; used on time off approvals)
   - Approval uses the franchise Gmail ID as both the impersonation subject and the `calendarId` for event inserts.
 
 ## Database expectations
-This repo expects these Postgres tables to exist (DDL is captured in `AgentPrompts/02_postgres_schema.json`):
+This repo expects these Postgres tables to exist (DDL is captured in `specs/archive/AgentPrompts/02_postgres_schema.json`):
 - `public.extrahours`
 - `public.franchise_payroll_settings`
 - `public.franchise_pay_period_overrides`
@@ -188,3 +193,10 @@ Admin fixes:
 1. Admin → Approvals → Time Entry Variances → Review a day.
 2. Click **Fix time errors**, adjust sessions, enter a reason (min 5 chars), save.
 3. Confirm the day remains pending and can be approved/denied; denial requires a reason.
+
+Pay-period review export:
+1. Admin → Pay Period Summary → load a franchise/pay period.
+2. Confirm the table shows `Reported CRM Hours`, `Logged Hours`, and `Diff`, and that tutor names open daily drilldowns.
+3. Use the export format picker to choose **Excel (.xlsx)** or **CSV (.csv)**, then click **Export**.
+4. In Excel, verify each tutor opens with a visible summary row and collapsed child rows containing daily detail plus `Time In / Out`.
+5. If tutor names contain spreadsheet metacharacters (`=`, `+`, `-`, `@`), verify exported/copied values are prefixed so Excel/Sheets treats them as text rather than formulas.
