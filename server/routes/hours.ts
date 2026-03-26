@@ -1,4 +1,5 @@
 import express, { NextFunction, Request, Response } from 'express';
+import ExcelJS from 'exceljs';
 import { DateTime } from 'luxon';
 import { getMssqlPool, sql } from '../db/mssql';
 import { getPostgresPool } from '../db/postgres';
@@ -9,6 +10,7 @@ import { localDateRangeToUtcBounds, resolvePayPeriod, type PayPeriod } from '../
 import {
   deriveIntervalsFromEntries,
   getScheduleSlotMinutes,
+  normalizeScheduleTimeLabel,
   getScheduleSnapshotSigningSecret,
   signScheduleSnapshot,
   type ScheduleSnapshotEntry,
@@ -34,6 +36,90 @@ GROUP BY s.ScheduleDate, s.TimeID, t.Time
 ORDER BY s.ScheduleDate ASC, s.TimeID ASC;
 `;
 
+const CRM_PAY_PERIOD_SUMMARY_SQL = `
+DECLARE @PeriodStart DATE = @p_period_start;
+DECLARE @EffectiveEnd DATE = @p_effective_end;
+DECLARE @FranchiseId INT = @p_franchise_id;
+
+;WITH DedupSlots AS (
+    SELECT
+        s.TutorID,
+        CAST(s.ScheduleDate AS DATE) AS ScheduleDate,
+        s.TimeID
+    FROM dbo.tblSessionSchedule s
+    WHERE s.FranchiseID = @FranchiseId
+      AND s.TutorID IS NOT NULL
+      AND s.ScheduleDate >= @PeriodStart
+      AND s.ScheduleDate < DATEADD(DAY, 1, @EffectiveEnd)
+    GROUP BY
+        s.TutorID,
+        CAST(s.ScheduleDate AS DATE),
+        s.TimeID
+)
+SELECT
+    ds.TutorID,
+    COUNT(*) AS ReportedCRMHours
+FROM DedupSlots ds
+GROUP BY ds.TutorID
+ORDER BY ds.TutorID ASC;
+`;
+
+const CRM_PAY_PERIOD_DETAIL_SQL = `
+DECLARE @PeriodStart DATE = @p_period_start;
+DECLARE @EffectiveEnd DATE = @p_effective_end;
+DECLARE @FranchiseId INT = @p_franchise_id;
+DECLARE @TutorId INT = @p_tutor_id;
+
+;WITH DedupSlots AS (
+    SELECT
+        CAST(s.ScheduleDate AS DATE) AS WorkDate,
+        s.TimeID
+    FROM dbo.tblSessionSchedule s
+    WHERE s.FranchiseID = @FranchiseId
+      AND s.TutorID = @TutorId
+      AND s.ScheduleDate >= @PeriodStart
+      AND s.ScheduleDate < DATEADD(DAY, 1, @EffectiveEnd)
+    GROUP BY
+        CAST(s.ScheduleDate AS DATE),
+        s.TimeID
+)
+SELECT
+    ds.WorkDate,
+    COUNT(*) AS ReportedCRMHours
+FROM DedupSlots ds
+GROUP BY ds.WorkDate
+ORDER BY ds.WorkDate ASC;
+`;
+
+const CRM_PAY_PERIOD_EXPORT_DAILY_SQL = `
+DECLARE @PeriodStart DATE = @p_period_start;
+DECLARE @EffectiveEnd DATE = @p_effective_end;
+DECLARE @FranchiseId INT = @p_franchise_id;
+
+;WITH DedupSlots AS (
+    SELECT
+        s.TutorID,
+        CAST(s.ScheduleDate AS DATE) AS WorkDate,
+        s.TimeID
+    FROM dbo.tblSessionSchedule s
+    WHERE s.FranchiseID = @FranchiseId
+      AND s.TutorID IS NOT NULL
+      AND s.ScheduleDate >= @PeriodStart
+      AND s.ScheduleDate < DATEADD(DAY, 1, @EffectiveEnd)
+    GROUP BY
+        s.TutorID,
+        CAST(s.ScheduleDate AS DATE),
+        s.TimeID
+)
+SELECT
+    ds.TutorID,
+    ds.WorkDate,
+    COUNT(*) AS ReportedCRMHours
+FROM DedupSlots ds
+GROUP BY ds.TutorID, ds.WorkDate
+ORDER BY ds.TutorID ASC, ds.WorkDate ASC;
+`;
+
 const TUTOR_NAMES_BY_IDS_TEMPLATE = `
 SELECT
   t.ID AS TutorID,
@@ -44,10 +130,17 @@ WHERE t.ID IN (@p_id_list)
   AND t.FirstName <> 'Overflow';
 `;
 
+const MAX_TUTOR_NAME_BATCH_SIZE = 500;
+const MAX_PAY_PERIOD_EXPORT_DETAIL_ROWS = 2000;
+
 const missingFranchise = (res: Response) => res.status(400).json({ error: 'franchiseId is required for tutor requests' });
 const invalidMonth = (res: Response) => res.status(400).json({ error: 'month must be YYYY-MM' });
 const invalidForDate = (res: Response) => res.status(400).json({ error: 'forDate must be YYYY-MM-DD' });
 const invalidWorkDate = (res: Response) => res.status(400).json({ error: 'workDate must be YYYY-MM-DD' });
+const invalidTutorId = (res: Response) => res.status(400).json({ error: 'tutorId is required and must be an integer' });
+const invalidExportFormat = (res: Response) => res.status(400).json({ error: 'format must be xlsx or csv' });
+const exportTooLarge = (res: Response) =>
+  res.status(413).json({ error: 'Pay period export is too large to export safely. Narrow the pay period and try again.' });
 
 type MinuteInterval = { startMinute: number; endMinute: number };
 
@@ -363,7 +456,7 @@ const fetchCalendarEntries = async (
 
     const timeId = toNumber((row as Record<string, unknown>).TimeID);
     const timeLabelRaw = (row as Record<string, unknown>).TimeLabel;
-    const timeLabel = timeLabelRaw !== undefined && timeLabelRaw !== null ? String(timeLabelRaw) : '';
+    const timeLabel = normalizeScheduleTimeLabel(timeLabelRaw);
 
     entries.push({ scheduleDate, timeId, timeLabel });
   }
@@ -373,7 +466,29 @@ const fetchCalendarEntries = async (
 
 type TutorName = { firstName: string; lastName: string };
 type TutorRollupTotals = { tutoringMinutes: number; extraMinutes: number; totalMinutes: number };
-type AdminSummaryRow = {
+type AdminComparisonSummaryRow = {
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  reportedCrmHours: number;
+  loggedHours: number;
+};
+type AdminSummaryDetailRow = {
+  workDate: string;
+  reportedCrmHours: number;
+  loggedHours: number;
+};
+type AdminExportRow = {
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  workDate: string;
+  reportedCrmHours: number;
+  loggedHours: number;
+  diff: number;
+  timeInOut: string;
+};
+type AdminLegacySummaryRow = {
   tutorId: number;
   firstName: string;
   lastName: string;
@@ -395,28 +510,30 @@ const fetchTutorNamesByIds = async (tutorIds: number[]): Promise<Map<number, Tut
   const uniqueIds = Array.from(new Set(tutorIds.filter((id) => Number.isFinite(id)))) as number[];
   if (!uniqueIds.length) return new Map();
 
-  const paramNames = uniqueIds.map((_, idx) => `p_id_${idx}`);
-  const placeholders = paramNames.map((name) => `@${name}`).join(', ');
-  const query = TUTOR_NAMES_BY_IDS_TEMPLATE.replace('@p_id_list', placeholders);
-
   const pool = await getMssqlPool();
-  const request = pool.request();
-  uniqueIds.forEach((id, idx) => request.input(paramNames[idx], sql.Int, id));
-
-  const result = await request.query(query);
   const nameMap = new Map<number, TutorName>();
 
-  for (const row of result.recordset ?? []) {
-    const tutorId = toNumber((row as Record<string, unknown>).TutorID);
-    if (!Number.isFinite(tutorId)) continue;
+  for (let offset = 0; offset < uniqueIds.length; offset += MAX_TUTOR_NAME_BATCH_SIZE) {
+    const batchIds = uniqueIds.slice(offset, offset + MAX_TUTOR_NAME_BATCH_SIZE);
+    const paramNames = batchIds.map((_, idx) => `p_id_${offset + idx}`);
+    const placeholders = paramNames.map((name) => `@${name}`).join(', ');
+    const query = TUTOR_NAMES_BY_IDS_TEMPLATE.replace('@p_id_list', placeholders);
+    const request = pool.request();
+    batchIds.forEach((id, idx) => request.input(paramNames[idx], sql.Int, id));
 
-    const firstNameRaw = (row as Record<string, unknown>).FirstName;
-    const lastNameRaw = (row as Record<string, unknown>).LastName;
+    const result = await request.query(query);
+    for (const row of result.recordset ?? []) {
+      const tutorId = toNumber((row as Record<string, unknown>).TutorID);
+      if (!Number.isFinite(tutorId)) continue;
 
-    nameMap.set(tutorId, {
-      firstName: firstNameRaw !== undefined && firstNameRaw !== null ? String(firstNameRaw) : '',
-      lastName: lastNameRaw !== undefined && lastNameRaw !== null ? String(lastNameRaw) : ''
-    });
+      const firstNameRaw = (row as Record<string, unknown>).FirstName;
+      const lastNameRaw = (row as Record<string, unknown>).LastName;
+
+      nameMap.set(tutorId, {
+        firstName: firstNameRaw !== undefined && firstNameRaw !== null ? String(firstNameRaw) : '',
+        lastName: lastNameRaw !== undefined && lastNameRaw !== null ? String(lastNameRaw) : ''
+      });
+    }
   }
 
   return nameMap;
@@ -431,11 +548,11 @@ const compareTutorNames = (
   return a.firstName.localeCompare(b.firstName);
 };
 
-const buildAdminSummaryRows = (
+const buildAdminLegacySummaryRows = (
   totalsByTutor: Map<number, TutorRollupTotals>,
   namesById: Map<number, TutorName>,
   positiveOnly: boolean
-): AdminSummaryRow[] => {
+): AdminLegacySummaryRow[] => {
   const rows = Array.from(totalsByTutor.entries())
     .map(([tutorId, totals]) => {
       const name = namesById.get(tutorId) ?? { firstName: '', lastName: '' };
@@ -453,6 +570,316 @@ const buildAdminSummaryRows = (
 
   filteredRows.sort(compareTutorNames);
   return filteredRows;
+};
+
+const getPayPeriodEffectiveEnd = (payPeriod: PayPeriod): string => {
+  const todayLocal = DateTime.now().setZone(payPeriod.timezone).toISODate();
+  if (!todayLocal) return payPeriod.endDate;
+  return todayLocal < payPeriod.endDate ? todayLocal : payPeriod.endDate;
+};
+
+const fetchReportedCrmHoursByTutor = async (
+  franchiseId: number,
+  payPeriod: PayPeriod
+): Promise<Map<number, number>> => {
+  const pool = await getMssqlPool();
+  const request = pool.request();
+  request.input('p_franchise_id', sql.Int, franchiseId);
+  request.input('p_period_start', sql.Date, payPeriod.startDate);
+  request.input('p_effective_end', sql.Date, getPayPeriodEffectiveEnd(payPeriod));
+
+  const result = await request.query(CRM_PAY_PERIOD_SUMMARY_SQL);
+  const hoursByTutor = new Map<number, number>();
+
+  for (const row of result.recordset ?? []) {
+    const tutorId = toNumber((row as Record<string, unknown>).TutorID);
+    const reportedCrmHours = roundHours2(toNumber((row as Record<string, unknown>).ReportedCRMHours));
+    if (!Number.isFinite(tutorId) || reportedCrmHours <= 0) continue;
+    hoursByTutor.set(tutorId, reportedCrmHours);
+  }
+
+  return hoursByTutor;
+};
+
+const fetchReportedCrmHoursByDate = async (
+  franchiseId: number,
+  tutorId: number,
+  payPeriod: PayPeriod
+): Promise<Map<string, number>> => {
+  const pool = await getMssqlPool();
+  const request = pool.request();
+  request.input('p_franchise_id', sql.Int, franchiseId);
+  request.input('p_tutor_id', sql.Int, tutorId);
+  request.input('p_period_start', sql.Date, payPeriod.startDate);
+  request.input('p_effective_end', sql.Date, getPayPeriodEffectiveEnd(payPeriod));
+
+  const result = await request.query(CRM_PAY_PERIOD_DETAIL_SQL);
+  const hoursByDate = new Map<string, number>();
+
+  for (const row of result.recordset ?? []) {
+    const workDate = formatMssqlDate((row as Record<string, unknown>).WorkDate);
+    const reportedCrmHours = roundHours2(toNumber((row as Record<string, unknown>).ReportedCRMHours));
+    if (!workDate || reportedCrmHours <= 0) continue;
+    hoursByDate.set(workDate, reportedCrmHours);
+  }
+
+  return hoursByDate;
+};
+
+const fetchReportedCrmHoursByTutorDate = async (
+  franchiseId: number,
+  payPeriod: PayPeriod
+): Promise<Map<string, number>> => {
+  const pool = await getMssqlPool();
+  const request = pool.request();
+  request.input('p_franchise_id', sql.Int, franchiseId);
+  request.input('p_period_start', sql.Date, payPeriod.startDate);
+  request.input('p_effective_end', sql.Date, getPayPeriodEffectiveEnd(payPeriod));
+
+  const result = await request.query(CRM_PAY_PERIOD_EXPORT_DAILY_SQL);
+  const hoursByTutorDate = new Map<string, number>();
+
+  for (const row of result.recordset ?? []) {
+    const tutorId = toNumber((row as Record<string, unknown>).TutorID);
+    const workDate = formatMssqlDate((row as Record<string, unknown>).WorkDate);
+    const reportedCrmHours = roundHours2(toNumber((row as Record<string, unknown>).ReportedCRMHours));
+    if (!Number.isFinite(tutorId) || !workDate || reportedCrmHours <= 0) continue;
+    hoursByTutorDate.set(`${tutorId}:${workDate}`, reportedCrmHours);
+  }
+
+  return hoursByTutorDate;
+};
+
+const buildLoggedHoursByTutor = (
+  totalsByTutor: Map<number, TutorRollupTotals>
+): Map<number, number> =>
+  new Map(
+    Array.from(totalsByTutor.entries())
+      .map(([tutorId, totals]) => [tutorId, roundHours2(totals.totalMinutes / 60)] as const)
+      .filter(([, loggedHours]) => loggedHours > 0)
+  );
+
+const buildLoggedHoursByDate = (
+  approvedDays: ApprovedEntryDayRow[],
+  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>
+): Map<string, number> => {
+  const totalsByDate = new Map<string, number>();
+
+  for (const day of approvedDays) {
+    const workDate = formatDateOnly(day.work_date);
+    if (!workDate) continue;
+
+    const totals = computeRollupTotalsForDays([day], sessionsByDay);
+    const loggedHours = roundHours2(totals.totalMinutes / 60);
+    if (loggedHours <= 0) continue;
+
+    totalsByDate.set(workDate, roundHours2((totalsByDate.get(workDate) ?? 0) + loggedHours));
+  }
+
+  return totalsByDate;
+};
+
+const buildAdminComparisonSummaryRows = (
+  loggedHoursByTutor: Map<number, number>,
+  crmHoursByTutor: Map<number, number>,
+  namesById: Map<number, TutorName>
+): AdminComparisonSummaryRow[] => {
+  const tutorIds = new Set<number>([...loggedHoursByTutor.keys(), ...crmHoursByTutor.keys()]);
+  const rows = Array.from(tutorIds)
+    .map((tutorId) => {
+      const name = namesById.get(tutorId) ?? { firstName: '', lastName: '' };
+      return {
+        tutorId,
+        firstName: name.firstName,
+        lastName: name.lastName,
+        reportedCrmHours: crmHoursByTutor.get(tutorId) ?? 0,
+        loggedHours: loggedHoursByTutor.get(tutorId) ?? 0
+      };
+    })
+    .filter((row) => row.reportedCrmHours > 0 || row.loggedHours > 0);
+
+  rows.sort(compareTutorNames);
+  return rows;
+};
+
+const buildAdminSummaryDetailRows = (
+  loggedHoursByDate: Map<string, number>,
+  crmHoursByDate: Map<string, number>
+): AdminSummaryDetailRow[] => {
+  const workDates = new Set<string>([...loggedHoursByDate.keys(), ...crmHoursByDate.keys()]);
+
+  return Array.from(workDates)
+    .sort((a, b) => a.localeCompare(b))
+    .map((workDate) => ({
+      workDate,
+      reportedCrmHours: crmHoursByDate.get(workDate) ?? 0,
+      loggedHours: loggedHoursByDate.get(workDate) ?? 0
+    }))
+    .filter((row) => row.reportedCrmHours > 0 || row.loggedHours > 0);
+};
+
+const formatSessionPair = (startAt: unknown, endAt: unknown, timezone: string): string | null => {
+  const start = DateTime.fromJSDate(new Date(startAt as never), { zone: 'utc' }).setZone(timezone);
+  const end = DateTime.fromJSDate(new Date(endAt as never), { zone: 'utc' }).setZone(timezone);
+  if (!start.isValid || !end.isValid) return null;
+  return `${start.toFormat('h:mm a')} - ${end.toFormat('h:mm a')}`;
+};
+
+const buildTimeInOutByTutorDate = (
+  approvedDays: ApprovedEntryDayRow[],
+  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>,
+  timezone: string
+): Map<string, string> => {
+  const result = new Map<string, string>();
+
+  for (const day of approvedDays) {
+    const workDate = formatDateOnly(day.work_date);
+    if (!workDate) continue;
+
+    const sessionPairs = (sessionsByDay.get(day.id) ?? [])
+      .map((session) => formatSessionPair(session.start_at, session.end_at, timezone))
+      .filter((value): value is string => Boolean(value));
+
+    if (!sessionPairs.length) continue;
+    result.set(`${day.tutorid}:${workDate}`, sessionPairs.join(' | '));
+  }
+
+  return result;
+};
+
+const buildAdminExportRows = (
+  approvedDays: ApprovedEntryDayRow[],
+  sessionsByDay: Map<number, ApprovedEntrySessionRow[]>,
+  crmHoursByTutorDate: Map<string, number>,
+  namesById: Map<number, TutorName>,
+  timezone: string
+): AdminExportRow[] => {
+  const loggedHoursByTutorDate = new Map<string, number>();
+
+  for (const day of approvedDays) {
+    const workDate = formatDateOnly(day.work_date);
+    if (!workDate) continue;
+
+    const totals = computeRollupTotalsForDays([day], sessionsByDay);
+    const loggedHours = roundHours2(totals.totalMinutes / 60);
+    if (loggedHours <= 0) continue;
+
+    const key = `${day.tutorid}:${workDate}`;
+    loggedHoursByTutorDate.set(key, roundHours2((loggedHoursByTutorDate.get(key) ?? 0) + loggedHours));
+  }
+
+  const timeInOutByTutorDate = buildTimeInOutByTutorDate(approvedDays, sessionsByDay, timezone);
+  const keys = new Set<string>([...loggedHoursByTutorDate.keys(), ...crmHoursByTutorDate.keys()]);
+
+  const rows = Array.from(keys)
+    .map((key) => {
+      const splitIndex = key.indexOf(':');
+      const tutorId = Number(key.slice(0, splitIndex));
+      const workDate = key.slice(splitIndex + 1);
+      const reportedCrmHours = crmHoursByTutorDate.get(key) ?? 0;
+      const loggedHours = loggedHoursByTutorDate.get(key) ?? 0;
+      const name = namesById.get(tutorId) ?? { firstName: '', lastName: '' };
+      return {
+        tutorId,
+        firstName: name.firstName,
+        lastName: name.lastName,
+        workDate,
+        reportedCrmHours,
+        loggedHours,
+        diff: roundHours2(loggedHours - reportedCrmHours),
+        timeInOut: timeInOutByTutorDate.get(key) ?? ''
+      };
+    })
+    .filter((row) => row.reportedCrmHours > 0 || row.loggedHours > 0);
+
+  rows.sort((a, b) => compareTutorNames(a, b) || a.workDate.localeCompare(b.workDate));
+  return rows;
+};
+
+const sanitizeSpreadsheetText = (value: string): string =>
+  /^[=+\-@]/.test(value.trimStart()) ? `'${value}` : value;
+
+const csvEscape = (value: string | number): string => {
+  const text = String(value);
+  if (/[",\n|]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+};
+
+const csvQuote = (value: string): string => `"${value.replace(/"/g, '""')}"`;
+
+const buildAdminExportCsv = (rows: AdminExportRow[]): string => {
+  const header = ['Tutor', 'Date', 'Reported CRM Hours', 'Logged Hours', 'Diff', 'Time In / Out'];
+  const lines = rows.map((row) => {
+    const values = [
+      csvEscape(sanitizeSpreadsheetText(`${row.lastName}, ${row.firstName}`)),
+      csvEscape(row.workDate),
+      csvEscape(row.reportedCrmHours.toFixed(2)),
+      csvEscape(row.loggedHours.toFixed(2)),
+      csvEscape(row.diff > 0 ? `+${row.diff.toFixed(2)}` : row.diff.toFixed(2)),
+      csvQuote(row.timeInOut)
+    ];
+    return values.join(',');
+  });
+  return [header.join(','), ...lines].join('\n');
+};
+
+const buildAdminExportWorkbook = async (
+  summaryRows: AdminComparisonSummaryRow[],
+  exportRows: AdminExportRow[]
+): Promise<Buffer> => {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('Pay Period Review');
+  worksheet.properties.outlineLevelRow = 1;
+
+  worksheet.addRow(['Tutor', 'Date', 'Reported CRM Hours', 'Logged Hours', 'Diff', 'Time In / Out']);
+  worksheet.getRow(1).font = { bold: true };
+
+  const exportRowsByTutor = new Map<number, AdminExportRow[]>();
+  for (const row of exportRows) {
+    const list = exportRowsByTutor.get(row.tutorId) ?? [];
+    list.push(row);
+    exportRowsByTutor.set(row.tutorId, list);
+  }
+
+  for (const summaryRow of summaryRows) {
+    const tutorName = sanitizeSpreadsheetText(`${summaryRow.lastName}, ${summaryRow.firstName}`);
+    const diff = roundHours2(summaryRow.loggedHours - summaryRow.reportedCrmHours);
+    const summaryExcelRow = worksheet.addRow([
+      tutorName,
+      '',
+      summaryRow.reportedCrmHours,
+      summaryRow.loggedHours,
+      diff,
+      ''
+    ]);
+    summaryExcelRow.font = { bold: true };
+
+    for (const detail of exportRowsByTutor.get(summaryRow.tutorId) ?? []) {
+      const detailRow = worksheet.addRow([
+        '',
+        detail.workDate,
+        detail.reportedCrmHours,
+        detail.loggedHours,
+        detail.diff,
+        detail.timeInOut
+      ]);
+      detailRow.outlineLevel = 1;
+      detailRow.hidden = true;
+    }
+  }
+
+  worksheet.columns = [
+    { width: 24 },
+    { width: 14 },
+    { width: 20 },
+    { width: 16 },
+    { width: 12 },
+    { width: 36 }
+  ];
+
+  return Buffer.from(await workbook.xlsx.writeBuffer());
 };
 
 const buildAdminDailySummaryRows = (
@@ -824,9 +1251,11 @@ router.get(
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
       const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
       const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay);
-      const tutorIds = Array.from(totalsByTutor.keys());
+      const loggedHoursByTutor = buildLoggedHoursByTutor(totalsByTutor);
+      const crmHoursByTutor = await fetchReportedCrmHoursByTutor(franchiseId, payPeriod);
+      const tutorIds = Array.from(new Set([...loggedHoursByTutor.keys(), ...crmHoursByTutor.keys()]));
       const namesById = await fetchTutorNamesByIds(tutorIds);
-      const rows = buildAdminSummaryRows(totalsByTutor, namesById, false);
+      const rows = buildAdminComparisonSummaryRows(loggedHoursByTutor, crmHoursByTutor, namesById);
 
       res.status(200).json({ payPeriod, rows });
     } catch (err) {
@@ -860,9 +1289,160 @@ router.get(
       const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay);
       const tutorIds = Array.from(totalsByTutor.keys());
       const namesById = await fetchTutorNamesByIds(tutorIds);
-      const rows = buildAdminSummaryRows(totalsByTutor, namesById, true);
+      const rows = buildAdminLegacySummaryRows(totalsByTutor, namesById, true);
 
       res.status(200).json({ payPeriod, rows });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  '/hours/admin/pay-period/summary-legacy-export',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
+    if (scope.error || scope.franchiseId === null) {
+      res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
+      return;
+    }
+    const franchiseId = scope.franchiseId;
+
+    const { dateISO: forDate, isValid } = extractForDateParam((req.query as Record<string, unknown>).forDate);
+    if (!isValid) {
+      invalidForDate(res);
+      return;
+    }
+
+    try {
+      const payPeriod = await resolvePayPeriod(franchiseId, forDate);
+
+      const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
+      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
+      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay);
+      const tutorIds = Array.from(totalsByTutor.keys());
+      const namesById = await fetchTutorNamesByIds(tutorIds);
+      const rows = buildAdminLegacySummaryRows(totalsByTutor, namesById, true);
+
+      res.status(200).json({ payPeriod, rows });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  '/hours/admin/pay-period/summary-detail',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
+    if (scope.error || scope.franchiseId === null) {
+      res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
+      return;
+    }
+    const franchiseId = scope.franchiseId;
+
+    const { dateISO: forDate, isValid } = extractForDateParam((req.query as Record<string, unknown>).forDate);
+    if (!isValid) {
+      invalidForDate(res);
+      return;
+    }
+
+    const tutorIdRaw = Number((req.query as Record<string, unknown>).tutorId);
+    if (!Number.isInteger(tutorIdRaw)) {
+      invalidTutorId(res);
+      return;
+    }
+
+    try {
+      const payPeriod = await resolvePayPeriod(franchiseId, forDate);
+      const approvedDays = await fetchApprovedDaysForTutor(franchiseId, tutorIdRaw, payPeriod.startDate, payPeriod.endDate);
+      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
+      const loggedHoursByDate = buildLoggedHoursByDate(approvedDays, sessionsByDay);
+      const crmHoursByDate = await fetchReportedCrmHoursByDate(franchiseId, tutorIdRaw, payPeriod);
+      const rows = buildAdminSummaryDetailRows(loggedHoursByDate, crmHoursByDate);
+
+      res.status(200).json({ payPeriod, rows });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  '/hours/admin/pay-period/export',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
+    if (scope.error || scope.franchiseId === null) {
+      res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
+      return;
+    }
+    const franchiseId = scope.franchiseId;
+
+    const { dateISO: forDate, isValid } = extractForDateParam((req.query as Record<string, unknown>).forDate);
+    if (!isValid) {
+      invalidForDate(res);
+      return;
+    }
+
+    const format = typeof (req.query as Record<string, unknown>).format === 'string'
+      ? String((req.query as Record<string, unknown>).format).toLowerCase()
+      : 'xlsx';
+    if (format !== 'xlsx' && format !== 'csv') {
+      invalidExportFormat(res);
+      return;
+    }
+
+    try {
+      const payPeriod = await resolvePayPeriod(franchiseId, forDate);
+      const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
+      if (approvedDays.length > MAX_PAY_PERIOD_EXPORT_DETAIL_ROWS) {
+        exportTooLarge(res);
+        return;
+      }
+
+      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
+      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay);
+      const loggedHoursByTutor = buildLoggedHoursByTutor(totalsByTutor);
+      const crmHoursByTutor = await fetchReportedCrmHoursByTutor(franchiseId, payPeriod);
+      const crmHoursByTutorDate = await fetchReportedCrmHoursByTutorDate(franchiseId, payPeriod);
+      if (crmHoursByTutorDate.size > MAX_PAY_PERIOD_EXPORT_DETAIL_ROWS) {
+        exportTooLarge(res);
+        return;
+      }
+
+      const tutorIds = Array.from(
+        new Set([
+          ...loggedHoursByTutor.keys(),
+          ...crmHoursByTutor.keys(),
+          ...Array.from(crmHoursByTutorDate.keys()).map((key) => Number(key.split(':', 1)[0]))
+        ])
+      );
+      const namesById = await fetchTutorNamesByIds(tutorIds);
+      const summaryRows = buildAdminComparisonSummaryRows(loggedHoursByTutor, crmHoursByTutor, namesById);
+      const exportRows = buildAdminExportRows(approvedDays, sessionsByDay, crmHoursByTutorDate, namesById, payPeriod.timezone);
+      if (exportRows.length > MAX_PAY_PERIOD_EXPORT_DETAIL_ROWS) {
+        exportTooLarge(res);
+        return;
+      }
+
+      if (format === 'csv') {
+        const csvContent = buildAdminExportCsv(exportRows);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="pay-period-review.csv"');
+        res.status(200).send(csvContent);
+        return;
+      }
+
+      const workbookBuffer = await buildAdminExportWorkbook(summaryRows, exportRows);
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      );
+      res.setHeader('Content-Disposition', 'attachment; filename="pay-period-review.xlsx"');
+      res.status(200).send(workbookBuffer);
     } catch (err) {
       next(err);
     }

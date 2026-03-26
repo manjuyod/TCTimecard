@@ -43,6 +43,36 @@ export const getScheduleSnapshotSigningSecret = (): string | null => {
   return trimmed ? trimmed : null;
 };
 
+export const normalizeScheduleTimeLabel = (value: unknown): string => {
+  if (value instanceof Date) {
+    return DateTime.fromJSDate(value, { zone: 'utc' }).toFormat('h:mm a');
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+
+    const looksDateish =
+      trimmed.includes('GMT') ||
+      trimmed.includes('T') ||
+      /^\d{4}-\d{2}-\d{2}/.test(trimmed) ||
+      /^[A-Z][a-z]{2}\s[A-Z][a-z]{2}\s\d{2}\s\d{4}/.test(trimmed);
+
+    if (!looksDateish) {
+      return trimmed;
+    }
+
+    const parsed = new Date(trimmed);
+    if (Number.isFinite(parsed.getTime())) {
+      return DateTime.fromJSDate(parsed, { zone: 'utc' }).toFormat('h:mm a');
+    }
+
+    return trimmed;
+  }
+
+  return value !== undefined && value !== null ? String(value) : '';
+};
+
 const isPlainObject = (value: unknown): value is Record<string, unknown> => {
   if (value === null || value === undefined) return false;
   if (typeof value !== 'object') return false;

@@ -185,6 +185,8 @@ export interface WeeklyAttestationReminder {
   blocking: boolean;
 }
 
+export type PayPeriodExportFormat = 'xlsx' | 'csv';
+
 const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, {
     credentials: 'include',
@@ -223,6 +225,12 @@ const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
   }
 
   return data as T;
+};
+
+const extractDownloadFilename = (contentDisposition: string | null, fallback: string): string => {
+  if (!contentDisposition) return fallback;
+  const match = /filename="?([^"]+)"?/i.exec(contentDisposition);
+  return match?.[1] ?? fallback;
 };
 
 export const login = async (identifier: string, password: string): Promise<LoginResult> => {
@@ -394,14 +402,77 @@ export const fetchPayPeriodByDate = async (args: { franchiseId?: number | null; 
 export const fetchPayPeriodSummary = async (args: {
   franchiseId: number;
   forDate?: string | null;
-  positiveOnly?: boolean;
 }) => {
   const params = new URLSearchParams();
   params.set('franchiseId', String(args.franchiseId));
   if (args.forDate) params.set('forDate', args.forDate);
-  const endpoint = args.positiveOnly ? '/api/hours/admin/pay-period/summary-total-positive' : '/api/hours/admin/pay-period/summary';
-  const result = await apiFetch<{ payPeriod: PayPeriod; rows: AdminSummaryRow[] }>(`${endpoint}?${params.toString()}`);
+  const result = await apiFetch<{ payPeriod: PayPeriod; rows: AdminSummaryRow[] }>(
+    `/api/hours/admin/pay-period/summary?${params.toString()}`
+  );
   return result;
+};
+
+export const fetchPayPeriodSummaryDetail = async (args: {
+  franchiseId: number;
+  tutorId: number;
+  forDate?: string | null;
+}) => {
+  const params = new URLSearchParams();
+  params.set('franchiseId', String(args.franchiseId));
+  params.set('tutorId', String(args.tutorId));
+  if (args.forDate) params.set('forDate', args.forDate);
+  const result = await apiFetch<{ payPeriod: PayPeriod; rows: AdminSummaryDetailRow[] }>(
+    `/api/hours/admin/pay-period/summary-detail?${params.toString()}`
+  );
+  return result;
+};
+
+export const fetchPayPeriodLegacySummaryExport = async (args: { franchiseId: number; forDate?: string | null }) => {
+  const params = new URLSearchParams();
+  params.set('franchiseId', String(args.franchiseId));
+  if (args.forDate) params.set('forDate', args.forDate);
+  const result = await apiFetch<{ payPeriod: PayPeriod; rows: AdminLegacySummaryRow[] }>(
+    `/api/hours/admin/pay-period/summary-legacy-export?${params.toString()}`
+  );
+  return result;
+};
+
+export const downloadPayPeriodReviewExport = async (args: {
+  franchiseId: number;
+  forDate?: string | null;
+  format: PayPeriodExportFormat;
+}) => {
+  const params = new URLSearchParams();
+  params.set('franchiseId', String(args.franchiseId));
+  params.set('format', args.format);
+  if (args.forDate) params.set('forDate', args.forDate);
+
+  const response = await fetch(`/api/hours/admin/pay-period/export?${params.toString()}`, {
+    credentials: 'include'
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let message = `Export failed (${response.status})`;
+    if (text) {
+      try {
+        const data = JSON.parse(text) as { error?: string };
+        message = data.error ?? message;
+      } catch {
+        message = text;
+      }
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  const blob = await response.blob();
+  return {
+    blob,
+    filename: extractDownloadFilename(
+      response.headers.get('content-disposition'),
+      `pay-period-review.${args.format}`
+    )
+  };
 };
 
 export const fetchPayrollSettings = async (franchiseId?: number | null) => {
@@ -436,6 +507,20 @@ export const updatePayrollSettings = async (args: {
 };
 
 export interface AdminSummaryRow {
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  reportedCrmHours: number;
+  loggedHours: number;
+}
+
+export interface AdminSummaryDetailRow {
+  workDate: string;
+  reportedCrmHours: number;
+  loggedHours: number;
+}
+
+export interface AdminLegacySummaryRow {
   tutorId: number;
   firstName: string;
   lastName: string;
