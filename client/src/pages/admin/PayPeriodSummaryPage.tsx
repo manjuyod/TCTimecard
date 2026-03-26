@@ -1,11 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
-  AdminDailySummaryRow,
+  AdminLegacySummaryRow,
+  AdminSummaryDetailRow,
   AdminSummaryRow,
   PayPeriod,
-  fetchPayPeriodDailySummary,
+  PayPeriodExportFormat,
+  downloadPayPeriodReviewExport,
+  fetchPayPeriodLegacySummaryExport,
   fetchPayPeriodCurrent,
-  fetchPayPeriodSummary
+  fetchPayPeriodSummary,
+  fetchPayPeriodSummaryDetail
 } from '../../lib/api';
 import { useAuth } from '../../providers/AuthProvider';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
@@ -19,8 +23,20 @@ import { EmptyState } from '../../components/shared/EmptyState';
 import { toast } from '../../components/ui/toast';
 import { formatDateOnly } from '../../lib/utils';
 import { getSessionFranchiseId, isSelectorAllowed } from '../../lib/franchise';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 
 type PickerOption = 'current' | 'previous' | 'custom';
+type AppliedSelection = { franchiseId: number; forDate: string | null };
+
+const formatHours = (value: number): string => value.toFixed(2);
+
+const formatDiff = (value: number): string => (value > 0 ? `+${value.toFixed(2)}` : value.toFixed(2));
+
+const sanitizeSpreadsheetText = (value: string): string =>
+  /^[=+\-@]/.test(value.trimStart()) ? `'${value}` : value;
+
+const csvEscape = (value: string): string => `"${value.replace(/"/g, '""')}"`;
 
 export function PayPeriodSummaryPage(): JSX.Element {
   const { session } = useAuth();
@@ -32,9 +48,14 @@ export function PayPeriodSummaryPage(): JSX.Element {
   const [franchiseId, setFranchiseId] = useState<number | null>(sessionFranchiseId);
   const [picker, setPicker] = useState<PickerOption>('current');
   const [customDate, setCustomDate] = useState('');
-  const [showPositiveOnly, setShowPositiveOnly] = useState(true);
+  const [exportFormat, setExportFormat] = useState<PayPeriodExportFormat>('xlsx');
   const [rows, setRows] = useState<AdminSummaryRow[]>([]);
   const [payPeriod, setPayPeriod] = useState<PayPeriod | null>(null);
+  const [activeSelection, setActiveSelection] = useState<AppliedSelection | null>(null);
+  const [selectedTutor, setSelectedTutor] = useState<AdminSummaryRow | null>(null);
+  const [detailCache, setDetailCache] = useState<Record<string, AdminSummaryDetailRow[]>>({});
+  const [detailLoadingKey, setDetailLoadingKey] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,15 +104,18 @@ export function PayPeriodSummaryPage(): JSX.Element {
     setFranchiseId(selection.franchiseId);
     setLoading(true);
     setError(null);
+    setSelectedTutor(null);
+    setDetailError(null);
+    setDetailCache({});
 
     try {
       const result = await fetchPayPeriodSummary({
         franchiseId: selection.franchiseId,
-        forDate: selection.forDate,
-        positiveOnly: showPositiveOnly
+        forDate: selection.forDate
       });
       setRows(result.rows);
       setPayPeriod(result.payPeriod);
+      setActiveSelection(selection);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to load pay period summary';
       setError(message);
@@ -101,41 +125,17 @@ export function PayPeriodSummaryPage(): JSX.Element {
     }
   };
 
-  const exportDailyCsv = async () => {
-    const selection = await resolveSelection();
-    if (!selection) return;
-    setFranchiseId(selection.franchiseId);
-    setError(null);
+  const getDisplayedSelection = async (): Promise<AppliedSelection | null> => activeSelection ?? resolveSelection();
 
-    try {
-      const result = await fetchPayPeriodDailySummary({
-        franchiseId: selection.franchiseId,
-        forDate: selection.forDate
-      });
+  const fetchLegacyExportRows = async (): Promise<AdminLegacySummaryRow[] | null> => {
+    const selection = await getDisplayedSelection();
+    if (!selection) return null;
 
-      if (!result.rows.length) {
-        toast.error('No daily hours to export');
-        return;
-      }
-
-      const header = 'Tutor,Date,Total Hours';
-      const lines = result.rows.map(
-        (row: AdminDailySummaryRow) =>
-          `"${row.lastName}, ${row.firstName}",${row.workDate},${row.totalHours.toFixed(2)}`
-      );
-      const csvContent = [header, ...lines].join('\n');
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'pay-period-daily-summary.csv';
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to export daily pay period summary';
-      setError(message);
-      toast.error(message);
-    }
+    const result = await fetchPayPeriodLegacySummaryExport({
+      franchiseId: selection.franchiseId,
+      forDate: selection.forDate
+    });
+    return result.rows;
   };
 
   useEffect(() => {
@@ -156,19 +156,62 @@ export function PayPeriodSummaryPage(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectorAllowed, sessionFranchiseId]);
 
-  const displayRows = useMemo(
-    () => (showPositiveOnly ? rows.filter((row) => row.totalHours > 0) : rows),
-    [rows, showPositiveOnly]
-  );
+  const detailCacheKey =
+    selectedTutor && payPeriod && activeSelection
+      ? `${activeSelection.franchiseId}:${payPeriod.startDate}:${payPeriod.endDate}:${selectedTutor.tutorId}`
+      : null;
+
+  const detailRows = detailCacheKey ? detailCache[detailCacheKey] : undefined;
+
+  useEffect(() => {
+    if (!selectedTutor || !payPeriod || !activeSelection || !detailCacheKey || detailRows !== undefined) {
+      return;
+    }
+
+    let cancelled = false;
+    setDetailLoadingKey(detailCacheKey);
+    setDetailError(null);
+
+    void fetchPayPeriodSummaryDetail({
+      franchiseId: activeSelection.franchiseId,
+      tutorId: selectedTutor.tutorId,
+      forDate: activeSelection.forDate ?? payPeriod.startDate
+    })
+      .then((result) => {
+        if (cancelled) return;
+        setDetailCache((prev) => ({ ...prev, [detailCacheKey]: result.rows }));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : 'Unable to load tutor detail';
+        setDetailError(message);
+        toast.error(message);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setDetailLoadingKey((prev) => (prev === detailCacheKey ? null : prev));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSelection, detailCacheKey, detailRows, payPeriod, selectedTutor]);
 
   const copyTable = async () => {
-    if (!displayRows.length) return;
+    const legacyRows = await fetchLegacyExportRows();
+    if (!legacyRows?.length) {
+      toast.error('No legacy summary rows to copy');
+      return;
+    }
     const header = 'Tutor,Tutoring Hours,Extra Hours,Total Hours';
-    const lines = displayRows.map(
+    const lines = legacyRows.map(
       (row) =>
-        `${row.lastName}, ${row.firstName},${row.tutoringHours.toFixed(2)},${row.extraHours.toFixed(
-          2
-        )},${row.totalHours.toFixed(2)}`
+        [
+          csvEscape(sanitizeSpreadsheetText(`${row.lastName}, ${row.firstName}`)),
+          row.tutoringHours.toFixed(2),
+          row.extraHours.toFixed(2),
+          row.totalHours.toFixed(2)
+        ].join(',')
     );
     const text = [header, ...lines].join('\n');
     try {
@@ -179,23 +222,29 @@ export function PayPeriodSummaryPage(): JSX.Element {
     }
   };
 
-  const exportCsv = () => {
-    if (!displayRows.length) return;
-    const header = 'Tutor,Tutoring Hours,Extra Hours,Total Hours';
-    const lines = displayRows.map(
-      (row) =>
-        `"${row.lastName}, ${row.firstName}",${row.tutoringHours.toFixed(2)},${row.extraHours.toFixed(
-          2
-        )},${row.totalHours.toFixed(2)}`
-    );
-    const csvContent = [header, ...lines].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'pay-period-summary.csv';
-    link.click();
-    URL.revokeObjectURL(url);
+  const exportCsv = async () => {
+    const selection = await getDisplayedSelection();
+    if (!selection) return;
+
+    try {
+      const { blob, filename } = await downloadPayPeriodReviewExport({
+        franchiseId: selection.franchiseId,
+        forDate: selection.forDate,
+        format: exportFormat
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported ${exportFormat.toUpperCase()} report`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to export pay period review';
+      setError(message);
+      toast.error(message);
+      return;
+    }
   };
 
   return (
@@ -204,22 +253,30 @@ export function PayPeriodSummaryPage(): JSX.Element {
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Pay Period Summary</h1>
           <p className="text-sm text-muted-foreground">
-            Export tutoring and extra hours by tutor. Filter to totals greater than zero by default.
+            Compare CRM-reported tutoring hours against approved logged hours. Click a tutor for daily detail.
           </p>
         </div>
         <div className="flex gap-2">
           <Button variant="ghost" onClick={() => void load(franchiseId ?? sessionFranchiseId)}>
             Refresh
           </Button>
-          <Button onClick={copyTable} disabled={!displayRows.length}>
+          <Button onClick={() => void copyTable()} disabled={!rows.length}>
             Copy table
           </Button>
-          <Button variant="outline" onClick={exportCsv} disabled={!displayRows.length}>
-            Export CSV
-          </Button>
-          <Button variant="outline" onClick={() => void exportDailyCsv()}>
-            Export Daily CSV
-          </Button>
+          <div className="flex gap-2">
+            <Select value={exportFormat} onValueChange={(value) => setExportFormat(value as PayPeriodExportFormat)}>
+              <SelectTrigger className="w-[130px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="xlsx">Excel (.xlsx)</SelectItem>
+                <SelectItem value="csv">CSV (.csv)</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button variant="outline" onClick={() => void exportCsv()} disabled={!rows.length}>
+              Export
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -286,18 +343,10 @@ export function PayPeriodSummaryPage(): JSX.Element {
               </div>
             </div>
             <div className="space-y-3">
-              <Label>Filters</Label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="positiveOnly"
-                  checked={showPositiveOnly}
-                  onChange={(e) => setShowPositiveOnly(e.target.checked)}
-                />
-                <Label htmlFor="positiveOnly" className="text-sm font-medium">
-                  Only rows with total hours &gt; 0
-                </Label>
-              </div>
+              <Label>Actions</Label>
+              <p className="text-sm text-muted-foreground">
+                Load the selected pay period to compare reported CRM hours against approved logged hours.
+              </p>
               <Button onClick={() => void load(franchiseId ?? sessionFranchiseId)} disabled={loading}>
                 {loading ? 'Loading...' : 'Apply filters'}
               </Button>
@@ -318,43 +367,129 @@ export function PayPeriodSummaryPage(): JSX.Element {
             </CardDescription>
           </div>
           <Badge variant="muted">
-            {displayRows.length} tutor{displayRows.length === 1 ? '' : 's'}
+            {rows.length} tutor{rows.length === 1 ? '' : 's'}
           </Badge>
         </CardHeader>
         <CardContent>
           {loading ? (
             <p className="text-sm text-muted-foreground">Loading summary...</p>
-          ) : !displayRows.length ? (
+          ) : !rows.length ? (
             <EmptyState
               title="No rows to display"
-              description="Adjust filters or uncheck the total hours filter to see all tutors."
+              description="No tutors have CRM hours or logged hours in the selected pay period."
             />
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Tutor</TableHead>
-                  <TableHead>Tutoring Hours</TableHead>
-                  <TableHead>Extra Hours</TableHead>
-                  <TableHead>Total</TableHead>
+                  <TableHead>Reported CRM Hours</TableHead>
+                  <TableHead>Logged Hours</TableHead>
+                  <TableHead>Diff</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {displayRows.map((row) => (
+                {rows.map((row) => {
+                  const diff = row.loggedHours - row.reportedCrmHours;
+                  return (
                   <TableRow key={row.tutorId}>
                     <TableCell className="font-semibold text-slate-900">
-                      {row.lastName}, {row.firstName}
+                      <button
+                        type="button"
+                        className="text-left text-slate-900 underline-offset-4 transition hover:text-slate-700 hover:underline"
+                        onClick={() => {
+                          setSelectedTutor(row);
+                          setDetailError(null);
+                        }}
+                      >
+                        {row.lastName}, {row.firstName}
+                      </button>
                     </TableCell>
-                    <TableCell>{row.tutoringHours.toFixed(2)}</TableCell>
-                    <TableCell>{row.extraHours.toFixed(2)}</TableCell>
-                    <TableCell className="font-semibold">{row.totalHours.toFixed(2)}</TableCell>
+                    <TableCell>{formatHours(row.reportedCrmHours)}</TableCell>
+                    <TableCell>{formatHours(row.loggedHours)}</TableCell>
+                    <TableCell
+                      className={`font-semibold ${
+                        diff > 0 ? 'text-emerald-700' : diff < 0 ? 'text-rose-700' : 'text-slate-900'
+                      }`}
+                    >
+                      {formatDiff(diff)}
+                    </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           )}
         </CardContent>
       </Card>
+
+      <Dialog
+        open={Boolean(selectedTutor)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedTutor(null);
+            setDetailError(null);
+          }
+        }}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          {selectedTutor && payPeriod ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>
+                  {selectedTutor.firstName} {selectedTutor.lastName}
+                </DialogTitle>
+                <DialogDescription>
+                  {formatDateOnly(payPeriod.startDate)} - {formatDateOnly(payPeriod.endDate)} daily CRM vs logged-hour comparison.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-4">
+                {detailLoadingKey === detailCacheKey && detailRows === undefined ? (
+                  <p className="text-sm text-muted-foreground">Loading tutor detail...</p>
+                ) : detailError ? (
+                  <InlineError message={detailError} />
+                ) : !detailRows?.length ? (
+                  <EmptyState
+                    title="No detail rows"
+                    description="No CRM or logged hours were found for this tutor in the selected pay period."
+                  />
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Date</TableHead>
+                        <TableHead>Reported CRM Hours</TableHead>
+                        <TableHead>Logged Hours</TableHead>
+                        <TableHead>Diff</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {detailRows.map((row) => {
+                        const diff = row.loggedHours - row.reportedCrmHours;
+                        return (
+                          <TableRow key={row.workDate}>
+                            <TableCell>{formatDateOnly(row.workDate)}</TableCell>
+                            <TableCell>{formatHours(row.reportedCrmHours)}</TableCell>
+                            <TableCell>{formatHours(row.loggedHours)}</TableCell>
+                            <TableCell
+                              className={`font-semibold ${
+                                diff > 0 ? 'text-emerald-700' : diff < 0 ? 'text-rose-700' : 'text-slate-900'
+                              }`}
+                            >
+                              {formatDiff(diff)}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                )}
+              </div>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

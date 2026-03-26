@@ -2,6 +2,7 @@ import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
+import ExcelJS from 'exceljs';
 import { DateTime } from 'luxon';
 import { setMssqlPoolOverride } from '../db/mssql';
 import { setPostgresPoolOverride } from '../db/postgres';
@@ -47,6 +48,7 @@ type TutorNameRow = {
 };
 
 type CalendarEntryRow = {
+  franchiseId?: number;
   tutorId: number;
   scheduleDate: string | Date;
   timeId: number;
@@ -129,7 +131,11 @@ const createPostgresPool = (args: {
   };
 };
 
-const createMssqlPool = (tutors: TutorNameRow[], calendarEntries: CalendarEntryRow[] = []) => ({
+const createMssqlPool = (
+  tutors: TutorNameRow[],
+  calendarEntries: CalendarEntryRow[] = [],
+  crmEntries: CalendarEntryRow[] = []
+) => ({
   request() {
     const inputs = new Map<string, unknown>();
     return {
@@ -152,19 +158,90 @@ const createMssqlPool = (tutors: TutorNameRow[], calendarEntries: CalendarEntryR
         }
 
         if (sqlText.includes('FROM dbo.tblSessionSchedule')) {
+          if (inputs.has('p_month_start')) {
+            const tutorId = Number(inputs.get('p_tutor_id'));
+            const monthStart = String(inputs.get('p_month_start') ?? '');
+            const nextMonthStart = String(inputs.get('p_next_month_start') ?? '');
+            return {
+              recordset: calendarEntries
+                .filter((row) => {
+                  const scheduleDate = toDateOnly(row.scheduleDate);
+                  return row.tutorId === tutorId && scheduleDate >= monthStart && scheduleDate < nextMonthStart;
+                })
+                .map((row) => ({
+                  ScheduleDate: row.scheduleDate,
+                  TimeID: row.timeId,
+                  TimeLabel: row.timeLabel
+                }))
+            };
+          }
+
+          const franchiseId = Number(inputs.get('p_franchise_id'));
           const tutorId = Number(inputs.get('p_tutor_id'));
-          const monthStart = String(inputs.get('p_month_start') ?? '');
-          const nextMonthStart = String(inputs.get('p_next_month_start') ?? '');
+          const periodStart = String(inputs.get('p_period_start') ?? '');
+          const effectiveEnd = String(inputs.get('p_effective_end') ?? '');
+
+          const filtered = crmEntries.filter((row) => {
+            const scheduleDate = toDateOnly(row.scheduleDate);
+            const matchesTutor = Number.isFinite(tutorId) ? row.tutorId === tutorId : true;
+            const matchesFranchise = row.franchiseId === undefined || row.franchiseId === franchiseId;
+            return matchesTutor && matchesFranchise && scheduleDate >= periodStart && scheduleDate <= effectiveEnd;
+          });
+
+          const deduped = new Map<string, { tutorId: number; scheduleDate: string; timeId: number }>();
+          for (const row of filtered) {
+            const scheduleDate = toDateOnly(row.scheduleDate);
+            deduped.set(`${row.tutorId}:${scheduleDate}:${row.timeId}`, {
+              tutorId: row.tutorId,
+              scheduleDate,
+              timeId: row.timeId
+            });
+          }
+
+          if (Number.isFinite(tutorId)) {
+            const grouped = new Map<string, number>();
+            for (const row of deduped.values()) {
+              grouped.set(row.scheduleDate, (grouped.get(row.scheduleDate) ?? 0) + 1);
+            }
+            return {
+              recordset: Array.from(grouped.entries())
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([scheduleDate, reportedCrmHours]) => ({
+                  WorkDate: scheduleDate,
+                  ReportedCRMHours: reportedCrmHours
+                }))
+            };
+          }
+
+          if (sqlText.includes('GROUP BY ds.TutorID, ds.WorkDate')) {
+            const grouped = new Map<string, number>();
+            for (const row of deduped.values()) {
+              grouped.set(`${row.tutorId}:${row.scheduleDate}`, (grouped.get(`${row.tutorId}:${row.scheduleDate}`) ?? 0) + 1);
+            }
+            return {
+              recordset: Array.from(grouped.entries())
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([key, reportedCrmHours]) => {
+                  const [summaryTutorId, workDate] = key.split(':');
+                  return {
+                    TutorID: Number(summaryTutorId),
+                    WorkDate: workDate,
+                    ReportedCRMHours: reportedCrmHours
+                  };
+                })
+            };
+          }
+
+          const grouped = new Map<number, number>();
+          for (const row of deduped.values()) {
+            grouped.set(row.tutorId, (grouped.get(row.tutorId) ?? 0) + 1);
+          }
           return {
-            recordset: calendarEntries
-              .filter((row) => {
-                const scheduleDate = toDateOnly(row.scheduleDate);
-                return row.tutorId === tutorId && scheduleDate >= monthStart && scheduleDate < nextMonthStart;
-              })
-              .map((row) => ({
-                ScheduleDate: row.scheduleDate,
-                TimeID: row.timeId,
-                TimeLabel: row.timeLabel
+            recordset: Array.from(grouped.entries())
+              .sort(([a], [b]) => a - b)
+              .map(([summaryTutorId, reportedCrmHours]) => ({
+                TutorID: summaryTutorId,
+                ReportedCRMHours: reportedCrmHours
               }))
           };
         }
@@ -237,7 +314,28 @@ test('admin daily summary groups by tutor-day, filters zero totals, and sorts by
       ],
       approvedDays: [
         { id: 1, franchiseid: 77, tutorid: 10, work_date: new Date('2026-02-02T00:00:00.000Z'), schedule_snapshot: null },
-        { id: 2, franchiseid: 77, tutorid: 10, work_date: '2026-02-03', schedule_snapshot: null },
+        {
+          id: 2,
+          franchiseid: 77,
+          tutorid: 10,
+          work_date: '2026-02-03',
+          schedule_snapshot: {
+            version: 1,
+            franchiseId: 77,
+            tutorId: 10,
+            workDate: '2026-02-03',
+            timezone: 'America/Los_Angeles',
+            slotMinutes: 60,
+            entries: [
+              { timeId: 1, timeLabel: '10:00 AM' },
+              { timeId: 2, timeLabel: '11:00 AM' }
+            ],
+            intervals: [
+              { startAt: '2026-02-03T10:00:00.000-08:00', endAt: '2026-02-03T11:00:00.000-08:00' },
+              { startAt: '2026-02-03T11:00:00.000-08:00', endAt: '2026-02-03T12:00:00.000-08:00' }
+            ]
+          }
+        },
         { id: 3, franchiseid: 77, tutorid: 20, work_date: '2026-02-02', schedule_snapshot: null },
         { id: 4, franchiseid: 77, tutorid: 10, work_date: '2026-02-03', schedule_snapshot: null },
         { id: 5, franchiseid: 77, tutorid: 30, work_date: '2026-02-04', schedule_snapshot: null }
@@ -282,7 +380,7 @@ test('admin daily summary groups by tutor-day, filters zero totals, and sorts by
   });
 });
 
-test('admin pay-period summary uses scheduled snapshot totals for tutoring hours', async () => {
+test('admin pay-period summary merges CRM and logged hours across tutor unions', async () => {
   setPostgresPoolOverride(
     createPostgresPool({
       settings: [
@@ -304,31 +402,39 @@ test('admin pay-period summary uses scheduled snapshot totals for tutoring hours
           franchiseid: 77,
           tutorid: 10,
           work_date: '2026-02-03',
-          schedule_snapshot: {
-            version: 1,
-            franchiseId: 77,
-            tutorId: 10,
-            workDate: '2026-02-03',
-            timezone: 'America/Los_Angeles',
-            slotMinutes: 60,
-            entries: [
-              { timeId: 1, timeLabel: '10:00 AM' },
-              { timeId: 2, timeLabel: '11:00 AM' }
-            ],
-            intervals: [
-              { startAt: '2026-02-03T10:00:00.000-08:00', endAt: '2026-02-03T11:00:00.000-08:00' },
-              { startAt: '2026-02-03T11:00:00.000-08:00', endAt: '2026-02-03T12:00:00.000-08:00' }
-            ]
-          }
+          schedule_snapshot: null
+        },
+        {
+          id: 92,
+          franchiseid: 77,
+          tutorid: 30,
+          work_date: '2026-02-04',
+          schedule_snapshot: null
         }
       ],
       sessions: [
-        { entry_day_id: 91, start_at: '2026-02-03T18:05:00.000Z', end_at: '2026-02-03T19:00:00.000Z' },
-        { entry_day_id: 91, start_at: '2026-02-03T20:00:00.000Z', end_at: '2026-02-03T20:30:00.000Z' }
+        { entry_day_id: 91, start_at: '2026-02-03T18:00:00.000Z', end_at: '2026-02-03T19:30:00.000Z' },
+        { entry_day_id: 92, start_at: '2026-02-04T18:00:00.000Z', end_at: '2026-02-04T20:00:00.000Z' }
       ]
     }) as never
   );
-  setMssqlPoolOverride(createMssqlPool([{ tutorId: 10, firstName: 'Ben', lastName: 'Baker' }]) as never);
+  setMssqlPoolOverride(
+    createMssqlPool(
+      [
+        { tutorId: 10, firstName: 'Ben', lastName: 'Baker' },
+        { tutorId: 20, firstName: 'Amy', lastName: 'Adams' },
+        { tutorId: 30, firstName: 'Cara', lastName: 'Carter' },
+        { tutorId: 40, firstName: 'Zero', lastName: 'Tutor' }
+      ],
+      [],
+      [
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 1, timeLabel: '10:00 AM' },
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 2, timeLabel: '11:00 AM' },
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 2, timeLabel: '11:00 AM' },
+        { franchiseId: 77, tutorId: 20, scheduleDate: '2026-02-04', timeId: 5, timeLabel: '2:00 PM' }
+      ]
+    ) as never
+  );
 
   const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 1, displayName: 'Admin User' });
 
@@ -341,22 +447,386 @@ test('admin pay-period summary uses scheduled snapshot totals for tutoring hours
         tutorId: number;
         firstName: string;
         lastName: string;
-        tutoringHours: number;
-        extraHours: number;
-        totalHours: number;
+        reportedCrmHours: number;
+        loggedHours: number;
       }>;
     };
 
     assert.deepEqual(body.rows, [
       {
+        tutorId: 20,
+        firstName: 'Amy',
+        lastName: 'Adams',
+        reportedCrmHours: 1,
+        loggedHours: 0
+      },
+      {
         tutorId: 10,
         firstName: 'Ben',
         lastName: 'Baker',
-        tutoringHours: 2,
-        extraHours: 0.5,
-        totalHours: 2.5
+        reportedCrmHours: 2,
+        loggedHours: 1.5
+      },
+      {
+        tutorId: 30,
+        firstName: 'Cara',
+        lastName: 'Carter',
+        reportedCrmHours: 0,
+        loggedHours: 2
       }
     ]);
+  });
+});
+
+test('admin pay-period summary detail returns CRM and logged unions by date', async () => {
+  setPostgresPoolOverride(
+    createPostgresPool({
+      settings: [
+        {
+          franchiseid: 77,
+          policytype: 'strict_approval',
+          timezone: 'America/Los_Angeles',
+          pay_period_type: 'weekly',
+          auto_email_enabled: false,
+          custom_period_1_start_day: null,
+          custom_period_1_end_day: null,
+          custom_period_2_start_day: null,
+          custom_period_2_end_day: null
+        }
+      ],
+      approvedDays: [
+        { id: 101, franchiseid: 77, tutorid: 10, work_date: '2026-02-03', schedule_snapshot: null },
+        { id: 102, franchiseid: 77, tutorid: 10, work_date: '2026-02-05', schedule_snapshot: null }
+      ],
+      sessions: [
+        { entry_day_id: 101, start_at: '2026-02-03T18:00:00.000Z', end_at: '2026-02-03T19:30:00.000Z' },
+        { entry_day_id: 102, start_at: '2026-02-05T18:00:00.000Z', end_at: '2026-02-05T18:45:00.000Z' }
+      ]
+    }) as never
+  );
+  setMssqlPoolOverride(
+    createMssqlPool(
+      [{ tutorId: 10, firstName: 'Ben', lastName: 'Baker' }],
+      [],
+      [
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 1, timeLabel: '10:00 AM' },
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 2, timeLabel: '11:00 AM' },
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-04', timeId: 3, timeLabel: '12:00 PM' }
+      ]
+    ) as never
+  );
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(
+      `${baseUrl}/api/hours/admin/pay-period/summary-detail?franchiseId=77&tutorId=10&forDate=2026-02-03`
+    );
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      rows: Array<{ workDate: string; reportedCrmHours: number; loggedHours: number }>;
+    };
+
+    assert.deepEqual(body.rows, [
+      { workDate: '2026-02-03', reportedCrmHours: 2, loggedHours: 1.5 },
+      { workDate: '2026-02-04', reportedCrmHours: 1, loggedHours: 0 },
+      { workDate: '2026-02-05', reportedCrmHours: 0, loggedHours: 0.75 }
+    ]);
+  });
+});
+
+test('summary detail rejects invalid tutorId values', async () => {
+  setPostgresPoolOverride(createPostgresPool({ settings: [], approvedDays: [], sessions: [] }) as never);
+  setMssqlPoolOverride(createMssqlPool([]) as never);
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 200, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/hours/admin/pay-period/summary-detail?franchiseId=77&tutorId=abc`);
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: string };
+    assert.match(body.error, /tutorId is required/i);
+  });
+});
+
+test('summary detail rejects invalid forDate values', async () => {
+  setPostgresPoolOverride(createPostgresPool({ settings: [], approvedDays: [], sessions: [] }) as never);
+  setMssqlPoolOverride(createMssqlPool([]) as never);
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 200, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(
+      `${baseUrl}/api/hours/admin/pay-period/summary-detail?franchiseId=77&tutorId=10&forDate=2026-2-3`
+    );
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: string };
+    assert.match(body.error, /forDate must be YYYY-MM-DD/i);
+  });
+});
+
+test('selector-disabled admins are locked to their session franchise for summary detail', async () => {
+  setPostgresPoolOverride(
+    createPostgresPool({
+      settings: [
+        {
+          franchiseid: 9,
+          policytype: 'strict_approval',
+          timezone: 'America/Los_Angeles',
+          pay_period_type: 'weekly',
+          auto_email_enabled: false,
+          custom_period_1_start_day: null,
+          custom_period_1_end_day: null,
+          custom_period_2_start_day: null,
+          custom_period_2_end_day: null
+        }
+      ],
+      approvedDays: [{ id: 111, franchiseid: 9, tutorid: 41, work_date: '2026-02-02', schedule_snapshot: null }],
+      sessions: [{ entry_day_id: 111, start_at: '2026-02-02T18:00:00.000Z', end_at: '2026-02-02T20:00:00.000Z' }]
+    }) as never
+  );
+  setMssqlPoolOverride(
+    createMssqlPool(
+      [{ tutorId: 41, firstName: 'Nina', lastName: 'North' }],
+      [],
+      [{ franchiseId: 9, tutorId: 41, scheduleDate: '2026-02-02', timeId: 7, timeLabel: '3:00 PM' }]
+    ) as never
+  );
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 400, franchiseId: 9, displayName: 'Scoped Admin' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(
+      `${baseUrl}/api/hours/admin/pay-period/summary-detail?franchiseId=123&tutorId=41&forDate=2026-02-03`
+    );
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      payPeriod: { franchiseId: number };
+      rows: Array<{ workDate: string; reportedCrmHours: number; loggedHours: number }>;
+    };
+
+    assert.equal(body.payPeriod.franchiseId, 9);
+    assert.deepEqual(body.rows, [{ workDate: '2026-02-02', reportedCrmHours: 1, loggedHours: 2 }]);
+  });
+});
+
+test('pay-period export csv returns flat tutor-day rows with session pairs in franchise timezone', async () => {
+  setPostgresPoolOverride(
+    createPostgresPool({
+      settings: [
+        {
+          franchiseid: 77,
+          policytype: 'strict_approval',
+          timezone: 'America/Los_Angeles',
+          pay_period_type: 'weekly',
+          auto_email_enabled: false,
+          custom_period_1_start_day: null,
+          custom_period_1_end_day: null,
+          custom_period_2_start_day: null,
+          custom_period_2_end_day: null
+        }
+      ],
+      approvedDays: [
+        { id: 201, franchiseid: 77, tutorid: 10, work_date: '2026-02-03', schedule_snapshot: null },
+        { id: 202, franchiseid: 77, tutorid: 10, work_date: '2026-02-05', schedule_snapshot: null }
+      ],
+      sessions: [
+        { entry_day_id: 201, start_at: '2026-02-03T18:00:00.000Z', end_at: '2026-02-03T19:00:00.000Z' },
+        { entry_day_id: 201, start_at: '2026-02-03T19:30:00.000Z', end_at: '2026-02-03T21:00:00.000Z' },
+        { entry_day_id: 202, start_at: '2026-02-05T18:00:00.000Z', end_at: '2026-02-05T18:45:00.000Z' }
+      ]
+    }) as never
+  );
+  setMssqlPoolOverride(
+    createMssqlPool(
+      [{ tutorId: 10, firstName: 'Ben', lastName: 'Baker' }],
+      [],
+      [
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 1, timeLabel: '10:00 AM' },
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 2, timeLabel: '11:00 AM' },
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-04', timeId: 3, timeLabel: '12:00 PM' }
+      ]
+    ) as never
+  );
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/hours/admin/pay-period/export?franchiseId=77&forDate=2026-02-03&format=csv`);
+
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type') ?? '', /text\/csv/i);
+    const body = await response.text();
+    assert.match(body, /Tutor,Date,Reported CRM Hours,Logged Hours,Diff,Time In \/ Out/i);
+    assert.match(body, /"Baker, Ben",2026-02-03,2\.00,2\.50,\+0\.50,"10:00 AM - 11:00 AM \| 11:30 AM - 1:00 PM"/i);
+    assert.match(body, /"Baker, Ben",2026-02-04,1\.00,0\.00,-1\.00,""/i);
+    assert.match(body, /"Baker, Ben",2026-02-05,0\.00,0\.75,\+0\.75,"10:00 AM - 10:45 AM"/i);
+  });
+});
+
+test('pay-period export xlsx returns grouped tutor summary with collapsed detail rows', async () => {
+  setPostgresPoolOverride(
+    createPostgresPool({
+      settings: [
+        {
+          franchiseid: 77,
+          policytype: 'strict_approval',
+          timezone: 'America/Los_Angeles',
+          pay_period_type: 'weekly',
+          auto_email_enabled: false,
+          custom_period_1_start_day: null,
+          custom_period_1_end_day: null,
+          custom_period_2_start_day: null,
+          custom_period_2_end_day: null
+        }
+      ],
+      approvedDays: [{ id: 301, franchiseid: 77, tutorid: 10, work_date: '2026-02-03', schedule_snapshot: null }],
+      sessions: [{ entry_day_id: 301, start_at: '2026-02-03T18:00:00.000Z', end_at: '2026-02-03T19:30:00.000Z' }]
+    }) as never
+  );
+  setMssqlPoolOverride(
+    createMssqlPool(
+      [{ tutorId: 10, firstName: 'Ben', lastName: 'Baker' }],
+      [],
+      [
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 1, timeLabel: '10:00 AM' },
+        { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 2, timeLabel: '11:00 AM' }
+      ]
+    ) as never
+  );
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/hours/admin/pay-period/export?franchiseId=77&forDate=2026-02-03&format=xlsx`);
+
+    assert.equal(response.status, 200);
+    assert.match(
+      response.headers.get('content-type') ?? '',
+      /application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet/i
+    );
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    assert.ok(buffer.byteLength > 0);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer as never);
+    const worksheet = workbook.getWorksheet('Pay Period Review');
+    assert.ok(worksheet);
+    assert.deepEqual(worksheet?.getRow(1).values, [
+      ,
+      'Tutor',
+      'Date',
+      'Reported CRM Hours',
+      'Logged Hours',
+      'Diff',
+      'Time In / Out'
+    ]);
+    assert.equal(worksheet?.getRow(2).getCell(1).value, 'Baker, Ben');
+    assert.equal(worksheet?.getRow(2).getCell(3).value, 2);
+    assert.equal(worksheet?.getRow(2).getCell(4).value, 1.5);
+    assert.equal(worksheet?.getRow(2).getCell(5).value, -0.5);
+    assert.equal(worksheet?.getRow(3).getCell(2).value, '2026-02-03');
+    assert.equal(worksheet?.getRow(3).outlineLevel, 1);
+    assert.equal(worksheet?.getRow(3).hidden, true);
+  });
+});
+
+test('pay-period export neutralizes spreadsheet formulas in tutor names', async () => {
+  setPostgresPoolOverride(
+    createPostgresPool({
+      settings: [
+        {
+          franchiseid: 77,
+          policytype: 'strict_approval',
+          timezone: 'America/Los_Angeles',
+          pay_period_type: 'weekly',
+          auto_email_enabled: false,
+          custom_period_1_start_day: null,
+          custom_period_1_end_day: null,
+          custom_period_2_start_day: null,
+          custom_period_2_end_day: null
+        }
+      ],
+      approvedDays: [{ id: 401, franchiseid: 77, tutorid: 10, work_date: '2026-02-03', schedule_snapshot: null }],
+      sessions: [{ entry_day_id: 401, start_at: '2026-02-03T18:00:00.000Z', end_at: '2026-02-03T19:00:00.000Z' }]
+    }) as never
+  );
+  setMssqlPoolOverride(
+    createMssqlPool(
+      [{ tutorId: 10, firstName: 'Admin', lastName: '=cmd()' }],
+      [],
+      [{ franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 1, timeLabel: '10:00 AM' }]
+    ) as never
+  );
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const csvResponse = await fetch(`${baseUrl}/api/hours/admin/pay-period/export?franchiseId=77&forDate=2026-02-03&format=csv`);
+    assert.equal(csvResponse.status, 200);
+    const csvBody = await csvResponse.text();
+    assert.match(csvBody, /"'=cmd\(\), Admin",2026-02-03,1\.00,1\.00,0\.00,"10:00 AM - 11:00 AM"/i);
+
+    const xlsxResponse = await fetch(`${baseUrl}/api/hours/admin/pay-period/export?franchiseId=77&forDate=2026-02-03&format=xlsx`);
+    assert.equal(xlsxResponse.status, 200);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(new Uint8Array(await xlsxResponse.arrayBuffer()) as never);
+    const worksheet = workbook.getWorksheet('Pay Period Review');
+    assert.equal(worksheet?.getRow(2).getCell(1).value, "'=cmd(), Admin");
+  });
+});
+
+test('pay-period export rejects oversized datasets', async () => {
+  setPostgresPoolOverride(
+    createPostgresPool({
+      settings: [
+        {
+          franchiseid: 77,
+          policytype: 'strict_approval',
+          timezone: 'America/Los_Angeles',
+          pay_period_type: 'weekly',
+          auto_email_enabled: false,
+          custom_period_1_start_day: null,
+          custom_period_1_end_day: null,
+          custom_period_2_start_day: null,
+          custom_period_2_end_day: null
+        }
+      ],
+      approvedDays: Array.from({ length: 2001 }, (_, index) => ({
+        id: index + 1,
+        franchiseid: 77,
+        tutorid: 10,
+        work_date: '2026-02-03',
+        schedule_snapshot: null
+      })),
+      sessions: []
+    }) as never
+  );
+  setMssqlPoolOverride(createMssqlPool([{ tutorId: 10, firstName: 'Ben', lastName: 'Baker' }]) as never);
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/hours/admin/pay-period/export?franchiseId=77&forDate=2026-02-03&format=xlsx`);
+    assert.equal(response.status, 413);
+    const body = (await response.json()) as { error: string };
+    assert.match(body.error, /too large to export/i);
+  });
+});
+
+test('pay-period export rejects invalid format values', async () => {
+  setPostgresPoolOverride(createPostgresPool({ settings: [], approvedDays: [], sessions: [] }) as never);
+  setMssqlPoolOverride(createMssqlPool([]) as never);
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 200, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/hours/admin/pay-period/export?franchiseId=77&format=pdf`);
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: string };
+    assert.match(body.error, /format must be xlsx or csv/i);
   });
 });
 
