@@ -44,6 +44,16 @@ const overlaps = (rangeStart: Date, rangeEnd: Date, start: string, end: string):
   return s <= rangeEnd && e >= rangeStart;
 };
 
+/**
+ * Render the tutor calendar page UI for viewing schedule, time off, and daily time entries.
+ *
+ * Loads calendar, time-off, and time-entry data for the visible month, displays those items on a month
+ * calendar (with browser-local timezone handling), and provides dialogs to add/edit/save/submit daily
+ * time entries and view time-off details. Includes controls to toggle visibility of schedule, time
+ * entries, and time off, and shows variance information comparing entered minutes to scheduled minutes.
+ *
+ * @returns A JSX element containing the tutor calendar page UI.
+ */
 export function TutorCalendarPage(): JSX.Element {
   const [month, setMonth] = useState(monthLabel(new Date()));
   const [range, setRange] = useState<{ startDate: string; endDate: string; timezone: string; month: string } | null>(
