@@ -41,6 +41,18 @@ type SessionRow = {
   end_at: string | null;
 };
 
+type BreakRow = {
+  entry_day_id: number;
+  time_entry_session_id?: number | null;
+  break_type: string;
+  pay_treatment: string;
+  source: string;
+  status: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  duration_minutes: number;
+};
+
 type TutorNameRow = {
   tutorId: number;
   firstName: string;
@@ -71,6 +83,7 @@ const createPostgresPool = (args: {
   settings: PayrollSettingsRow[];
   approvedDays: ApprovedDayRow[];
   sessions: SessionRow[];
+  breaks?: BreakRow[];
 }) => {
   const settingsByFranchise = new Map(args.settings.map((row) => [row.franchiseid, { ...row }]));
 
@@ -123,6 +136,12 @@ const createPostgresPool = (args: {
       if (sqlText.includes('FROM public.time_entry_sessions')) {
         const requestedIds = new Set(((params[0] as number[]) ?? []).map(Number));
         const rows = args.sessions.filter((row) => requestedIds.has(row.entry_day_id) && row.end_at !== null);
+        return { rowCount: rows.length, rows };
+      }
+
+      if (sqlText.includes('FROM public.time_entry_breaks')) {
+        const requestedIds = new Set(((params[0] as number[]) ?? []).map(Number));
+        const rows = (args.breaks ?? []).filter((row) => requestedIds.has(row.entry_day_id));
         return { rowCount: rows.length, rows };
       }
 
@@ -473,6 +492,116 @@ test('admin pay-period summary merges CRM and logged hours across tutor unions',
         lastName: 'Carter',
         reportedCrmHours: 0,
         loggedHours: 2
+      }
+    ]);
+  });
+});
+
+test('admin pay-period summary deducts completed unpaid breaks but not paid breaks', async () => {
+  setPostgresPoolOverride(
+    createPostgresPool({
+      settings: [
+        {
+          franchiseid: 77,
+          policytype: 'strict_approval',
+          timezone: 'America/Los_Angeles',
+          pay_period_type: 'weekly',
+          auto_email_enabled: false,
+          custom_period_1_start_day: null,
+          custom_period_1_end_day: null,
+          custom_period_2_start_day: null,
+          custom_period_2_end_day: null
+        }
+      ],
+      approvedDays: [
+        {
+          id: 501,
+          franchiseid: 77,
+          tutorid: 10,
+          work_date: '2026-02-03',
+          schedule_snapshot: null
+        },
+        {
+          id: 502,
+          franchiseid: 77,
+          tutorid: 20,
+          work_date: '2026-02-03',
+          schedule_snapshot: null
+        }
+      ],
+      sessions: [
+        { entry_day_id: 501, start_at: '2026-02-03T17:00:00.000Z', end_at: '2026-02-04T01:30:00.000Z' },
+        { entry_day_id: 502, start_at: '2026-02-03T18:00:00.000Z', end_at: '2026-02-03T19:00:00.000Z' }
+      ],
+      breaks: [
+        {
+          entry_day_id: 501,
+          break_type: 'lunch',
+          pay_treatment: 'unpaid',
+          source: 'employee',
+          status: 'completed',
+          start_time: '2026-02-03T21:00:00.000Z',
+          end_time: '2026-02-03T21:30:00.000Z',
+          duration_minutes: 30
+        },
+        {
+          entry_day_id: 501,
+          break_type: 'rest_break',
+          pay_treatment: 'paid',
+          source: 'employee',
+          status: 'completed',
+          start_time: '2026-02-03T23:00:00.000Z',
+          end_time: '2026-02-03T23:15:00.000Z',
+          duration_minutes: 15
+        },
+        {
+          entry_day_id: 501,
+          break_type: 'personal',
+          pay_treatment: 'unpaid',
+          source: 'manager',
+          status: 'voided',
+          duration_minutes: 45
+        }
+      ]
+    }) as never
+  );
+  setMssqlPoolOverride(
+    createMssqlPool([
+      { tutorId: 10, firstName: 'Ben', lastName: 'Baker' },
+      { tutorId: 20, firstName: 'Amy', lastName: 'Adams' }
+    ]) as never
+  );
+
+  const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 1, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/hours/admin/pay-period/summary?franchiseId=77&forDate=2026-02-03`);
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      rows: Array<{
+        tutorId: number;
+        firstName: string;
+        lastName: string;
+        reportedCrmHours: number;
+        loggedHours: number;
+      }>;
+    };
+
+    assert.deepEqual(body.rows, [
+      {
+        tutorId: 20,
+        firstName: 'Amy',
+        lastName: 'Adams',
+        reportedCrmHours: 0,
+        loggedHours: 1
+      },
+      {
+        tutorId: 10,
+        firstName: 'Ben',
+        lastName: 'Baker',
+        reportedCrmHours: 0,
+        loggedHours: 8
       }
     ]);
   });

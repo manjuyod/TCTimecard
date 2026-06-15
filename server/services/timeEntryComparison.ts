@@ -1,5 +1,6 @@
 import { DateTime } from 'luxon';
 import type { ScheduleSnapshotInterval } from './scheduleSnapshot';
+import { computeBreakMinuteTotals, type BreakStatus, type PayTreatment } from './timeEntryBreaks';
 
 export type MinuteInterval = { startMinute: number; endMinute: number };
 
@@ -10,6 +11,10 @@ export type TimeEntryComparisonV1 = {
   exactMatch: boolean;
   manual: {
     union: Array<{ startAt: string; endAt: string }>;
+    grossMinutes: number;
+    paidBreakMinutes: number;
+    unpaidBreakMinutes: number;
+    paidMinutes: number;
     totalMinutes: number;
   };
   scheduled: {
@@ -145,6 +150,7 @@ const subtractIntervals = (base: MinuteInterval[], subtract: MinuteInterval[]): 
 
 export const computeTimeEntryComparisonV1 = (params: {
   sessions: Array<{ startAt: string; endAt: string }>;
+  breaks?: Array<{ payTreatment: PayTreatment; status: BreakStatus; durationMinutes: number }>;
   snapshotIntervals: ScheduleSnapshotInterval[];
   computedAt?: string;
 }): { ok: true; matches: boolean; comparison: TimeEntryComparisonV1 } | { ok: false; error: string } => {
@@ -170,7 +176,9 @@ export const computeTimeEntryComparisonV1 = (params: {
 
   const manualUnion = normalizeIntervals(manualIntervals);
   const scheduleUnion = scheduleUnionResult.union;
-  const manualMinutes = sumMinutes(manualUnion);
+  const grossMinutes = sumMinutes(manualUnion);
+  const { paidBreakMinutes, unpaidBreakMinutes } = computeBreakMinuteTotals(params.breaks ?? []);
+  const manualMinutes = Math.max(0, grossMinutes - unpaidBreakMinutes);
   const scheduledMinutes = sumMinutes(scheduleUnion);
   const exactMatch = intervalsEqual(manualUnion, scheduleUnion);
   const matches = manualMinutes === scheduledMinutes;
@@ -185,6 +193,10 @@ export const computeTimeEntryComparisonV1 = (params: {
     exactMatch,
     manual: {
       union: manualUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
+      grossMinutes,
+      paidBreakMinutes,
+      unpaidBreakMinutes,
+      paidMinutes: manualMinutes,
       totalMinutes: manualMinutes
     },
     scheduled: {

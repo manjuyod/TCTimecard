@@ -73,6 +73,43 @@ test('computeTimeEntryComparisonV1: manual-only time produces diffs', () => {
   ]);
 });
 
+test('computeTimeEntryComparisonV1: unpaid breaks reduce paid manual minutes', () => {
+  const result = computeTimeEntryComparisonV1({
+    sessions: [{ startAt: '2026-01-01T09:00:00-06:00', endAt: '2026-01-01T17:30:00-06:00' }],
+    breaks: [{ payTreatment: 'unpaid', status: 'completed', durationMinutes: 30 }],
+    snapshotIntervals: [{ startAt: '2026-01-01T09:00:00-06:00', endAt: '2026-01-01T17:00:00-06:00' }]
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.equal(result.matches, true);
+  assert.equal(result.comparison.exactMatch, false);
+  assert.equal(result.comparison.manual.grossMinutes, 510);
+  assert.equal(result.comparison.manual.unpaidBreakMinutes, 30);
+  assert.equal(result.comparison.manual.paidBreakMinutes, 0);
+  assert.equal(result.comparison.manual.paidMinutes, 480);
+  assert.equal(result.comparison.manual.totalMinutes, 480);
+});
+
+test('computeTimeEntryComparisonV1: paid breaks do not reduce paid manual minutes', () => {
+  const result = computeTimeEntryComparisonV1({
+    sessions: [{ startAt: '2026-01-01T09:00:00-06:00', endAt: '2026-01-01T17:00:00-06:00' }],
+    breaks: [{ payTreatment: 'paid', status: 'completed', durationMinutes: 15 }],
+    snapshotIntervals: [{ startAt: '2026-01-01T09:00:00-06:00', endAt: '2026-01-01T17:00:00-06:00' }]
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.equal(result.matches, true);
+  assert.equal(result.comparison.manual.grossMinutes, 480);
+  assert.equal(result.comparison.manual.paidBreakMinutes, 15);
+  assert.equal(result.comparison.manual.unpaidBreakMinutes, 0);
+  assert.equal(result.comparison.manual.paidMinutes, 480);
+  assert.equal(result.comparison.manual.totalMinutes, 480);
+});
+
 test('computeTimeEntryComparisonV1: rejects non-minute-aligned times', () => {
   const result = computeTimeEntryComparisonV1({
     sessions: [{ startAt: '2026-01-01T09:00:30-06:00', endAt: '2026-01-01T10:00:00-06:00' }],

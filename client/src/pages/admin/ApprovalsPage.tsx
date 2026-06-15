@@ -2,9 +2,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { DateTime } from 'luxon';
 import {
   ExtraHoursRequest,
+  TimeEntryBreak,
   TimeEntryDay,
+  TimeEntryBreakPayTreatment,
+  TimeEntryBreakType,
   TimeOffRequest,
+  adminCreateTimeEntryBreak,
   adminEditTimeEntryDay,
+  adminUpdateTimeEntryBreak,
+  adminVoidTimeEntryBreak,
   decideTimeEntryDay,
   decideExtraHours,
   decideTimeOff,
@@ -40,6 +46,24 @@ type DenyContext =
   | { type: 'extra'; request: ExtraHoursRequest }
   | { type: 'timeoff'; request: TimeOffRequest }
   | { type: 'timeentry'; day: TimeEntryDay };
+
+type BreakDraft = {
+  breakType: TimeEntryBreakType;
+  payTreatment: TimeEntryBreakPayTreatment;
+  start: string;
+  end: string;
+  duration: string;
+  note: string;
+};
+
+const createEmptyBreakDraft = (): BreakDraft => ({
+  breakType: 'lunch',
+  payTreatment: 'unpaid',
+  start: '',
+  end: '',
+  duration: '30',
+  note: ''
+});
 
 const toComparisonTotals = (
   day: TimeEntryDay
@@ -81,6 +105,37 @@ const formatWorkDate = (value: string): string => {
   return parsed.isValid ? parsed.toISODate() ?? value : value;
 };
 
+const formatMinutes = (minutes: number): string => {
+  const safe = Math.max(0, Math.round(minutes));
+  const hours = Math.floor(safe / 60);
+  const remainder = safe % 60;
+  if (hours && remainder) return `${hours}h ${remainder}m`;
+  if (hours) return `${hours}h`;
+  return `${remainder}m`;
+};
+
+const formatBreakSource = (source: string): string => {
+  if (source === 'auto_rule') return 'Auto-applied';
+  if (source === 'manager') return 'Manager-entered';
+  if (source === 'employee') return 'Employee-entered';
+  return 'Imported';
+};
+
+const formatBreakDraftTime = (value: string | null): string => {
+  if (!value) return '';
+  const parsed = DateTime.fromISO(value, { setZone: true }).setZone(browserTimeZone);
+  return parsed.isValid ? parsed.toFormat('HH:mm') : '';
+};
+
+const toBreakDraft = (item: TimeEntryBreak): BreakDraft => ({
+  breakType: item.breakType,
+  payTreatment: item.payTreatment,
+  start: formatBreakDraftTime(item.startTime),
+  end: formatBreakDraftTime(item.endTime),
+  duration: String(item.durationMinutes || 30),
+  note: item.note ?? ''
+});
+
 export function ApprovalsPage(): JSX.Element {
   const { session } = useAuth();
   const sessionFranchiseId = getSessionFranchiseId(session);
@@ -107,6 +162,8 @@ export function ApprovalsPage(): JSX.Element {
   const [fixSessions, setFixSessions] = useState<Array<{ start: string; end: string }>>([{ start: '', end: '' }]);
   const [fixReason, setFixReason] = useState('');
   const [fixError, setFixError] = useState<string | null>(null);
+  const [breakDraft, setBreakDraft] = useState<BreakDraft>(() => createEmptyBreakDraft());
+  const [editingBreakId, setEditingBreakId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!selectorAllowed) {
@@ -331,6 +388,8 @@ export function ApprovalsPage(): JSX.Element {
     setFixDay(day);
     setFixError(null);
     setFixReason('');
+    setEditingBreakId(null);
+    setBreakDraft(createEmptyBreakDraft());
 
     if (day.sessions?.length) {
       setFixSessions(
@@ -438,6 +497,143 @@ export function ApprovalsPage(): JSX.Element {
       const message = err instanceof Error ? err.message : 'Unable to save time entry fix';
       toast.error(message);
       setFixError(message);
+    } finally {
+      setActingId(null);
+    }
+  };
+
+  const buildBreakWindowPayload = (): { ok: true; startTime?: string; endTime?: string; durationMinutes?: number } | { ok: false; error: string } => {
+    if (!fixDay) return { ok: false, error: 'No day selected' };
+    const hasWindow = Boolean(breakDraft.start.trim() || breakDraft.end.trim());
+    if (!hasWindow) {
+      const durationMinutes = Number(breakDraft.duration);
+      if (!Number.isInteger(durationMinutes) || durationMinutes <= 0) {
+        return { ok: false, error: 'Duration must be a positive number of minutes.' };
+      }
+      return { ok: true, durationMinutes };
+    }
+
+    const parseTime = (value: string): { hour: number; minute: number } | null => {
+      const match = value.trim().match(/^(\d{2}):(\d{2})$/);
+      if (!match) return null;
+      const hour = Number(match[1]);
+      const minute = Number(match[2]);
+      if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+      if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+      return { hour, minute };
+    };
+
+    const start = parseTime(breakDraft.start);
+    const end = parseTime(breakDraft.end);
+    if (!start || !end) {
+      return { ok: false, error: 'Break start/end must both be HH:mm values, or leave both blank for duration-only.' };
+    }
+
+    const baseDate = DateTime.fromISO(fixDay.workDate, { zone: browserTimeZone, setZone: true }).startOf('day');
+    const startLocal = baseDate.set({ hour: start.hour, minute: start.minute, second: 0, millisecond: 0 });
+    const endLocal = baseDate.set({ hour: end.hour, minute: end.minute, second: 0, millisecond: 0 });
+    if (!startLocal.isValid || !endLocal.isValid || endLocal <= startLocal) {
+      return { ok: false, error: 'Break end must be after break start.' };
+    }
+
+    return {
+      ok: true,
+      startTime: startLocal.toUTC().toISO({ suppressMilliseconds: true }) ?? '',
+      endTime: endLocal.toUTC().toISO({ suppressMilliseconds: true }) ?? ''
+    };
+  };
+
+  const startManagerBreakEdit = (day: TimeEntryDay, item: TimeEntryBreak, options?: { closeReview?: boolean }) => {
+    if (item.status !== 'completed') return;
+    if (fixDay?.id !== day.id) {
+      openFixDialog(day);
+    } else {
+      setFixError(null);
+    }
+    setBreakDraft(toBreakDraft(item));
+    setEditingBreakId(item.id);
+    if (options?.closeReview) setSelectedDay(null);
+  };
+
+  const resetBreakEditor = () => {
+    setBreakDraft(createEmptyBreakDraft());
+    setEditingBreakId(null);
+  };
+
+  const saveManagerBreak = async () => {
+    if (!fixDay) return;
+    const targetFranchiseId = franchiseId ?? sessionFranchiseId;
+    if (targetFranchiseId === null) {
+      toast.error('Franchise ID required');
+      return;
+    }
+
+    const payload = buildBreakWindowPayload();
+    if (!payload.ok) {
+      setFixError(payload.error);
+      return;
+    }
+
+    setActingId(fixDay.id);
+    setFixError(null);
+    try {
+      const commonPayload = {
+        franchiseId: targetFranchiseId,
+        dayId: fixDay.id,
+        breakType: breakDraft.breakType,
+        payTreatment: breakDraft.payTreatment,
+        startTime: payload.startTime ?? null,
+        endTime: payload.endTime ?? null,
+        durationMinutes: payload.durationMinutes ?? null,
+        note: breakDraft.note || null
+      };
+      const updated =
+        editingBreakId === null
+          ? await adminCreateTimeEntryBreak({
+              ...commonPayload,
+              reason: fixReason || null
+            })
+          : await adminUpdateTimeEntryBreak({
+              ...commonPayload,
+              breakId: editingBreakId
+            });
+      setTimeEntryDays((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setFixDay(updated);
+      setSelectedDay((prev) => (prev?.id === updated.id ? updated : prev));
+      resetBreakEditor();
+      toast.success(editingBreakId === null ? 'Break added.' : 'Break updated.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : editingBreakId === null ? 'Unable to add break' : 'Unable to update break';
+      toast.error(message);
+      setFixError(message);
+    } finally {
+      setActingId(null);
+    }
+  };
+
+  const voidManagerBreak = async (day: TimeEntryDay, breakId: number) => {
+    const targetFranchiseId = franchiseId ?? sessionFranchiseId;
+    if (targetFranchiseId === null) {
+      toast.error('Franchise ID required');
+      return;
+    }
+
+    setActingId(day.id);
+    try {
+      const updated = await adminVoidTimeEntryBreak({
+        franchiseId: targetFranchiseId,
+        dayId: day.id,
+        breakId,
+        note: 'Voided by manager'
+      });
+      setTimeEntryDays((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setFixDay((prev) => (prev?.id === updated.id ? updated : prev));
+      setSelectedDay((prev) => (prev?.id === updated.id ? updated : prev));
+      if (editingBreakId === breakId) resetBreakEditor();
+      toast.success('Break voided.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to void break';
+      toast.error(message);
     } finally {
       setActingId(null);
     }
@@ -866,6 +1062,74 @@ export function ApprovalsPage(): JSX.Element {
                   </div>
                 </div>
 
+                <div className="rounded-lg border bg-white p-4">
+                  <p className="font-semibold text-slate-900">Breaks</p>
+                  <div className="mt-3 grid gap-2 md:grid-cols-4">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Gross time</p>
+                      <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.grossMinutes ?? 0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Paid breaks</p>
+                      <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.paidBreakMinutes ?? 0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Unpaid breaks</p>
+                      <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Paid time</p>
+                      <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.paidMinutes ?? 0)}</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {selectedDay.breaks?.length ? (
+                      selectedDay.breaks.map((item) => (
+                        <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 p-3">
+                          <div>
+                            <p className="font-medium capitalize text-slate-900">{item.breakType.replace('_', ' ')}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {item.startTime && item.endTime
+                                ? `${DateTime.fromISO(item.startTime, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')} - ${DateTime.fromISO(item.endTime, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')}`
+                                : 'Duration-only'}{' '}
+                              · {formatBreakSource(item.source)}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant={item.payTreatment === 'paid' ? 'success' : 'warning'}>{item.payTreatment}</Badge>
+                            <Badge variant={item.status === 'voided' ? 'muted' : item.status === 'active' ? 'warning' : 'secondary'}>
+                              {item.status}
+                            </Badge>
+                            <span className="font-semibold text-slate-900">{formatMinutes(item.durationMinutes)}</span>
+                            {item.status === 'completed' ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => startManagerBreakEdit(selectedDay, item, { closeReview: true })}
+                                disabled={actingId === selectedDay.id}
+                              >
+                                Edit
+                              </Button>
+                            ) : null}
+                            {item.status !== 'voided' ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void voidManagerBreak(selectedDay, item.id)}
+                                disabled={actingId === selectedDay.id}
+                              >
+                                Void
+                              </Button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No breaks recorded.</p>
+                    )}
+                  </div>
+                </div>
+
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button variant="outline" onClick={() => setSelectedDay(null)}>
                     Close
@@ -900,7 +1164,15 @@ export function ApprovalsPage(): JSX.Element {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(fixDay)} onOpenChange={(open) => !open && setFixDay(null)}>
+      <Dialog
+        open={Boolean(fixDay)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setFixDay(null);
+            resetBreakEditor();
+          }
+        }}
+      >
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           {fixDay ? (
             <>
@@ -953,6 +1225,161 @@ export function ApprovalsPage(): JSX.Element {
                   <Button variant="outline" onClick={() => setFixSessions((prev) => [...prev, { start: '', end: '' }])}>
                     Add segment
                   </Button>
+                </div>
+
+                <div className="space-y-3 rounded-lg border bg-white p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-slate-900">Breaks</p>
+                    <Badge variant="muted">
+                      Paid time {formatMinutes(fixDay.breakSummary?.paidMinutes ?? 0)}
+                    </Badge>
+                  </div>
+                  <div className="grid gap-2 md:grid-cols-4">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Gross time</p>
+                      <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.grossMinutes ?? 0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Paid breaks</p>
+                      <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.paidBreakMinutes ?? 0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Unpaid breaks</p>
+                      <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Break events</p>
+                      <p className="font-semibold text-slate-900">{fixDay.breaks?.length ?? 0}</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    {fixDay.breaks?.length ? (
+                      fixDay.breaks.map((item) => (
+                        <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 p-3">
+                          <div>
+                            <p className="font-medium capitalize text-slate-900">{item.breakType.replace('_', ' ')}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {item.startTime && item.endTime
+                                ? `${DateTime.fromISO(item.startTime, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')} - ${DateTime.fromISO(item.endTime, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')}`
+                                : 'Duration-only'}{' '}
+                              · {formatBreakSource(item.source)}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant={item.payTreatment === 'paid' ? 'success' : 'warning'}>{item.payTreatment}</Badge>
+                            <Badge variant={item.status === 'voided' ? 'muted' : item.status === 'active' ? 'warning' : 'secondary'}>
+                              {item.status}
+                            </Badge>
+                            <span className="font-semibold text-slate-900">{formatMinutes(item.durationMinutes)}</span>
+                            {item.status === 'completed' ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => startManagerBreakEdit(fixDay, item)}
+                                disabled={actingId === fixDay.id}
+                              >
+                                Edit
+                              </Button>
+                            ) : null}
+                            {item.status !== 'voided' ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void voidManagerBreak(fixDay, item.id)}
+                                disabled={actingId === fixDay.id}
+                              >
+                                Void
+                              </Button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No breaks recorded.</p>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-slate-900">
+                      {editingBreakId === null ? 'Add break' : 'Edit break'}
+                    </p>
+                    {editingBreakId !== null ? <Badge variant="muted">Break #{editingBreakId}</Badge> : null}
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label>Type</Label>
+                      <select
+                        value={breakDraft.breakType}
+                        onChange={(e) =>
+                          setBreakDraft((prev) => ({ ...prev, breakType: e.target.value as TimeEntryBreakType }))
+                        }
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm"
+                      >
+                        <option value="lunch">Lunch</option>
+                        <option value="rest_break">Rest break</option>
+                        <option value="personal">Personal</option>
+                        <option value="training">Training</option>
+                        <option value="travel">Travel</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Pay</Label>
+                      <select
+                        value={breakDraft.payTreatment}
+                        onChange={(e) =>
+                          setBreakDraft((prev) => ({ ...prev, payTreatment: e.target.value as TimeEntryBreakPayTreatment }))
+                        }
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm"
+                      >
+                        <option value="unpaid">Unpaid</option>
+                        <option value="paid">Paid</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Start</Label>
+                      <Input
+                        type="time"
+                        value={breakDraft.start}
+                        onChange={(e) => setBreakDraft((prev) => ({ ...prev, start: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>End</Label>
+                      <Input
+                        type="time"
+                        value={breakDraft.end}
+                        onChange={(e) => setBreakDraft((prev) => ({ ...prev, end: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Duration minutes</Label>
+                      <Input
+                        inputMode="numeric"
+                        value={breakDraft.duration}
+                        onChange={(e) => setBreakDraft((prev) => ({ ...prev, duration: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Note</Label>
+                      <Input
+                        value={breakDraft.note}
+                        onChange={(e) => setBreakDraft((prev) => ({ ...prev, note: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={() => void saveManagerBreak()} disabled={actingId === fixDay.id}>
+                      {editingBreakId === null ? 'Add Break' : 'Save Break'}
+                    </Button>
+                    {editingBreakId !== null ? (
+                      <Button variant="ghost" onClick={resetBreakEditor} disabled={actingId === fixDay.id}>
+                        Cancel Edit
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
 
                 <div className="space-y-2">
