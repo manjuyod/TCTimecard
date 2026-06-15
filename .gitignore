@@ -16,3 +16,7 @@ dist
 Thumbs.db
 specs/
 specs/*
+.gitnexus
+.claude/
+AGENTS.md
+CLAUDE.md
