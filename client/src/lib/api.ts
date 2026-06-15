@@ -112,6 +112,34 @@ export interface TimeEntrySession {
   sortOrder: number;
 }
 
+export type TimeEntryBreakType = 'lunch' | 'rest_break' | 'personal' | 'training' | 'travel' | 'other';
+export type TimeEntryBreakPayTreatment = 'paid' | 'unpaid';
+export type TimeEntryBreakSource = 'employee' | 'manager' | 'auto_rule' | 'import';
+export type TimeEntryBreakStatus = 'active' | 'completed' | 'voided';
+
+export interface TimeEntryBreak {
+  id: number;
+  entryDayId: number;
+  timeEntrySessionId: number | null;
+  breakType: TimeEntryBreakType;
+  payTreatment: TimeEntryBreakPayTreatment;
+  startTime: string | null;
+  endTime: string | null;
+  durationMinutes: number;
+  source: TimeEntryBreakSource;
+  status: TimeEntryBreakStatus;
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TimeEntryBreakSummary {
+  grossMinutes: number;
+  paidBreakMinutes: number;
+  unpaidBreakMinutes: number;
+  paidMinutes: number;
+}
+
 export type ClockStateValue = 0 | 1; // 0 = clocked out, 1 = clocked in
 
 export interface ClockState {
@@ -123,6 +151,9 @@ export interface ClockState {
   persistedClockState: ClockStateValue;
   openSessionId: number | null;
   startedAt: string | null;
+  activeBreak: TimeEntryBreak | null;
+  breaks: TimeEntryBreak[];
+  breakSummary: Pick<TimeEntryBreakSummary, 'paidBreakMinutes' | 'unpaidBreakMinutes'>;
   attestationBlocking: boolean;
   missingWeekEnd: string | null;
 }
@@ -155,6 +186,8 @@ export interface TimeEntryDay {
   decidedAt: string | null;
   decisionReason: string | null;
   sessions: TimeEntrySession[];
+  breaks: TimeEntryBreak[];
+  breakSummary: TimeEntryBreakSummary;
   tutorName?: string | null;
   tutorEmail?: string | null;
   history?: TimeEntryHistory;
@@ -574,10 +607,44 @@ export const clockOut = async (args?: { scheduleSnapshot?: unknown }): Promise<C
   return result.state;
 };
 
+export const startClockBreak = async (args: { breakType: TimeEntryBreakType }): Promise<ClockState> => {
+  const result = await apiFetch<{ state: ClockState }>('/api/clock/me/break/start', {
+    method: 'POST',
+    body: JSON.stringify({ breakType: args.breakType })
+  });
+  return result.state;
+};
+
+export const endClockBreak = async (): Promise<ClockState> => {
+  const result = await apiFetch<{ state: ClockState }>('/api/clock/me/break/end', { method: 'POST' });
+  return result.state;
+};
+
 export const saveTimeEntryDay = async (args: { workDate: string; sessions: Array<{ startAt: string; endAt: string }> }) => {
   const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/me/day/${encodeURIComponent(args.workDate)}`, {
     method: 'PUT',
     body: JSON.stringify({ sessions: args.sessions })
+  });
+  return result.day;
+};
+
+export const createTimeEntryBreak = async (args: {
+  workDate: string;
+  breakType: TimeEntryBreakType;
+  payTreatment?: TimeEntryBreakPayTreatment;
+  startTime: string;
+  endTime: string;
+  note?: string | null;
+}) => {
+  const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/me/day/${encodeURIComponent(args.workDate)}/breaks`, {
+    method: 'POST',
+    body: JSON.stringify({
+      breakType: args.breakType,
+      payTreatment: args.payTreatment,
+      startTime: args.startTime,
+      endTime: args.endTime,
+      note: args.note ?? null
+    })
   });
   return result.day;
 };
@@ -620,6 +687,76 @@ export const adminEditTimeEntryDay = async (args: {
     method: 'PUT',
     body: JSON.stringify({ sessions: args.sessions, reason: args.reason })
   });
+  return result.day;
+};
+
+export const adminCreateTimeEntryBreak = async (args: {
+  franchiseId: number;
+  dayId: number;
+  breakType: TimeEntryBreakType;
+  payTreatment?: TimeEntryBreakPayTreatment;
+  startTime?: string | null;
+  endTime?: string | null;
+  durationMinutes?: number | null;
+  note?: string | null;
+  reason?: string | null;
+}) => {
+  const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/admin/day/${args.dayId}/breaks?franchiseId=${args.franchiseId}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      breakType: args.breakType,
+      payTreatment: args.payTreatment,
+      startTime: args.startTime ?? null,
+      endTime: args.endTime ?? null,
+      durationMinutes: args.durationMinutes ?? null,
+      note: args.note ?? null,
+      reason: args.reason ?? null
+    })
+  });
+  return result.day;
+};
+
+export const adminUpdateTimeEntryBreak = async (args: {
+  franchiseId: number;
+  dayId: number;
+  breakId: number;
+  breakType: TimeEntryBreakType;
+  payTreatment: TimeEntryBreakPayTreatment;
+  startTime?: string | null;
+  endTime?: string | null;
+  durationMinutes?: number | null;
+  note?: string | null;
+}) => {
+  const result = await apiFetch<{ day: TimeEntryDay }>(
+    `/api/time-entry/admin/day/${args.dayId}/breaks/${args.breakId}?franchiseId=${args.franchiseId}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        breakType: args.breakType,
+        payTreatment: args.payTreatment,
+        startTime: args.startTime ?? null,
+        endTime: args.endTime ?? null,
+        durationMinutes: args.durationMinutes ?? null,
+        note: args.note ?? null
+      })
+    }
+  );
+  return result.day;
+};
+
+export const adminVoidTimeEntryBreak = async (args: {
+  franchiseId: number;
+  dayId: number;
+  breakId: number;
+  note?: string | null;
+}) => {
+  const result = await apiFetch<{ day: TimeEntryDay }>(
+    `/api/time-entry/admin/day/${args.dayId}/breaks/${args.breakId}/void?franchiseId=${args.franchiseId}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ note: args.note ?? null })
+    }
+  );
   return result.day;
 };
 
