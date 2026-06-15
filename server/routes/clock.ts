@@ -12,6 +12,15 @@ import {
 import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
 import { computeTimeEntryComparisonV1 } from '../services/timeEntryComparison';
 import { resolveClockOutSubmission, shouldInvalidateClockDayStatus } from '../services/clockSubmission';
+import {
+  applyAutoLunchBreak,
+  computeBreakMinuteTotals,
+  fetchBreaksByDayIds,
+  getDefaultPayTreatment,
+  isBreakType,
+  mapBreakRowToResponse,
+  type TimeEntryBreakRow
+} from '../services/timeEntryBreaks';
 
 type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
 type ClockStateValue = 0 | 1; // 0 = clocked out, 1 = clocked in
@@ -47,6 +56,12 @@ type ClockStateResponse = {
   persistedClockState: ClockStateValue;
   openSessionId: number | null;
   startedAt: string | null;
+  activeBreak: ReturnType<typeof mapBreakRowToResponse> | null;
+  breaks: Array<ReturnType<typeof mapBreakRowToResponse>>;
+  breakSummary: {
+    paidBreakMinutes: number;
+    unpaidBreakMinutes: number;
+  };
   attestationBlocking: boolean;
   missingWeekEnd: string | null;
 };
@@ -68,7 +83,16 @@ const normalizeClockState = (value: unknown): ClockStateValue => (Number(value) 
 
 const appendAudit = async (client: PoolClient, entry: {
   dayId: number;
-  action: 'clock_in' | 'clock_out' | 'submitted' | 'auto_approved' | 'invalidated' | 'admin_fixed';
+  action:
+    | 'clock_in'
+    | 'clock_out'
+    | 'submitted'
+    | 'auto_approved'
+    | 'invalidated'
+    | 'admin_fixed'
+    | 'break_started'
+    | 'break_ended'
+    | 'auto_break_applied';
   actorAccountType: 'TUTOR' | 'ADMIN' | 'SYSTEM';
   actorAccountId: number | null;
   previousStatus: TimeEntryStatus | null;
@@ -98,10 +122,20 @@ const buildClockStateResponse = (params: {
   workDate: string;
   day: TimeEntryDayRow | null;
   openSession: OpenSessionRow | null;
+  breaks?: TimeEntryBreakRow[];
   attestationGate: { ok: true } | { ok: false; weekEnd: string };
 }): ClockStateResponse => {
   const persistedClockState: ClockStateValue = normalizeClockState(params.day?.clock_state ?? 0);
   const authoritativeClockState: ClockStateValue = params.openSession ? 1 : 0;
+  const breaks = params.breaks ?? [];
+  const activeBreak = breaks.find((item) => item.status === 'active') ?? null;
+  const breakSummary = computeBreakMinuteTotals(
+    breaks.map((item) => ({
+      payTreatment: item.pay_treatment,
+      status: item.status,
+      durationMinutes: Number(item.duration_minutes)
+    }))
+  );
 
   return {
     timezone: params.timezone,
@@ -112,6 +146,9 @@ const buildClockStateResponse = (params: {
     persistedClockState,
     openSessionId: params.openSession?.id ?? null,
     startedAt: params.openSession?.start_at ? new Date(params.openSession.start_at).toISOString() : null,
+    activeBreak: activeBreak ? mapBreakRowToResponse(activeBreak) : null,
+    breaks: breaks.map(mapBreakRowToResponse),
+    breakSummary,
     attestationBlocking: !params.attestationGate.ok,
     missingWeekEnd: params.attestationGate.ok ? null : params.attestationGate.weekEnd
   };
@@ -215,6 +252,46 @@ const fetchOpenSession = async (client: PoolClient, dayId: number, lock: boolean
   return result.rowCount ? result.rows[0] : null;
 };
 
+const fetchBreaksByDayId = async (client: PoolClient, dayId: number): Promise<TimeEntryBreakRow[]> =>
+  (await fetchBreaksByDayIds(client, [dayId])).get(dayId) ?? [];
+
+const fetchActiveBreak = async (
+  client: PoolClient,
+  dayId: number,
+  lock: boolean
+): Promise<TimeEntryBreakRow | null> => {
+  const lockClause = lock ? 'FOR UPDATE' : '';
+  const result = await client.query<TimeEntryBreakRow>(
+    `
+      SELECT
+        id,
+        entry_day_id,
+        time_entry_session_id,
+        franchiseid,
+        tutorid,
+        break_type,
+        pay_treatment,
+        start_time,
+        end_time,
+        duration_minutes,
+        source,
+        status,
+        note,
+        created_at,
+        updated_at
+      FROM public.time_entry_breaks
+      WHERE entry_day_id = $1
+        AND status = 'active'
+      ORDER BY id DESC
+      LIMIT 1
+      ${lockClause}
+    `,
+    [dayId]
+  );
+
+  return result.rowCount ? result.rows[0] : null;
+};
+
 router.get(
   '/clock/me/state',
   requireTutor,
@@ -248,11 +325,13 @@ router.get(
       const day = await fetchDay(context.franchiseId, context.tutorId, workDate);
 
       let openSession: OpenSessionRow | null = null;
+      let breaks: TimeEntryBreakRow[] = [];
       if (day) {
         const pool = getPostgresPool();
         const client = await pool.connect();
         try {
           openSession = await fetchOpenSession(client, day.id, false);
+          breaks = await fetchBreaksByDayId(client, day.id);
         } finally {
           client.release();
         }
@@ -264,6 +343,7 @@ router.get(
           workDate,
           day,
           openSession,
+          breaks,
           attestationGate
         })
       });
@@ -512,6 +592,264 @@ router.post(
 );
 
 router.post(
+  '/clock/me/break/start',
+  requireTutor,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const context = getTutorContext(req);
+    if (!context) {
+      res.status(401).json({ error: 'Not authenticated' });
+      return;
+    }
+
+    const breakTypeRaw = (req.body as Record<string, unknown> | null | undefined)?.breakType;
+    if (!isBreakType(breakTypeRaw)) {
+      res.status(400).json({ error: 'breakType is required and must be lunch, rest_break, personal, training, travel, or other.' });
+      return;
+    }
+    const payTreatment = getDefaultPayTreatment(breakTypeRaw);
+
+    try {
+      const payPeriod = await resolvePayPeriod(context.franchiseId, null);
+      const timezone = payPeriod.timezone;
+      const workDate = DateTime.now().setZone(timezone).toISODate();
+      if (!workDate) {
+        res.status(500).json({ error: 'Unable to resolve current work date' });
+        return;
+      }
+
+      const attestationGate = await enforcePriorWeekAttestation({
+        franchiseId: context.franchiseId,
+        tutorId: context.tutorId,
+        timezone,
+        workDate
+      });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
+      if (!attestationGate.ok) {
+        res.status(409).json({
+          error: 'Weekly attestation is required before entering time for the new workweek.',
+          missingWeekEnd: attestationGate.weekEnd
+        });
+        return;
+      }
+
+      const pool = getPostgresPool();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        const day = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+        if (!day) {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'You must be clocked in before starting a break.' });
+          return;
+        }
+
+        const openSession = await fetchOpenSession(client, day.id, true);
+        if (!openSession) {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'You must be clocked in before starting a break.' });
+          return;
+        }
+
+        const activeBreak = await fetchActiveBreak(client, day.id, true);
+        if (activeBreak) {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'End the active break before starting another break.' });
+          return;
+        }
+
+        const inserted = await client.query<TimeEntryBreakRow>(
+          `
+            INSERT INTO public.time_entry_breaks
+              (
+                entry_day_id,
+                time_entry_session_id,
+                franchiseid,
+                tutorid,
+                break_type,
+                pay_treatment,
+                start_time,
+                end_time,
+                duration_minutes,
+                source,
+                status,
+                note,
+                created_at,
+                updated_at
+              )
+            VALUES ($1, $2, $3, $4, $5, $6, DATE_TRUNC('minute', NOW()), NULL, 0, 'employee', 'active', NULL, NOW(), NOW())
+            RETURNING
+              id,
+              entry_day_id,
+              time_entry_session_id,
+              franchiseid,
+              tutorid,
+              break_type,
+              pay_treatment,
+              start_time,
+              end_time,
+              duration_minutes,
+              source,
+              status,
+              note,
+              created_at,
+              updated_at
+          `,
+          [day.id, openSession.id, context.franchiseId, context.tutorId, breakTypeRaw, payTreatment]
+        );
+        const breakRow = inserted.rows[0];
+
+        await appendAudit(client, {
+          dayId: day.id,
+          action: 'break_started',
+          actorAccountType: 'TUTOR',
+          actorAccountId: context.tutorId,
+          previousStatus: day.status,
+          newStatus: day.status,
+          metadata: { workDate, break: mapBreakRowToResponse(breakRow) }
+        });
+
+        await client.query('COMMIT');
+
+        const breaks = await fetchBreaksByDayId(client, day.id);
+        res.status(201).json({
+          state: buildClockStateResponse({ timezone, workDate, day, openSession, breaks, attestationGate })
+        });
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.post(
+  '/clock/me/break/end',
+  requireTutor,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const context = getTutorContext(req);
+    if (!context) {
+      res.status(401).json({ error: 'Not authenticated' });
+      return;
+    }
+
+    try {
+      const payPeriod = await resolvePayPeriod(context.franchiseId, null);
+      const timezone = payPeriod.timezone;
+      const workDate = DateTime.now().setZone(timezone).toISODate();
+      if (!workDate) {
+        res.status(500).json({ error: 'Unable to resolve current work date' });
+        return;
+      }
+
+      const attestationGate = await enforcePriorWeekAttestation({
+        franchiseId: context.franchiseId,
+        tutorId: context.tutorId,
+        timezone,
+        workDate
+      });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
+      }
+
+      const pool = getPostgresPool();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        const day = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+        if (!day) {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'No active break was found.' });
+          return;
+        }
+
+        const openSession = await fetchOpenSession(client, day.id, true);
+        const activeBreak = await fetchActiveBreak(client, day.id, true);
+        if (!activeBreak) {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'No active break was found.' });
+          return;
+        }
+
+        const updated = await client.query<TimeEntryBreakRow>(
+          `
+            WITH finished AS (
+              SELECT
+                id,
+                CASE
+                  WHEN DATE_TRUNC('minute', NOW()) <= start_time THEN start_time + INTERVAL '1 minute'
+                  ELSE DATE_TRUNC('minute', NOW())
+                END AS ended_at
+              FROM public.time_entry_breaks
+              WHERE id = $1
+                AND status = 'active'
+            )
+            UPDATE public.time_entry_breaks b
+            SET end_time = finished.ended_at,
+                duration_minutes = FLOOR(EXTRACT(EPOCH FROM (finished.ended_at - b.start_time)) / 60)::int,
+                status = 'completed',
+                updated_at = NOW()
+            FROM finished
+            WHERE b.id = finished.id
+            RETURNING
+              b.id,
+              b.entry_day_id,
+              b.time_entry_session_id,
+              b.franchiseid,
+              b.tutorid,
+              b.break_type,
+              b.pay_treatment,
+              b.start_time,
+              b.end_time,
+              b.duration_minutes,
+              b.source,
+              b.status,
+              b.note,
+              b.created_at,
+              b.updated_at
+          `,
+          [activeBreak.id]
+        );
+        const breakRow = updated.rows[0];
+
+        await appendAudit(client, {
+          dayId: day.id,
+          action: 'break_ended',
+          actorAccountType: 'TUTOR',
+          actorAccountId: context.tutorId,
+          previousStatus: day.status,
+          newStatus: day.status,
+          metadata: { workDate, break: mapBreakRowToResponse(breakRow) }
+        });
+
+        await client.query('COMMIT');
+
+        const breaks = await fetchBreaksByDayId(client, day.id);
+        res.status(200).json({
+          state: buildClockStateResponse({ timezone, workDate, day, openSession, breaks, attestationGate })
+        });
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.post(
   '/clock/me/out',
   requireTutor,
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -575,6 +913,12 @@ router.post(
         let day = existing;
 
         const openSession = await fetchOpenSession(client, day.id, true);
+        const activeBreak = await fetchActiveBreak(client, day.id, true);
+        if (activeBreak) {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'End the active break before clocking out.' });
+          return;
+        }
 
         let closedSession: { id: number; startAt: string; endAt: string } | null = null;
 
@@ -798,9 +1142,42 @@ router.post(
             startAt: new Date(session.start_at).toISOString(),
             endAt: session.end_at ? new Date(session.end_at).toISOString() : ''
           }));
+          let breaks = await fetchBreaksByDayId(client, day.id);
+          const autoBreak = await applyAutoLunchBreak({
+            client,
+            entryDayId: day.id,
+            franchiseId: context.franchiseId,
+            tutorId: context.tutorId,
+            sessions: (sessionResult.rows ?? []).map((session) => ({
+              id: session.id,
+              startAt: session.start_at,
+              endAt: session.end_at
+            })),
+            existingBreaks: breaks
+          });
+          if (autoBreak) {
+            breaks = [...breaks, autoBreak];
+            await appendAudit(client, {
+              dayId: day.id,
+              action: 'auto_break_applied',
+              actorAccountType: 'SYSTEM',
+              actorAccountId: null,
+              previousStatus: day.status,
+              newStatus: day.status,
+              metadata: {
+                workDate,
+                break: mapBreakRowToResponse(autoBreak)
+              }
+            });
+          }
 
           const computed = computeTimeEntryComparisonV1({
             sessions: sessionPayload,
+            breaks: breaks.map((row) => ({
+              payTreatment: row.pay_treatment,
+              status: row.status,
+              durationMinutes: Number(row.duration_minutes)
+            })),
             snapshotIntervals: snapshot.intervals
           });
 
@@ -889,6 +1266,7 @@ router.post(
             workDate,
             day,
             openSession: null,
+            breaks: day ? await fetchBreaksByDayId(client, day.id) : [],
             attestationGate
           })
         });

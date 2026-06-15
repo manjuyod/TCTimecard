@@ -44,6 +44,22 @@ const overlaps = (rangeStart: Date, rangeEnd: Date, start: string, end: string):
   return s <= rangeEnd && e >= rangeStart;
 };
 
+const formatMinutes = (minutes: number): string => {
+  const safe = Math.max(0, Math.round(minutes));
+  const hours = Math.floor(safe / 60);
+  const remainder = safe % 60;
+  if (hours && remainder) return `${hours}h ${remainder}m`;
+  if (hours) return `${hours}h`;
+  return `${remainder}m`;
+};
+
+const formatBreakSource = (source: string): string => {
+  if (source === 'auto_rule') return 'Auto-applied';
+  if (source === 'manager') return 'Manager-entered';
+  if (source === 'employee') return 'Employee-entered';
+  return 'Imported';
+};
+
 export function TutorCalendarPage(): JSX.Element {
   const [month, setMonth] = useState(monthLabel(new Date()));
   const [range, setRange] = useState<{ startDate: string; endDate: string; timezone: string; month: string } | null>(
@@ -567,6 +583,54 @@ export function TutorCalendarPage(): JSX.Element {
                   </Button>
                 </div>
               ))}
+            </div>
+
+            <div className="rounded-lg border bg-white p-4 text-sm">
+              <p className="font-semibold text-slate-900">Breaks</p>
+              <div className="mt-3 grid gap-2 md:grid-cols-4">
+                <div>
+                  <p className="text-xs text-muted-foreground">Gross time</p>
+                  <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.grossMinutes ?? 0)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Paid breaks</p>
+                  <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.paidBreakMinutes ?? 0)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Unpaid breaks</p>
+                  <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Paid time</p>
+                  <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.paidMinutes ?? 0)}</p>
+                </div>
+              </div>
+              <div className="mt-3 space-y-2">
+                {activeDay?.breaks?.length ? (
+                  activeDay.breaks.map((item) => (
+                    <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 p-3">
+                      <div>
+                        <p className="font-medium capitalize text-slate-900">{item.breakType.replace('_', ' ')}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {item.startTime && item.endTime
+                            ? formatTimeRange(item.startTime, item.endTime, browserTimeZone)
+                            : 'Duration-only'}{' '}
+                          · {formatBreakSource(item.source)}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={item.payTreatment === 'paid' ? 'success' : 'warning'}>{item.payTreatment}</Badge>
+                        <Badge variant={item.status === 'voided' ? 'muted' : item.status === 'active' ? 'warning' : 'secondary'}>
+                          {item.status}
+                        </Badge>
+                        <span className="font-semibold text-slate-900">{formatMinutes(item.durationMinutes)}</span>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-muted-foreground">No breaks recorded for this day.</p>
+                )}
+              </div>
             </div>
 
             {activeDay?.status === 'approved' ? (
