@@ -218,6 +218,13 @@ export interface WeeklyAttestationReminder {
   blocking: boolean;
 }
 
+export interface AdminAttestationTutor {
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  displayName: string;
+}
+
 export type PayPeriodExportFormat = 'xlsx' | 'csv';
 
 const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -773,4 +780,54 @@ export const signWeeklyAttestation = async (typedName?: string): Promise<WeeklyA
     method: 'POST',
     body: JSON.stringify({ typedName })
   });
+};
+
+export const fetchAdminAttestationTutors = async (args: {
+  franchiseId: number;
+  weekEndStart: string;
+  weekEndEnd: string;
+}): Promise<AdminAttestationTutor[]> => {
+  const params = new URLSearchParams();
+  params.set('franchiseId', String(args.franchiseId));
+  params.set('weekEndStart', args.weekEndStart);
+  params.set('weekEndEnd', args.weekEndEnd);
+  const result = await apiFetch<{ tutors: AdminAttestationTutor[] }>(`/api/attestation/admin/tutors?${params.toString()}`);
+  return result.tutors ?? [];
+};
+
+export const downloadAdminAttestationExport = async (args: {
+  franchiseId: number;
+  weekEndStart: string;
+  weekEndEnd: string;
+  tutorId?: number | null;
+}) => {
+  const params = new URLSearchParams();
+  params.set('franchiseId', String(args.franchiseId));
+  params.set('weekEndStart', args.weekEndStart);
+  params.set('weekEndEnd', args.weekEndEnd);
+  if (args.tutorId !== undefined && args.tutorId !== null) params.set('tutorId', String(args.tutorId));
+
+  const response = await fetch(`/api/attestation/admin/export?${params.toString()}`, {
+    credentials: 'include'
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let message = `Export failed (${response.status})`;
+    if (text) {
+      try {
+        const data = JSON.parse(text) as { error?: string };
+        message = data.error ?? message;
+      } catch {
+        message = text;
+      }
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  const blob = await response.blob();
+  return {
+    blob,
+    filename: extractDownloadFilename(response.headers.get('content-disposition'), 'attestation-log.xlsx')
+  };
 };
