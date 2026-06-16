@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { DateTime } from 'luxon';
 import {
+  AdminAttestationTutor,
   ExtraHoursRequest,
   TimeEntryBreak,
   TimeEntryDay,
@@ -14,9 +15,11 @@ import {
   decideTimeEntryDay,
   decideExtraHours,
   decideTimeOff,
+  downloadAdminAttestationExport,
   fetchAdminPendingExtraHours,
   fetchAdminPendingTimeEntries,
-  fetchAdminPendingTimeOff
+  fetchAdminPendingTimeOff,
+  fetchAdminAttestationTutors
 } from '../../lib/api';
 import { useAuth } from '../../providers/AuthProvider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs';
@@ -41,6 +44,7 @@ import {
   DialogTitle
 } from '../../components/ui/dialog';
 import { Textarea } from '../../components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 
 type DenyContext =
   | { type: 'extra'; request: ExtraHoursRequest }
@@ -135,6 +139,150 @@ const toBreakDraft = (item: TimeEntryBreak): BreakDraft => ({
   duration: String(item.durationMinutes || 30),
   note: item.note ?? ''
 });
+
+function AttestationExportCard({
+  franchiseId,
+  sessionFranchiseId
+}: {
+  franchiseId: number | null;
+  sessionFranchiseId: number | null;
+}): JSX.Element {
+  const [weekEndStart, setWeekEndStart] = useState('');
+  const [weekEndEnd, setWeekEndEnd] = useState('');
+  const [tutors, setTutors] = useState<AdminAttestationTutor[]>([]);
+  const [selectedTutorId, setSelectedTutorId] = useState('all');
+  const [loadingTutors, setLoadingTutors] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [attestationError, setAttestationError] = useState<string | null>(null);
+
+  const targetFranchiseId = franchiseId ?? sessionFranchiseId;
+
+  useEffect(() => {
+    setTutors([]);
+    setSelectedTutorId('all');
+  }, [targetFranchiseId, weekEndStart, weekEndEnd]);
+
+  const validateFilters = (): { franchiseId: number; weekEndStart: string; weekEndEnd: string } | null => {
+    if (targetFranchiseId === null) {
+      setAttestationError('Franchise ID is required.');
+      return null;
+    }
+    if (!weekEndStart || !weekEndEnd) {
+      setAttestationError('Week ending start and end dates are required.');
+      return null;
+    }
+    if (weekEndStart > weekEndEnd) {
+      setAttestationError('Week ending start must be on or before the end date.');
+      return null;
+    }
+    setAttestationError(null);
+    return { franchiseId: targetFranchiseId, weekEndStart, weekEndEnd };
+  };
+
+  const loadTutors = async () => {
+    const filters = validateFilters();
+    if (!filters) return;
+
+    setLoadingTutors(true);
+    try {
+      const nextTutors = await fetchAdminAttestationTutors(filters);
+      setTutors(nextTutors);
+      setSelectedTutorId((prev) =>
+        prev !== 'all' && !nextTutors.some((tutor) => String(tutor.tutorId) === prev) ? 'all' : prev
+      );
+      if (!nextTutors.length) toast('No signed attestations found for that range.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to load attestation tutors';
+      setAttestationError(message);
+      toast.error(message);
+    } finally {
+      setLoadingTutors(false);
+    }
+  };
+
+  const exportAttestations = async () => {
+    const filters = validateFilters();
+    if (!filters) return;
+
+    setExporting(true);
+    try {
+      const tutorId = selectedTutorId === 'all' ? null : Number(selectedTutorId);
+      const { blob, filename } = await downloadAdminAttestationExport({
+        ...filters,
+        tutorId: Number.isFinite(tutorId) ? tutorId : null
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      toast.success('Exported attestation log');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to export attestation log';
+      setAttestationError(message);
+      toast.error(message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Attestation Export</CardTitle>
+        <CardDescription>Download signed weekly attestations by week-ending range.</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4 md:grid-cols-[1fr_1fr_1.5fr_auto_auto] md:items-end">
+        <div className="space-y-2">
+          <Label htmlFor="attestationWeekEndStart" requiredMark>
+            Week ending from
+          </Label>
+          <Input
+            id="attestationWeekEndStart"
+            type="date"
+            value={weekEndStart}
+            onChange={(event) => setWeekEndStart(event.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="attestationWeekEndEnd" requiredMark>
+            Week ending to
+          </Label>
+          <Input
+            id="attestationWeekEndEnd"
+            type="date"
+            value={weekEndEnd}
+            onChange={(event) => setWeekEndEnd(event.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label>Tutor</Label>
+          <Select value={selectedTutorId} onValueChange={setSelectedTutorId}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All tutors</SelectItem>
+              {tutors.map((tutor) => (
+                <SelectItem key={tutor.tutorId} value={String(tutor.tutorId)}>
+                  {tutor.displayName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <Button variant="outline" onClick={() => void loadTutors()} disabled={loadingTutors || exporting}>
+          {loadingTutors ? 'Loading...' : 'Load tutors'}
+        </Button>
+        <Button onClick={() => void exportAttestations()} disabled={loadingTutors || exporting}>
+          {exporting ? 'Exporting...' : 'Export Excel'}
+        </Button>
+        {attestationError ? <InlineError message={attestationError} /> : null}
+      </CardContent>
+    </Card>
+  );
+}
 
 export function ApprovalsPage(): JSX.Element {
   const { session } = useAuth();
@@ -898,6 +1046,8 @@ export function ApprovalsPage(): JSX.Element {
           </CardContent>
         </Card>
       ) : null}
+
+      <AttestationExportCard franchiseId={franchiseId} sessionFranchiseId={sessionFranchiseId} />
 
       <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val as 'extra' | 'timeoff' | 'timeentry')}>
         <TabsList>
