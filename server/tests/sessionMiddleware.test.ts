@@ -32,10 +32,14 @@ test('session options preserve the existing rolling cookie contract', () => {
   assert.equal(options.resave, false);
   assert.equal(options.rolling, true);
   assert.equal(options.saveUninitialized, false);
-  assert.equal(options.cookie?.httpOnly, true);
-  assert.equal(options.cookie?.secure, SESSION_SECURE);
-  assert.equal(options.cookie?.sameSite, SESSION_SAME_SITE);
-  assert.equal(options.cookie?.maxAge, SESSION_TTL_MS);
+
+  const cookie = options.cookie;
+  assert.ok(cookie && typeof cookie !== 'function', 'cookie should be a plain options object');
+  const cookieOpts = cookie as Exclude<typeof cookie, Function>;
+  assert.equal(cookieOpts.httpOnly, true);
+  assert.equal(cookieOpts.secure, SESSION_SECURE);
+  assert.equal(cookieOpts.sameSite, SESSION_SAME_SITE);
+  assert.equal(cookieOpts.maxAge, SESSION_TTL_MS);
 });
 
 test('the production store is explicit and never falls back to MemoryStore', () => {
