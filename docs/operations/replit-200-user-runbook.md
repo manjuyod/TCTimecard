@@ -45,6 +45,24 @@ Expected columns: `sid` varchar non-null, `sess` json non-null, `expire` timesta
 4. Admin login, dashboard, approvals, pay-period summary, one XLSX export, and one attestation export work normally.
 5. Replit logs contain no session-store, pool-timeout, or unhandled error.
 
+## Manual credential preflight
+
+The credential checker logs in and immediately logs out, which creates and deletes PostgreSQL session rows. Only a human operator may run it. Agents may inspect its secret-free result but must not launch it.
+
+For the 20-user stage, validate exactly the credentials the harness will select:
+
+```powershell
+$env:LOAD_TEST_BASE_URL='https://timecard.tutoringclub.com'
+$env:LOAD_TEST_CREDENTIALS_FILE=(Resolve-Path 'load-tests/credentials.json').Path
+$env:CREDENTIAL_CHECK_TUTOR_INDICES='0-17'
+$env:CREDENTIAL_CHECK_ADMIN_INDICES='0-2,18-19'
+$env:CREDENTIAL_CHECK_MAX_CONSECUTIVE_FAILURES='4'
+$env:CREDENTIAL_CHECK_RESULTS_FILE='credential-check-results-20.json'
+npm run credentials:check
+```
+
+Do not begin the load stage unless every selected credential is valid and the checker exits zero. If the checker reports failures, remove only the reported role/index entries, recalculate the stage selectors, and rerun the preflight after the login cooldown has cleared.
+
 ## Human-operated load stages
 
 Create an ignored credentials file from `load-tests/credentials.example.json`. Use controlled accounts. Leave `LOAD_TEST_ENABLE_WRITES=false` until dedicated write fixtures are approved.
@@ -56,8 +74,8 @@ The 200-user stage must use `LOAD_TEST_TUTOR_PERCENT=90` and `LOAD_TEST_EXPORT_C
 Example PowerShell configuration for the 20-user stage:
 
 ```powershell
-$env:LOAD_TEST_BASE_URL='https://your-app.replit.app'
-$env:LOAD_TEST_CREDENTIALS_FILE='C:\secure\timecard-load-credentials.json'
+$env:LOAD_TEST_BASE_URL='https://timecard.tutoringclub.com'
+$env:LOAD_TEST_CREDENTIALS_FILE=(Resolve-Path 'load-tests/credentials.json').Path
 $env:LOAD_TEST_USERS='20'
 $env:LOAD_TEST_DURATION_SECONDS='300'
 $env:LOAD_TEST_RAMP_SECONDS='30'
