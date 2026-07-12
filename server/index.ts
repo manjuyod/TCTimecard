@@ -4,7 +4,6 @@ import compression from 'compression';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
-import session from 'express-session';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import authRoutes from './routes/auth';
@@ -16,7 +15,8 @@ import timeEntryRoutes from './routes/timeEntry';
 import attestationRoutes from './routes/attestation';
 import clockRoutes from './routes/clock';
 import { validateDbEnv, validateRuntimeEnv } from './config/env';
-import { SESSION_COOKIE_NAME, SESSION_SECRET, SESSION_SAME_SITE, SESSION_SECURE, SESSION_TTL_MS } from './config/session';
+import { SESSION_SECRET } from './config/session';
+import { createSessionMiddleware } from './config/sessionMiddleware';
 
 dotenv.config();
 
@@ -64,21 +64,7 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
-app.use(
-  session({
-    name: SESSION_COOKIE_NAME,
-    secret: SESSION_SECRET,
-    resave: false,
-    rolling: true,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      secure: SESSION_SECURE,
-      sameSite: SESSION_SAME_SITE,
-      maxAge: SESSION_TTL_MS
-    }
-  })
-);
+app.use(createSessionMiddleware());
 
 // Health check
 app.get('/api/health', (_req: Request, res: Response) => {

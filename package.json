@@ -4,7 +4,7 @@
   "private": true,
   "description": "Replit-ready Vite React + Express scaffold with legacy branding applied globally.",
   "engines": {
-    "node": ">=18"
+    "node": ">=18.18.0"
   },
   "scripts": {
     "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "compression": "^1.7.4",
+    "connect-pg-simple": "^10.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
@@ -37,6 +38,7 @@
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
+    "@types/connect-pg-simple": "^7.0.3",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/express-session": "^1.18.2",
