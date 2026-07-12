@@ -21,6 +21,7 @@
     "test:server": "node --test --import tsx \"server/tests/*.test.ts\"",
     "test:load-tools": "node --test \"load-tests/*.test.mjs\"",
     "load:test": "node load-tests/replit-200-users.mjs",
+    "credentials:check": "node load-tests/check-credentials.mjs",
     "start": "cross-env NODE_ENV=production node server/dist/index.js"
   },
   "dependencies": {

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { parseIndexSelector, runCredentialChecks } from './credential-checker-lib.mjs';
 
@@ -23,6 +27,23 @@ const credential = (role, accountId, identifier) => ({
   password: `secret-${accountId}`,
   selectedAccount: { accountType: role, accountId },
   writeActions: []
+});
+
+const runCli = (env) => new Promise((resolve) => {
+  const child = spawn(process.execPath, ['load-tests/check-credentials.mjs'], {
+    cwd: process.cwd(),
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  child.on('close', (code) => resolve({ code, stdout, stderr }));
 });
 
 test('parseIndexSelector expands, deduplicates, and sorts indices', () => {
@@ -116,5 +137,37 @@ test('runCredentialChecks stops after four consecutive invalid logins', async ()
     assert.equal(result.stoppedByFailureGuard, true);
   } finally {
     await fixture.close();
+  }
+});
+
+test('CLI writes a redacted result and exits nonzero for invalid credentials', async () => {
+  const fixture = await startServer((_req, res) => {
+    res.statusCode = 401;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ error: 'Invalid credentials' }));
+  });
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'credential-check-'));
+  const credentialsFile = path.join(directory, 'credentials.json');
+  const resultsFile = path.join(directory, 'results.json');
+  await fs.writeFile(credentialsFile, JSON.stringify({
+    tutors: [credential('TUTOR', 11, 'private-tutor@example.test')],
+    admins: []
+  }));
+
+  try {
+    const execution = await runCli({
+      LOAD_TEST_BASE_URL: fixture.baseUrl,
+      LOAD_TEST_CREDENTIALS_FILE: credentialsFile,
+      CREDENTIAL_CHECK_TUTOR_INDICES: '0',
+      CREDENTIAL_CHECK_ADMIN_INDICES: '',
+      CREDENTIAL_CHECK_RESULTS_FILE: resultsFile
+    });
+    assert.equal(execution.code, 1);
+    const saved = JSON.parse(await fs.readFile(resultsFile, 'utf8'));
+    assert.equal(saved.invalid, 1);
+    assert.doesNotMatch(`${execution.stdout}${execution.stderr}${JSON.stringify(saved)}`, /private-|secret-/);
+  } finally {
+    await fixture.close();
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });

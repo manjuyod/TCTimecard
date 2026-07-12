@@ -24,4 +24,6 @@ CLAUDE.md
 # Human-operated load test artifacts
 load-tests/credentials*.json
 !load-tests/credentials.example.json
+load-tests/*.csv
 load-test-results*.json
+credential-check-results*.json
