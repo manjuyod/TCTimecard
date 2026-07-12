@@ -21,3 +21,10 @@ export const getPostgresPool = (): Pool => {
 export const setPostgresPoolOverride = (nextPool?: Pool): void => {
   poolOverride = nextPool;
 };
+
+export const closePostgresPool = async (): Promise<void> => {
+  const current = poolOverride ?? pool;
+  poolOverride = undefined;
+  pool = undefined;
+  if (current) await current.end();
+};
