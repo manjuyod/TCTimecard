@@ -202,3 +202,11 @@ Pay-period review export:
 3. Use the export format picker to choose **Excel (.xlsx)** or **CSV (.csv)**, then click **Export**.
 4. In Excel, verify each tutor opens with a visible summary row and collapsed child rows containing daily detail plus `Time In / Out`.
 5. If tutor names contain spreadsheet metacharacters (`=`, `+`, `-`, `@`), verify exported/copied values are prefixed so Excel/Sheets treats them as text rather than formulas.
+
+## 200-user Replit launch
+
+- [Hardening design](docs/superpowers/specs/2026-07-12-replit-200-user-hardening-design.md)
+- [Implementation plan](docs/superpowers/plans/2026-07-12-replit-200-user-hardening.md)
+- [Launch runbook](docs/operations/replit-200-user-runbook.md)
+
+Reserved VM selection, session-migration application, authenticated smoke tests, and load-test execution are human-operated steps. Agent-run verification remains mock-backed and does not connect to either production database.

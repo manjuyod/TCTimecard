@@ -18,6 +18,7 @@
     "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p client/tsconfig.json --noEmit",
     "lint": "npm run typecheck",
     "test": "node --test --import tsx \"server/tests/*.test.ts\"",
+    "load:test": "node load-tests/replit-200-users.mjs",
     "start": "cross-env NODE_ENV=production node server/dist/index.js"
   },
   "dependencies": {
