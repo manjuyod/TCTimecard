@@ -34,7 +34,7 @@ Expected columns: `sid` varchar non-null, `sess` json non-null, `expire` timesta
 2. Select 2 vCPU / 8 GB RAM.
 3. Build command: `npm run build`.
 4. Run command: `npm start`.
-5. Set `POSTGRES_POOL_MAX=5` and `MSSQL_POOL_MAX=5` plus all existing required production secrets.
+5. Set `POSTGRES_POOL_MAX=10` and `MSSQL_POOL_MAX=10` plus all existing required production secrets.
 6. Publish only after the production session migration is approved and applied.
 
 ## Manual smoke test
@@ -101,6 +101,8 @@ Repeat with `100` users / `600` seconds, then `200` users / `900` seconds. Keep 
 ## Failure response
 
 Stop before the next stage if a threshold fails. Save the JSON result, Replit request-duration view, CPU/memory screenshots, and relevant logs. Prefer measured query optimization, lowering export concurrency, or increasing VM size. Do not increase database pool sizes as the first response.
+
+If database connection errors increase or latency worsens after the pool change, restore both deployment variables to `5` and redeploy before further testing.
 
 ## Rollback
 
