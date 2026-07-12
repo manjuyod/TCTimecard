@@ -17,6 +17,7 @@ import {
   type ScheduleSnapshotV1
 } from '../services/scheduleSnapshot';
 import { computeBreakMinuteTotals, fetchBreaksByDayIds, type TimeEntryBreakRow } from '../services/timeEntryBreaks';
+import { exportConcurrencyGuard, rejectBusyExport } from '../services/exportConcurrency';
 
 const router = express.Router();
 
@@ -1449,6 +1450,12 @@ router.get(
       return;
     }
 
+    const releaseExportSlot = exportConcurrencyGuard.tryAcquire();
+    if (!releaseExportSlot) {
+      rejectBusyExport(res);
+      return;
+    }
+
     try {
       const payPeriod = await resolvePayPeriod(franchiseId, forDate);
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
@@ -1500,6 +1507,8 @@ router.get(
       res.status(200).send(workbookBuffer);
     } catch (err) {
       next(err);
+    } finally {
+      releaseExportSlot();
     }
   }
 );

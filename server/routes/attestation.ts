@@ -13,6 +13,7 @@ import {
   WEEKLY_ATTESTATION_TEXT_VERSION,
   WORKWEEK_DEFINITION
 } from '../services/attestationCopy';
+import { exportConcurrencyGuard, rejectBusyExport } from '../services/exportConcurrency';
 import { computeLastClosedWorkweek } from '../services/workweek';
 
 type WeeklyAttestationRow = {
@@ -345,6 +346,12 @@ router.get(
       return;
     }
 
+    const releaseExportSlot = exportConcurrencyGuard.tryAcquire();
+    if (!releaseExportSlot) {
+      rejectBusyExport(res);
+      return;
+    }
+
     try {
       const rows = await fetchAttestationRowsForAdmin({
         franchiseId: scope.franchiseId,
@@ -368,6 +375,8 @@ router.get(
       res.status(200).send(workbookBuffer);
     } catch (err) {
       next(err);
+    } finally {
+      releaseExportSlot();
     }
   }
 );
