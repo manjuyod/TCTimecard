@@ -30,13 +30,13 @@ const setRequiredValues = (): void => {
   process.env.MSSQL_PASSWORD = 'password';
 };
 
-test('database pool defaults are five connections per process', () => {
+test('database pool defaults are ten connections per process', () => {
   setRequiredValues();
   delete process.env.POSTGRES_POOL_MAX;
   delete process.env.MSSQL_POOL_MAX;
 
-  assert.equal(getPostgresConfig().max, 5);
-  assert.equal(getMssqlConfig().pool?.max, 5);
+  assert.equal(getPostgresConfig().max, 10);
+  assert.equal(getMssqlConfig().pool?.max, 10);
 });
 
 test('explicit database pool maxima still override the defaults', () => {

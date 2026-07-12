@@ -64,7 +64,7 @@ export const getPostgresConfig = (): PostgresConfig => {
     throw new Error('[env] POSTGRES_URL/DATABASE_URL must start with postgres:// or postgresql://');
   }
 
-  const max = parseInteger('POSTGRES_POOL_MAX', process.env.POSTGRES_POOL_MAX, 5, { min: 1 });
+  const max = parseInteger('POSTGRES_POOL_MAX', process.env.POSTGRES_POOL_MAX, 10, { min: 1 });
   const idleTimeoutMillis = parseInteger('POSTGRES_POOL_IDLE', process.env.POSTGRES_POOL_IDLE, 30000, { min: 1000 });
   const connectionTimeoutMillis = parseInteger(
     'POSTGRES_CONNECTION_TIMEOUT',
@@ -100,7 +100,7 @@ export const getMssqlConfig = (): MssqlConfig => {
     process.env.MSSQL_TRUST_SERVER_CERTIFICATE,
     false
   );
-  const poolMax = parseInteger('MSSQL_POOL_MAX', process.env.MSSQL_POOL_MAX, 5, { min: 1 });
+  const poolMax = parseInteger('MSSQL_POOL_MAX', process.env.MSSQL_POOL_MAX, 10, { min: 1 });
   const poolMin = parseInteger('MSSQL_POOL_MIN', process.env.MSSQL_POOL_MIN, 0, { min: 0 });
   const idleTimeoutMillis = parseInteger('MSSQL_POOL_IDLE', process.env.MSSQL_POOL_IDLE, 30000, { min: 1000 });
   const connectionTimeout = parseInteger('MSSQL_CONNECTION_TIMEOUT', process.env.MSSQL_CONNECTION_TIMEOUT, 15000, {
