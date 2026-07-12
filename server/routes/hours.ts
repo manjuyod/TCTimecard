@@ -18,6 +18,7 @@ import {
 } from '../services/scheduleSnapshot';
 import { computeBreakMinuteTotals, fetchBreaksByDayIds, type TimeEntryBreakRow } from '../services/timeEntryBreaks';
 import { exportConcurrencyGuard, rejectBusyExport } from '../services/exportConcurrency';
+import { createInFlightCoalescer } from '../services/inFlightCoalescer';
 
 const router = express.Router();
 
@@ -737,6 +738,30 @@ const buildAdminComparisonSummaryRows = (
   return rows;
 };
 
+type AdminComparisonSummaryResult = {
+  payPeriod: PayPeriod;
+  rows: AdminComparisonSummaryRow[];
+};
+
+const adminComparisonSummaryRequests = createInFlightCoalescer<AdminComparisonSummaryResult>();
+
+const loadAdminComparisonSummary = async (
+  franchiseId: number,
+  forDate: string | null
+): Promise<AdminComparisonSummaryResult> => {
+  const payPeriod = await resolvePayPeriod(franchiseId, forDate);
+  const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
+  const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
+  const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+  const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay, breaksByDay);
+  const loggedHoursByTutor = buildLoggedHoursByTutor(totalsByTutor);
+  const crmHoursByTutor = await fetchReportedCrmHoursByTutor(franchiseId, payPeriod);
+  const tutorIds = Array.from(new Set([...loggedHoursByTutor.keys(), ...crmHoursByTutor.keys()]));
+  const namesById = await fetchTutorNamesByIds(tutorIds);
+  const rows = buildAdminComparisonSummaryRows(loggedHoursByTutor, crmHoursByTutor, namesById);
+  return { payPeriod, rows };
+};
+
 const buildAdminSummaryDetailRows = (
   loggedHoursByDate: Map<string, number>,
   crmHoursByDate: Map<string, number>
@@ -1297,19 +1322,11 @@ router.get(
     }
 
     try {
-      const payPeriod = await resolvePayPeriod(franchiseId, forDate);
-
-      const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
-      const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay, breaksByDay);
-      const loggedHoursByTutor = buildLoggedHoursByTutor(totalsByTutor);
-      const crmHoursByTutor = await fetchReportedCrmHoursByTutor(franchiseId, payPeriod);
-      const tutorIds = Array.from(new Set([...loggedHoursByTutor.keys(), ...crmHoursByTutor.keys()]));
-      const namesById = await fetchTutorNamesByIds(tutorIds);
-      const rows = buildAdminComparisonSummaryRows(loggedHoursByTutor, crmHoursByTutor, namesById);
-
-      res.status(200).json({ payPeriod, rows });
+      const key = `${franchiseId}:${forDate ?? 'current'}`;
+      const result = await adminComparisonSummaryRequests.run(key, () =>
+        loadAdminComparisonSummary(franchiseId, forDate)
+      );
+      res.status(200).json(result);
     } catch (err) {
       next(err);
     }
