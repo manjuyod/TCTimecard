@@ -41,6 +41,14 @@ For this design, 200 concurrent users means 200 active browser sessions followin
 - Long-lived caching of payroll or approval data.
 - Guaranteeing performance for 200 requests arriving simultaneously without think time.
 
+## Database Safety Constraint
+
+All database access performed by Codex or another agent must be read-only. Agentic work must not execute migrations, DDL, `INSERT`, `UPDATE`, `DELETE`, session-creating login traffic, clock actions, approval actions, or any other operation that can mutate PostgreSQL or MSSQL state.
+
+Every SQL statement intended for production must be checked into the repository as a reviewable file. The PostgreSQL session schema will therefore be delivered only as a versioned migration file. A human operator must inspect it, apply it manually in an approved non-production environment, verify it with the documented read-only checks, and separately authorize its production application.
+
+Automated agent-run tests must use in-memory fakes or mocks and must not connect to either live database. Because authenticated traffic writes session state, the final authenticated load test is also a human-operated step. Codex may create the harness, document the command, and analyze captured output, but may not launch that test against a database-backed deployment.
+
 ## Deployment Architecture
 
 The launch deployment will use a single Replit Reserved VM with 2 vCPU and 8 GB RAM. Reserved compute removes cold starts and machine-count variability during the launch window while Replit monitoring supplies CPU, memory, HTTP status, and request-duration evidence.
@@ -152,6 +160,8 @@ Add focused tests for:
 
 Run the complete existing test suite, server and client typecheck, and production build after the focused tests pass.
 
+All agent-run automated tests use mocks or fakes. They do not apply the migration or connect to PostgreSQL or MSSQL.
+
 ### Load-test harness
 
 Provide a portable authenticated load-test script and operator documentation. Credentials are supplied at runtime and are never committed. The harness supports separate tutor and admin credential lists, independent cookie jars per virtual user, a configurable base URL, duration, user count, and optional controlled write activity.
@@ -167,6 +177,8 @@ The standard workload uses:
 - Clock-in, clock-out, break, and approval writes only when explicitly enabled with dedicated test accounts in a controlled test franchise.
 
 Run the workload in stages at 20, 100, and 200 users. Stop and diagnose at any stage that violates its thresholds instead of increasing load blindly.
+
+These authenticated stages create and update PostgreSQL session rows and therefore must be started manually by a human operator. The harness prints a machine-readable results file that Codex can inspect afterward without writing to a database.
 
 ### Acceptance criteria
 
@@ -186,14 +198,15 @@ Any production-data write test requires explicit confirmation that its accounts 
 
 ## Rollout
 
-1. Apply the session-table migration before publishing the new application snapshot.
-2. Set production secrets, including both pool maxima at five and the existing required session/signing secrets.
-3. Publish as one 2 vCPU / 8 GB Reserved VM.
-4. Verify liveness, readiness, login, tutor dashboard, administrator summary, and one export manually.
-5. Run staged load tests at 20, 100, and 200 users against controlled accounts.
-6. Inspect Replit CPU, memory, HTTP statuses, request durations, and logs after each stage.
-7. Keep three-export concurrency protection enabled during launch.
-8. If thresholds fail, use measurements to decide between query optimization, a stricter export limit, or a larger VM; do not increase pool sizes as the first response.
+1. Have a human operator review the session-table migration, apply it manually in an approved non-production environment, and run the documented read-only verification queries.
+2. After manual approval, have a human operator apply the same checked-in migration to production before publishing the new application snapshot.
+3. Set production secrets, including both pool maxima at five and the existing required session/signing secrets.
+4. Publish as one 2 vCPU / 8 GB Reserved VM.
+5. Have a human operator verify liveness, readiness, login, tutor dashboard, administrator summary, and one export manually.
+6. Have a human operator run staged load tests at 20, 100, and 200 users against controlled accounts.
+7. Inspect Replit CPU, memory, HTTP statuses, request durations, and logs after each stage.
+8. Keep three-export concurrency protection enabled during launch.
+9. If thresholds fail, use measurements to decide between query optimization, a stricter export limit, or a larger VM; do not increase pool sizes as the first response.
 
 ## Trade-Offs
 
