@@ -104,7 +104,7 @@ Postgres (required)
 - `POSTGRES_URL` (preferred) or `DATABASE_URL` - full connection string.
 - `POSTGRES_SSL` (default `true`)
 - `POSTGRES_SSL_REJECT_UNAUTHORIZED` (default `false` for hosted providers like Neon)
-- `POSTGRES_POOL_MAX` (default `10`)
+- `POSTGRES_POOL_MAX` (default `5`)
 - `POSTGRES_POOL_IDLE` (default `30000` ms)
 - `POSTGRES_CONNECTION_TIMEOUT` (default `10000` ms)
 
@@ -112,8 +112,10 @@ MSSQL (required)
 - `MSSQL_SERVER`, `MSSQL_PORT` (default `1433`), `MSSQL_DATABASE`, `MSSQL_USER`, `MSSQL_PASSWORD`
 - `MSSQL_ENCRYPT` (default `true`)
 - `MSSQL_TRUST_SERVER_CERTIFICATE` (default `false`)
-- `MSSQL_POOL_MAX` (default `10`), `MSSQL_POOL_MIN` (default `0`), `MSSQL_POOL_IDLE` (default `30000` ms)
+- `MSSQL_POOL_MAX` (default `5`), `MSSQL_POOL_MIN` (default `0`), `MSSQL_POOL_IDLE` (default `30000` ms)
 - `MSSQL_CONNECTION_TIMEOUT` (default `15000` ms), `MSSQL_REQUEST_TIMEOUT` (default `30000` ms)
+
+For the single Reserved VM launch, set both pool maxima explicitly to `5` in Published App Secrets.
 
 Payroll / pay period resolution
 - `BIWEEKLY_ANCHOR_DATE` (optional, default `2024-01-01`) - anchor date for computed biweekly periods.
@@ -200,3 +202,11 @@ Pay-period review export:
 3. Use the export format picker to choose **Excel (.xlsx)** or **CSV (.csv)**, then click **Export**.
 4. In Excel, verify each tutor opens with a visible summary row and collapsed child rows containing daily detail plus `Time In / Out`.
 5. If tutor names contain spreadsheet metacharacters (`=`, `+`, `-`, `@`), verify exported/copied values are prefixed so Excel/Sheets treats them as text rather than formulas.
+
+## 200-user Replit launch
+
+- [Hardening design](docs/superpowers/specs/2026-07-12-replit-200-user-hardening-design.md)
+- [Implementation plan](docs/superpowers/plans/2026-07-12-replit-200-user-hardening.md)
+- [Launch runbook](docs/operations/replit-200-user-runbook.md)
+
+Reserved VM selection, session-migration application, authenticated smoke tests, and load-test execution are human-operated steps. Agent-run verification remains mock-backed and does not connect to either production database.

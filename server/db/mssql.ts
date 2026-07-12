@@ -32,4 +32,13 @@ const setMssqlPoolOverride = (nextPool?: Promise<ConnectionPool> | ConnectionPoo
   poolOverride = nextPool;
 };
 
-export { sql, getMssqlPool, setMssqlPoolOverride };
+const closeMssqlPool = async (): Promise<void> => {
+  const current = poolOverride ?? poolPromise;
+  poolOverride = undefined;
+  poolPromise = undefined;
+  if (!current) return;
+  const connected = await Promise.resolve(current);
+  await connected.close();
+};
+
+export { sql, getMssqlPool, setMssqlPoolOverride, closeMssqlPool };

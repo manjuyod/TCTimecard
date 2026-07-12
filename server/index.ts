@@ -4,7 +4,6 @@ import compression from 'compression';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
-import session from 'express-session';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import authRoutes from './routes/auth';
@@ -15,8 +14,13 @@ import timeOffRoutes from './routes/timeoff';
 import timeEntryRoutes from './routes/timeEntry';
 import attestationRoutes from './routes/attestation';
 import clockRoutes from './routes/clock';
+import healthRoutes from './routes/health';
 import { validateDbEnv, validateRuntimeEnv } from './config/env';
-import { SESSION_COOKIE_NAME, SESSION_SECRET, SESSION_SAME_SITE, SESSION_SECURE, SESSION_TTL_MS } from './config/session';
+import { SESSION_SECRET } from './config/session';
+import { createSessionMiddleware } from './config/sessionMiddleware';
+import { closePostgresPool } from './db/postgres';
+import { closeMssqlPool } from './db/mssql';
+import { installGracefulShutdown } from './services/gracefulShutdown';
 
 dotenv.config();
 
@@ -64,26 +68,8 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
-app.use(
-  session({
-    name: SESSION_COOKIE_NAME,
-    secret: SESSION_SECRET,
-    resave: false,
-    rolling: true,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      secure: SESSION_SECURE,
-      sameSite: SESSION_SAME_SITE,
-      maxAge: SESSION_TTL_MS
-    }
-  })
-);
-
-// Health check
-app.get('/api/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+app.use('/api', healthRoutes);
+app.use(createSessionMiddleware());
 
 app.use('/api/auth', authRoutes);
 app.use('/api/pay-period', payPeriodRoutes);
@@ -133,6 +119,15 @@ app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`[server] Listening on http://localhost:${PORT}`);
+});
+
+installGracefulShutdown({
+  server,
+  closeResources: async () => {
+    const results = await Promise.allSettled([closePostgresPool(), closeMssqlPool()]);
+    const failed = results.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+  }
 });

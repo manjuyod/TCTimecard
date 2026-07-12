@@ -20,3 +20,8 @@ specs/*
 .claude/
 AGENTS.md
 CLAUDE.md
+
+# Human-operated load test artifacts
+load-tests/credentials*.json
+!load-tests/credentials.example.json
+load-test-results*.json
