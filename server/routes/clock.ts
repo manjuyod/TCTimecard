@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import { DateTime } from 'luxon';
 import { getPostgresPool } from '../db/postgres';
 import { requireTutor } from '../middleware/auth';
-import { resolvePayPeriod } from '../payroll/payPeriodResolution';
+import { getFranchisePayrollSettings, resolvePayPeriod } from '../payroll/payPeriodResolution';
 import {
   getScheduleSnapshotSigningSecret,
   parseScheduleSnapshotV1,
@@ -303,8 +303,8 @@ router.get(
     }
 
     try {
-      const payPeriod = await resolvePayPeriod(context.franchiseId, null);
-      const timezone = payPeriod.timezone;
+      const settings = await getFranchisePayrollSettings(context.franchiseId);
+      const timezone = settings.timezone;
       const workDate = DateTime.now().setZone(timezone).toISODate();
       if (!workDate) {
         res.status(500).json({ error: 'Unable to resolve current work date' });

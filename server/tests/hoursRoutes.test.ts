@@ -84,11 +84,14 @@ const createPostgresPool = (args: {
   approvedDays: ApprovedDayRow[];
   sessions: SessionRow[];
   breaks?: BreakRow[];
+  queries?: string[];
 }) => {
   const settingsByFranchise = new Map(args.settings.map((row) => [row.franchiseid, { ...row }]));
 
   return {
     async query(sqlText: string, params: unknown[] = []): Promise<QueryResult> {
+      args.queries?.push(sqlText);
+
       if (sqlText.includes('FROM franchise_payroll_settings')) {
         const franchiseId = Number(params[0]);
         const row = settingsByFranchise.get(franchiseId);
@@ -1030,7 +1033,8 @@ test('selector-disabled admins are locked to their session franchise for daily s
 });
 
 test('calendar day snapshot normalizes MSSQL time values into usable intervals', async () => {
-  setPostgresPoolOverride(createPostgresPool({ settings: [], approvedDays: [], sessions: [] }) as never);
+  const queries: string[] = [];
+  setPostgresPoolOverride(createPostgresPool({ settings: [], approvedDays: [], sessions: [], queries }) as never);
   setMssqlPoolOverride(
     createMssqlPool([], [
       {
@@ -1075,5 +1079,7 @@ test('calendar day snapshot normalizes MSSQL time values into usable intervals',
         endAt: '2026-03-07T12:00:00.000-08:00'
       }
     ]);
+    assert.equal(queries.filter((sqlText) => sqlText.includes('FROM franchise_payroll_settings')).length, 1);
+    assert.equal(queries.filter((sqlText) => sqlText.includes('FROM franchise_pay_period_overrides')).length, 0);
   });
 });

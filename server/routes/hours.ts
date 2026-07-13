@@ -6,7 +6,12 @@ import { getPostgresPool } from '../db/postgres';
 import { requireAdmin, requireTutor } from '../middleware/auth';
 import { enforceFranchiseScope } from '../middleware/franchiseScope';
 import { computeIsoWeekRange, computeMonthRange, parseMonthParam, roundHours2 } from '../payroll/hoursUtils';
-import { localDateRangeToUtcBounds, resolvePayPeriod, type PayPeriod } from '../payroll/payPeriodResolution';
+import {
+  getFranchisePayrollSettings,
+  localDateRangeToUtcBounds,
+  resolvePayPeriod,
+  type PayPeriod
+} from '../payroll/payPeriodResolution';
 import {
   deriveIntervalsFromEntries,
   getScheduleSlotMinutes,
@@ -306,8 +311,8 @@ const getTutorContext = (req: Request): { tutorId: number; franchiseId: number }
 };
 
 const resolveTimezone = async (franchiseId: number): Promise<string> => {
-  const payPeriod = await resolvePayPeriod(franchiseId, null);
-  return payPeriod.timezone;
+  const settings = await getFranchisePayrollSettings(franchiseId);
+  return settings.timezone;
 };
 
 const computeEndDateExclusive = (payPeriod: PayPeriod): string => {
