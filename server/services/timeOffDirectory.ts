@@ -18,9 +18,10 @@ export async function fetchTimeOffTutorsByIds(tutorIds: number[]): Promise<Map<n
     return `@${name}`;
   });
   const result = await request.query(`
-    SELECT TutorID, FirstName, LastName, Email
+    SELECT ID, FirstName, LastName, Email
     FROM dbo.tblTutors
-    WHERE TutorID IN (${params.join(', ')})
+    WHERE ID IN (${params.join(', ')})
+      AND IsDeleted = 0
   `);
   return mapTutorDirectoryRows(result.recordset ?? []);
 }
@@ -32,7 +33,7 @@ export async function fetchTimeOffTutorById(tutorId: number): Promise<TutorDirec
 export function mapTutorDirectoryRows(rows: Array<Record<string, unknown>>): Map<number, TutorDirectoryIdentity> {
   const map = new Map<number, TutorDirectoryIdentity>();
   for (const row of rows) {
-    const tutorId = Number(row.TutorID);
+    const tutorId = Number(row.ID);
     if (!Number.isInteger(tutorId) || tutorId <= 0) continue;
     map.set(tutorId, {
       tutorId,
