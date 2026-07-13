@@ -4,9 +4,17 @@ import { destroySession, isSessionExpired } from '../auth/session';
 
 const notAuthenticated = (res: Response) => res.status(401).json({ error: 'Not authenticated' });
 const forbidden = (res: Response) => res.status(403).json({ error: 'Forbidden' });
+const LAST_SEEN_PERSIST_INTERVAL_MS = 60_000;
 
 const updateLastSeen = (req: Request, auth: AuthSessionData, next: NextFunction) => {
-  req.session.auth = { ...auth, lastSeenAt: new Date().toISOString() };
+  const now = Date.now();
+  const previousLastSeenAt = Date.parse(auth.lastSeenAt);
+  if (Number.isFinite(previousLastSeenAt) && now - previousLastSeenAt < LAST_SEEN_PERSIST_INTERVAL_MS) {
+    next();
+    return;
+  }
+
+  req.session.auth = { ...auth, lastSeenAt: new Date(now).toISOString() };
   req.session.save((err) => {
     if (err) next(err);
     else next();
