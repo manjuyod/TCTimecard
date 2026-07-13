@@ -12,6 +12,18 @@ export interface TimeOffFormValue {
 
 export type TimeOffFormErrors = Partial<Record<keyof TimeOffFormValue, string>>;
 
+export function parseEmailDecisionFragment(hash: string): {
+  token: string;
+  action: 'approve' | 'deny' | null;
+} | null {
+  const params = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash);
+  const token = params.get('token') ?? '';
+  if (!/^[A-Za-z0-9._-]{32,128}$/.test(token)) return null;
+  const actionValue = params.get('action');
+  const action = actionValue === 'approve' || actionValue === 'deny' ? actionValue : null;
+  return { token, action };
+}
+
 export function validateTimeOffForm(form: TimeOffFormValue, policy: TimeOffPolicy): TimeOffFormErrors {
   const errors: TimeOffFormErrors = {};
   if (!form.startDate) errors.startDate = 'Start date is required.';

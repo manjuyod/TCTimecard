@@ -126,7 +126,7 @@ export async function sendTimeOffGmailDwd(
   const sentAt = options.nowIso ?? new Date().toISOString();
   if (options.logOnly) {
     const result: GmailDwdResult = { provider: 'gmail_dwd', mode: 'log_only', sentAt, payload };
-    console.log(JSON.stringify(result));
+    console.log(serializeSafeGmailLog(result));
     return result;
   }
 
@@ -150,6 +150,13 @@ export async function sendTimeOffGmailDwd(
     throw new Error(`Gmail DWD send failed: ${response.status} ${JSON.stringify(responseBody)}`);
   }
   return { provider: 'gmail_dwd', mode: 'send', sentAt, payload, response: responseBody };
+}
+
+function serializeSafeGmailLog(result: GmailDwdResult): string {
+  return JSON.stringify(result).replace(
+    /#token=[A-Za-z0-9._%~-]{32,256}(?:&(?:amp;)?action=(?:approve|deny))?/g,
+    '#[decision-link-redacted]'
+  );
 }
 
 export function resolveGmailDwdCredentials(

@@ -21,6 +21,7 @@ import { createSessionMiddleware } from './config/sessionMiddleware';
 import { closePostgresPool } from './db/postgres';
 import { closeMssqlPool } from './db/mssql';
 import { installGracefulShutdown } from './services/gracefulShutdown';
+import { setSensitivePageHeaders } from './middleware/sensitivePageHeaders';
 
 dotenv.config();
 
@@ -67,6 +68,10 @@ app.use(compression());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
+app.use('/timeoff/decision', (_req, res, next) => {
+  setSensitivePageHeaders(res);
+  next();
+});
 
 app.use('/api', healthRoutes);
 app.use(createSessionMiddleware());

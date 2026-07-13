@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { parseAdminTimeOffDeepLink, returnTarget, validateTimeOffForm } from '../src/lib/timeOff';
+import {
+  parseAdminTimeOffDeepLink,
+  parseEmailDecisionFragment,
+  returnTarget,
+  validateTimeOffForm
+} from '../src/lib/timeOff';
 
 const policy = {
   timezone: 'America/Los_Angeles',
@@ -15,6 +20,19 @@ const policy = {
 };
 
 describe('time-off client helpers', () => {
+  it('parses a fragment-only email decision token and action', () => {
+    const token = 'A'.repeat(43);
+    assert.deepEqual(parseEmailDecisionFragment(`#token=${token}&action=deny`), {
+      token,
+      action: 'deny'
+    });
+    assert.deepEqual(parseEmailDecisionFragment(`#token=0.${'B'.repeat(43)}`), {
+      token: `0.${'B'.repeat(43)}`,
+      action: null
+    });
+    assert.equal(parseEmailDecisionFragment('#token=short&action=approve'), null);
+  });
+
   it('mirrors the 14-day and exempt-type policy', () => {
     const base = {
       startDate: '2026-07-25',

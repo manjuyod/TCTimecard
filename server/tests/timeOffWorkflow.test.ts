@@ -20,12 +20,12 @@ const request = {
 };
 
 describe('authenticated time-off notification workflow', () => {
-  it('builds authenticated review, approve, and deny links', () => {
-    assert.deepEqual(buildAuthenticatedApprovalLinks('https://timecard.example.com/', 6, 42), {
-      reviewUrl: 'https://timecard.example.com/admin/approvals?tab=timeoff&franchiseId=6&requestId=42',
-      approveUrl:
-        'https://timecard.example.com/admin/approvals?tab=timeoff&franchiseId=6&requestId=42&action=approve',
-      denyUrl: 'https://timecard.example.com/admin/approvals?tab=timeoff&franchiseId=6&requestId=42&action=deny'
+  it('builds public review, approve, and deny links with a fragment token', () => {
+    const token = 'A'.repeat(43);
+    assert.deepEqual(buildAuthenticatedApprovalLinks('https://timecard.example.com/', token), {
+      reviewUrl: `https://timecard.example.com/timeoff/decision#token=${token}`,
+      approveUrl: `https://timecard.example.com/timeoff/decision#token=${token}&action=approve`,
+      denyUrl: `https://timecard.example.com/timeoff/decision#token=${token}&action=deny`
     });
   });
 
@@ -36,7 +36,8 @@ describe('authenticated time-off notification workflow', () => {
       {
         request,
         center: { name: 'Anthem', email: 'admin@example.com', gmailId: 'calendar@example.com' },
-        appOrigin: 'https://timecard.example.com'
+        appOrigin: 'https://timecard.example.com',
+        rawDecisionToken: 'A'.repeat(43)
       },
       {
         send: async (payload, subject) => {
@@ -51,7 +52,10 @@ describe('authenticated time-off notification workflow', () => {
     assert.deepEqual(result, { kind: 'admin_request', status: 'sent' });
     assert.equal(sent?.payload.to, 'admin@example.com');
     assert.equal(sent?.subject, 'calendar@example.com');
+    assert.equal(sent?.payload.text.includes('A'.repeat(43)), true);
     assert.equal(audit[0]?.action, 'admin_email_sent');
+    assert.equal(JSON.stringify(audit[0]?.metadata).includes('A'.repeat(43)), false);
+    assert.equal(JSON.stringify(audit[0]?.metadata).includes('reviewUrl'), false);
   });
 
   it('saves a retryable admin notification failure when GmailID is missing', async () => {
@@ -60,7 +64,8 @@ describe('authenticated time-off notification workflow', () => {
       {
         request,
         center: { name: 'Anthem', email: 'admin@example.com', gmailId: null },
-        appOrigin: 'https://timecard.example.com'
+        appOrigin: 'https://timecard.example.com',
+        rawDecisionToken: 'B'.repeat(43)
       },
       {
         send: async () => assert.fail('send should not run'),

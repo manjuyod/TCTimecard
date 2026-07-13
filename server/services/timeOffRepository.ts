@@ -110,17 +110,18 @@ export async function createAuthenticatedTimeOff(args: {
   email: string;
   submission: NormalizedTimeOffSubmission;
   timezone: string;
-}): Promise<TimeOffRecord> {
-  const pool = getPostgresPool();
-  const result = await pool.query<TimeOffRow>(
+  decisionToken: { tokenHash: string; expiresAt: string };
+}, db: Queryable = getPostgresPool()): Promise<TimeOffRecord> {
+  const result = await db.query<TimeOffRow>(
     `
       INSERT INTO public.time_off_requests (
         franchiseid, tutorid, bridge_flag, bridge_profile_id, first_name, last_name, email,
         start_at, end_at, type, absence_label, notes, status, created_at, created_by,
-        duration_hours, partial_day, leave_time, return_time, public_metadata
+        duration_hours, partial_day, leave_time, return_time, public_metadata,
+        decision_token_hash, decision_token_expires_at
       )
       VALUES ($1, $2, FALSE, NULL, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', NOW(), $2,
-        $11, $12, $13, $14, $15)
+        $11, $12, $13, $14, $15, $16, $17)
       RETURNING ${COLUMNS}
     `,
     [
@@ -138,7 +139,9 @@ export async function createAuthenticatedTimeOff(args: {
       args.submission.partialDay,
       args.submission.leaveTime,
       args.submission.returnTime,
-      { source: 'authenticated_timecard_app', startDate: args.submission.startDate, endDate: args.submission.endDate }
+      { source: 'authenticated_timecard_app', startDate: args.submission.startDate, endDate: args.submission.endDate },
+      args.decisionToken.tokenHash,
+      args.decisionToken.expiresAt
     ]
   );
   return mapTimeOffRow(result.rows[0], args.timezone);
@@ -189,10 +192,69 @@ export async function fetchTimeOffById(
   return result.rows[0] ? mapTimeOffRow(result.rows[0], timezone) : null;
 }
 
-export async function cancelPendingTimeOff(requestId: number, tutorId: number, timezone: string): Promise<TimeOffRecord | null> {
-  const result = await getPostgresPool().query<TimeOffRow>(
+export async function storeTimeOffDecisionToken(args: {
+  requestId: number;
+  tokenHash: string;
+  expiresAt: string;
+  db?: Queryable;
+}): Promise<boolean> {
+  const result = await (args.db ?? getPostgresPool()).query(
+    `UPDATE public.time_off_requests
+       SET decision_token_hash=$2, decision_token_expires_at=$3, decision_token_used_at=NULL
+     WHERE id=$1 AND status='pending'
+     RETURNING id`,
+    [args.requestId, args.tokenHash, args.expiresAt]
+  );
+  return Boolean(result.rows[0]);
+}
+
+export async function findPendingTimeOffDecisionFranchiseId(args: {
+  tokenHash: string;
+  nowIso: string;
+  db?: Queryable;
+}): Promise<number | null> {
+  const result = await (args.db ?? getPostgresPool()).query<{ franchiseid: number }>(
+    `SELECT franchiseid
+       FROM public.time_off_requests
+      WHERE decision_token_hash=$1
+        AND decision_token_expires_at > $2
+        AND decision_token_used_at IS NULL
+        AND status='pending'
+      LIMIT 1`,
+    [args.tokenHash, args.nowIso]
+  );
+  return result.rows[0] ? Number(result.rows[0].franchiseid) : null;
+}
+
+export async function fetchPendingTimeOffByDecisionTokenHash(args: {
+  tokenHash: string;
+  nowIso: string;
+  timezone: string;
+  db?: Queryable;
+  forUpdate?: boolean;
+}): Promise<TimeOffRecord | null> {
+  const result = await (args.db ?? getPostgresPool()).query<TimeOffRow>(
+    `SELECT ${COLUMNS}
+       FROM public.time_off_requests
+      WHERE decision_token_hash=$1
+        AND decision_token_expires_at > $2
+        AND decision_token_used_at IS NULL
+        AND status='pending'
+      LIMIT 1${args.forUpdate ? ' FOR UPDATE' : ''}`,
+    [args.tokenHash, args.nowIso]
+  );
+  return result.rows[0] ? mapTimeOffRow(result.rows[0], args.timezone) : null;
+}
+
+export async function cancelPendingTimeOff(
+  requestId: number,
+  tutorId: number,
+  timezone: string,
+  db: Queryable = getPostgresPool()
+): Promise<TimeOffRecord | null> {
+  const result = await db.query<TimeOffRow>(
     `UPDATE public.time_off_requests SET status='cancelled', decided_at=NOW(), decided_by=$1,
-       decision_reason='cancelled by tutor'
+       decision_reason='cancelled by tutor', decision_token_used_at=NOW()
      WHERE id=$2 AND tutorid=$1 AND status='pending' RETURNING ${COLUMNS}`,
     [tutorId, requestId]
   );
@@ -203,16 +265,33 @@ export async function updateTimeOffDecision(args: {
   client: PoolClient;
   requestId: number;
   status: 'approved' | 'denied';
-  actorId: number;
+  actorId: number | null;
   reason: string;
   calendarEventId: string | null;
   timezone: string;
+  expectedTokenHash?: string | null;
+  nowIso?: string;
 }): Promise<TimeOffRecord | null> {
   const result = await args.client.query<TimeOffRow>(
     `UPDATE public.time_off_requests SET status=$1, decided_at=NOW(), decided_by=$2,
-       decision_reason=$3, google_calendar_event_id=COALESCE($4, google_calendar_event_id)
-     WHERE id=$5 AND status='pending' RETURNING ${COLUMNS}`,
-    [args.status, args.actorId, args.reason, args.calendarEventId, args.requestId]
+       decision_reason=$3, google_calendar_event_id=COALESCE($4, google_calendar_event_id),
+       decision_token_used_at=CASE WHEN decision_token_hash IS NULL THEN decision_token_used_at ELSE NOW() END
+     WHERE id=$5 AND status='pending'
+       AND ($6::text IS NULL OR (
+         decision_token_hash=$6
+         AND decision_token_used_at IS NULL
+         AND decision_token_expires_at > $7
+       ))
+     RETURNING ${COLUMNS}`,
+    [
+      args.status,
+      args.actorId,
+      args.reason,
+      args.calendarEventId,
+      args.requestId,
+      args.expectedTokenHash ?? null,
+      args.nowIso ?? new Date().toISOString()
+    ]
   );
   return result.rows[0] ? mapTimeOffRow(result.rows[0], args.timezone) : null;
 }

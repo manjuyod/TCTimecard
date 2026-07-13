@@ -1,6 +1,7 @@
 import type { PoolConfig } from 'pg';
 import type { config as MssqlConnectionConfig } from 'mssql';
 import dotenv from 'dotenv';
+import { resolveAppOrigin } from './appOrigin';
 
 dotenv.config();
 
@@ -140,16 +141,17 @@ const getTrimmed = (value: unknown): string => {
   return String(value).trim();
 };
 
-export const validateRuntimeEnv = (): void => {
-  const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+export const validateRuntimeEnv = (env: Record<string, string | undefined> = process.env): void => {
+  const isProduction = String(env.NODE_ENV || '').toLowerCase() === 'production';
   if (!isProduction) return;
 
   const missing: string[] = [];
-  if (!getTrimmed(process.env.SESSION_SECRET)) missing.push('SESSION_SECRET');
-  if (!getTrimmed(process.env.SCHEDULE_SNAPSHOT_SIGNING_SECRET)) missing.push('SCHEDULE_SNAPSHOT_SIGNING_SECRET');
+  if (!getTrimmed(env.SESSION_SECRET)) missing.push('SESSION_SECRET');
+  if (!getTrimmed(env.SCHEDULE_SNAPSHOT_SIGNING_SECRET)) missing.push('SCHEDULE_SNAPSHOT_SIGNING_SECRET');
 
   if (missing.length > 0) {
     const suffix = missing.length > 1 ? 's' : '';
     throw new Error(`[env] Missing required production environment variable${suffix}: ${missing.join(', ')}`);
   }
+  resolveAppOrigin(env);
 };

@@ -6,13 +6,16 @@ import { enforceFranchiseScope } from '../middleware/franchiseScope';
 import { getFranchisePayrollSettings } from '../payroll/payPeriodResolution';
 import { fetchFranchiseContact, FranchiseContact } from '../services/franchiseContact';
 import {
+  decideTimeOffByEmailToken,
   decideTimeOffRequest,
+  previewTimeOffEmailDecision,
   retryTimeOffNotification,
   safeFetchFranchiseContact,
   TimeOffDecisionResult
 } from '../services/timeOffDecision';
 import { fetchTimeOffTutorById, fetchTimeOffTutorsByIds, TutorDirectoryIdentity } from '../services/timeOffDirectory';
 import { sendTimeOffGmailDwd } from '../services/timeOffEmail';
+import { createTimeOffDecisionToken, CreatedTimeOffDecisionToken } from '../services/timeOffDecisionToken';
 import { buildTimeOffPolicy, normalizeTimeOffSubmission } from '../services/timeOffPolicy';
 import {
   appendTimeOffAudit,
@@ -29,9 +32,14 @@ import { sendAdminRequestNotification } from '../services/timeOffWorkflow';
 import { NormalizedTimeOffSubmission, TimeOffNotificationResult, TimeOffRecord } from '../types/timeoff';
 
 const MAX_TIME_OFF_DURATION_HOURS = 336;
+const EMAIL_DECISION_UNAVAILABLE = 'Decision link is invalid, expired, or already used.';
+const EMAIL_DECISION_FAILED = 'Decision could not be saved right now. Please try again later.';
 
 export interface TimeOffRouteDeps {
   nowIso: () => string;
+  createDecisionToken: (nowIso?: string) => CreatedTimeOffDecisionToken;
+  previewEmailDecision: typeof previewTimeOffEmailDecision;
+  decideEmailRequest: typeof decideTimeOffByEmailToken;
   resolveTimezone: (franchiseId: number) => Promise<string>;
   fetchTutor: (tutorId: number) => Promise<TutorDirectoryIdentity | null>;
   fetchTutors: (tutorIds: number[]) => Promise<Map<number, TutorDirectoryIdentity>>;
@@ -45,6 +53,7 @@ export interface TimeOffRouteDeps {
     email: string;
     submission: NormalizedTimeOffSubmission;
     timezone: string;
+    decisionToken: { tokenHash: string; expiresAt: string };
   }) => Promise<TimeOffRecord>;
   listTutor: (tutorId: number, limit: number, timezone: string) => Promise<TimeOffRecord[]>;
   listAdminPending: (franchiseId: number, limit: number, timezone: string) => Promise<TimeOffRecord[]>;
@@ -54,7 +63,8 @@ export interface TimeOffRouteDeps {
   sendAdminNotification: (
     request: TimeOffRecord,
     center: FranchiseContact | null,
-    actorId: number
+    actorId: number,
+    rawDecisionToken: string
   ) => Promise<TimeOffNotificationResult>;
   decideRequest: (args: {
     requestId: number;
@@ -70,6 +80,9 @@ export interface TimeOffRouteDeps {
 
 const defaultDeps: TimeOffRouteDeps = {
   nowIso: () => new Date().toISOString(),
+  createDecisionToken: createTimeOffDecisionToken,
+  previewEmailDecision: previewTimeOffEmailDecision,
+  decideEmailRequest: decideTimeOffByEmailToken,
   resolveTimezone: async (franchiseId) => (await getFranchisePayrollSettings(franchiseId)).timezone,
   fetchTutor: fetchTimeOffTutorById,
   fetchTutors: fetchTimeOffTutorsByIds,
@@ -84,12 +97,13 @@ const defaultDeps: TimeOffRouteDeps = {
   fetchById: fetchTimeOffById,
   cancelRequest: cancelPendingTimeOff,
   appendAudit: appendTimeOffAudit,
-  sendAdminNotification: async (request, center, actorId) =>
+  sendAdminNotification: async (request, center, actorId, rawDecisionToken) =>
     sendAdminRequestNotification(
       {
         request: notificationSummary(request),
         center: center ?? { name: `Franchise ${request.franchiseId}`, email: null, gmailId: null },
-        appOrigin: APP_ORIGIN
+        appOrigin: APP_ORIGIN,
+        rawDecisionToken
       },
       {
         send: (payload, subject) =>
@@ -114,6 +128,48 @@ const defaultDeps: TimeOffRouteDeps = {
 export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
   const deps = { ...defaultDeps, ...overrides };
   const router = express.Router();
+
+  router.post('/timeoff/email-decision/preview', asyncHandler(async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const rawToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    try {
+      const request = await deps.previewEmailDecision({ rawToken, nowIso: deps.nowIso() });
+      if (!request) return res.status(404).json({ error: EMAIL_DECISION_UNAVAILABLE });
+      return res.json({ request: publicDecisionPreview(request) });
+    } catch {
+      console.error('[timeoff] email decision preview failed');
+      return res.status(500).json({ error: EMAIL_DECISION_FAILED });
+    }
+  }));
+
+  router.post('/timeoff/email-decision', asyncHandler(async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const rawToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    const decision = req.body?.decision === 'approve' || req.body?.decision === 'deny' ? req.body.decision : null;
+    if (!decision) return res.status(400).json({ error: 'decision must be approve or deny' });
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (reason.length > 2000) return res.status(400).json({ error: 'reason must be 2000 characters or fewer' });
+    try {
+      const result = await deps.decideEmailRequest({
+        rawToken,
+        nowIso: deps.nowIso(),
+        decision,
+        reason: reason || null
+      });
+      if (result.kind === 'ok') {
+        return res.json({
+          status: result.request.status,
+          decisionReason: result.request.decisionReason,
+          notification: result.notification
+        });
+      }
+      if (result.kind === 'calendar_failed') return res.status(502).json({ error: EMAIL_DECISION_FAILED });
+      return res.status(404).json({ error: EMAIL_DECISION_UNAVAILABLE });
+    } catch {
+      console.error('[timeoff] email decision save failed');
+      return res.status(500).json({ error: EMAIL_DECISION_FAILED });
+    }
+  }));
 
   router.get('/timeoff/policy', requireTutor, asyncHandler(async (req, res) => {
     const context = tutorContext(req);
@@ -144,6 +200,7 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
 
     const tutor = await deps.fetchTutor(context.tutorId);
     const fallbackName = String(req.session.auth?.displayName ?? '').trim().split(/\s+/);
+    const decisionToken = deps.createDecisionToken(deps.nowIso());
     const request = await deps.createRequest({
       franchiseId: context.franchiseId,
       tutorId: context.tutorId,
@@ -151,7 +208,8 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
       lastName: tutor?.lastName ?? fallbackName.slice(1).join(' '),
       email: tutor?.email ?? '',
       submission: normalized.value,
-      timezone
+      timezone,
+      decisionToken: { tokenHash: decisionToken.tokenHash, expiresAt: decisionToken.expiresAt }
     });
     await deps.appendAudit({
       requestId: request.id,
@@ -174,7 +232,8 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
     const notification = await deps.sendAdminNotification(
       request,
       await safeFetchFranchiseContact(() => deps.fetchCenter(context.franchiseId)),
-      context.tutorId
+      context.tutorId,
+      decisionToken.rawToken
     );
     return res.status(201).json({ request, notification });
   }));
@@ -338,6 +397,20 @@ function notificationSummary(request: TimeOffRecord) {
     endLabel: request.endDate,
     absenceLabel: request.absenceLabel,
     reason: request.reason || ''
+  };
+}
+
+function publicDecisionPreview(request: TimeOffRecord) {
+  return {
+    requesterName: request.tutorName || `${request.firstName} ${request.lastName}`.trim() || 'Tutor',
+    requesterEmail: request.tutorEmail,
+    startDate: request.startDate,
+    endDate: request.endDate,
+    absenceLabel: request.absenceLabel,
+    requestReason: request.reason || '',
+    partialDay: request.partialDay,
+    leaveTime: request.leaveTime,
+    returnTime: request.returnTime
   };
 }
 

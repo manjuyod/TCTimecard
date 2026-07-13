@@ -28,17 +28,14 @@ export interface NotificationDeps {
   audit: (action: string, metadata: Record<string, unknown>) => Promise<void>;
 }
 
-export function buildAuthenticatedApprovalLinks(appOrigin: string, franchiseId: number, requestId: number) {
-  const base = new URL('/admin/approvals', ensureTrailingSlash(appOrigin));
-  base.searchParams.set('tab', 'timeoff');
-  base.searchParams.set('franchiseId', String(franchiseId));
-  base.searchParams.set('requestId', String(requestId));
-  const reviewUrl = base.toString();
-  const approve = new URL(reviewUrl);
-  approve.searchParams.set('action', 'approve');
-  const deny = new URL(reviewUrl);
-  deny.searchParams.set('action', 'deny');
-  return { reviewUrl, approveUrl: approve.toString(), denyUrl: deny.toString() };
+export function buildAuthenticatedApprovalLinks(appOrigin: string, rawDecisionToken: string) {
+  const review = new URL('/timeoff/decision', ensureTrailingSlash(appOrigin));
+  review.hash = new URLSearchParams({ token: rawDecisionToken }).toString();
+  const approve = new URL(review.toString());
+  approve.hash = new URLSearchParams({ token: rawDecisionToken, action: 'approve' }).toString();
+  const deny = new URL(review.toString());
+  deny.hash = new URLSearchParams({ token: rawDecisionToken, action: 'deny' }).toString();
+  return { reviewUrl: review.toString(), approveUrl: approve.toString(), denyUrl: deny.toString() };
 }
 
 export async function sendAdminRequestNotification(
@@ -46,12 +43,13 @@ export async function sendAdminRequestNotification(
     request: NotificationRequestSummary;
     center: NotificationCenter;
     appOrigin: string;
+    rawDecisionToken: string;
   },
   deps: NotificationDeps
 ): Promise<TimeOffNotificationResult> {
   const googleIdentityEmail = input.center.gmailId?.trim() || '';
   const recipient = input.center.email?.trim() || googleIdentityEmail;
-  const links = buildAuthenticatedApprovalLinks(input.appOrigin, input.request.franchiseId, input.request.id);
+  const links = buildAuthenticatedApprovalLinks(input.appOrigin, input.rawDecisionToken);
   const payload = buildAdminApprovalEmail({
     to: recipient,
     requesterName: requesterName(input.request),
@@ -112,7 +110,12 @@ async function attemptNotification(
   warning: string,
   deps: NotificationDeps
 ): Promise<TimeOffNotificationResult> {
-  const baseMetadata = { notificationKind: kind, payload, googleIdentityEmail, recipient: payload.to };
+  const baseMetadata = {
+    notificationKind: kind,
+    googleIdentityEmail,
+    recipient: payload.to,
+    emailSubject: payload.subject
+  };
   try {
     if (!googleIdentityEmail) throw new Error('Franchise GmailID is not configured.');
     if (!payload.to.trim()) throw new Error('Notification recipient email is not configured.');

@@ -1,5 +1,6 @@
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { getPostgresPool } from '../db/postgres';
+import { getFranchisePayrollSettings } from '../payroll/payPeriodResolution';
 import { TimeOffNotificationResult, TimeOffRecord } from '../types/timeoff';
 import { fetchFranchiseContact, FranchiseContact } from './franchiseContact';
 import {
@@ -9,12 +10,93 @@ import {
 } from './googleCalendar';
 import {
   appendTimeOffAudit,
+  fetchPendingTimeOffByDecisionTokenHash,
+  findPendingTimeOffDecisionFranchiseId,
   fetchTimeOffById,
+  storeTimeOffDecisionToken,
   updateTimeOffDecision
 } from './timeOffRepository';
 import { sendTimeOffGmailDwd } from './timeOffEmail';
 import { sendRequesterDecisionNotification } from './timeOffWorkflow';
 import { fetchTimeOffTutorById, TutorDirectoryIdentity } from './timeOffDirectory';
+import {
+  hashTimeOffDecisionToken,
+  issueTimeOffDecisionToken,
+  isAcceptedTimeOffDecisionToken,
+  normalizeEmailDecisionReason
+} from './timeOffDecisionToken';
+
+export interface TimeOffEmailDecisionPreviewDeps {
+  findFranchiseId: (tokenHash: string, nowIso: string) => Promise<number | null>;
+  resolveTimezone: (franchiseId: number) => Promise<string>;
+  fetchPending: (tokenHash: string, nowIso: string, timezone: string) => Promise<TimeOffRecord | null>;
+}
+
+const defaultEmailDecisionPreviewDeps: TimeOffEmailDecisionPreviewDeps = {
+  findFranchiseId: (tokenHash, nowIso) => findPendingTimeOffDecisionFranchiseId({ tokenHash, nowIso }),
+  resolveTimezone: async (franchiseId) => (await getFranchisePayrollSettings(franchiseId)).timezone,
+  fetchPending: (tokenHash, nowIso, timezone) =>
+    fetchPendingTimeOffByDecisionTokenHash({ tokenHash, nowIso, timezone })
+};
+
+export async function previewTimeOffEmailDecision(
+  args: { rawToken: string; nowIso: string },
+  deps: TimeOffEmailDecisionPreviewDeps = defaultEmailDecisionPreviewDeps
+): Promise<TimeOffRecord | null> {
+  if (!isAcceptedTimeOffDecisionToken(args.rawToken)) return null;
+  const tokenHash = hashTimeOffDecisionToken(args.rawToken);
+  const franchiseId = await deps.findFranchiseId(tokenHash, args.nowIso);
+  if (franchiseId === null) return null;
+  const timezone = await deps.resolveTimezone(franchiseId);
+  return deps.fetchPending(tokenHash, args.nowIso, timezone);
+}
+
+export interface TimeOffEmailDecisionDeps {
+  findFranchiseId: (tokenHash: string, nowIso: string) => Promise<number | null>;
+  resolveTimezone: (franchiseId: number) => Promise<string>;
+  decideLocked: (args: {
+    tokenHash: string;
+    franchiseId: number;
+    actorAccountType: 'ADMIN_EMAIL';
+    actorId: null;
+    decision: 'approve' | 'deny';
+    reason: string;
+    timezone: string;
+    nowIso: string;
+  }) => Promise<TimeOffDecisionResult>;
+}
+
+const defaultEmailDecisionDeps: TimeOffEmailDecisionDeps = {
+  findFranchiseId: (tokenHash, nowIso) => findPendingTimeOffDecisionFranchiseId({ tokenHash, nowIso }),
+  resolveTimezone: async (franchiseId) => (await getFranchisePayrollSettings(franchiseId)).timezone,
+  decideLocked: (args) => decideTimeOffRequestByToken(args)
+};
+
+export async function decideTimeOffByEmailToken(
+  args: {
+    rawToken: string;
+    nowIso: string;
+    decision: 'approve' | 'deny';
+    reason: string | null;
+  },
+  deps: TimeOffEmailDecisionDeps = defaultEmailDecisionDeps
+): Promise<TimeOffDecisionResult> {
+  if (!isAcceptedTimeOffDecisionToken(args.rawToken)) return { kind: 'not_found' };
+  const tokenHash = hashTimeOffDecisionToken(args.rawToken);
+  const franchiseId = await deps.findFranchiseId(tokenHash, args.nowIso);
+  if (franchiseId === null) return { kind: 'not_found' };
+  const timezone = await deps.resolveTimezone(franchiseId);
+  return deps.decideLocked({
+    tokenHash,
+    franchiseId,
+    actorAccountType: 'ADMIN_EMAIL',
+    actorId: null,
+    decision: args.decision,
+    reason: normalizeEmailDecisionReason(args.reason),
+    timezone,
+    nowIso: args.nowIso
+  });
+}
 
 export type TimeOffDecisionResult =
   | { kind: 'ok'; request: TimeOffRecord; notification: TimeOffNotificationResult }
@@ -69,17 +151,79 @@ export async function decideTimeOffRequest(args: {
   timezone: string;
   pool?: Pool;
 }): Promise<TimeOffDecisionResult> {
-  const pool = args.pool ?? getPostgresPool();
+  return decideLockedTimeOffRequest({
+    pool: args.pool ?? getPostgresPool(),
+    franchiseId: args.franchiseId,
+    actorAccountType: 'ADMIN',
+    actorId: args.actorId,
+    enforceSelfApproval: true,
+    decision: args.decision,
+    reason: normalizeEmailDecisionReason(args.reason),
+    timezone: args.timezone,
+    nowIso: new Date().toISOString(),
+    expectedTokenHash: null,
+    lockRequest: (client) => fetchTimeOffById(args.requestId, args.timezone, client, true),
+    fallbackRequestId: args.requestId
+  });
+}
+
+export async function decideTimeOffRequestByToken(args: {
+  tokenHash: string;
+  franchiseId: number;
+  actorAccountType: 'ADMIN_EMAIL';
+  actorId: null;
+  decision: 'approve' | 'deny';
+  reason: string;
+  timezone: string;
+  nowIso: string;
+  pool?: Pool;
+}): Promise<TimeOffDecisionResult> {
+  return decideLockedTimeOffRequest({
+    pool: args.pool ?? getPostgresPool(),
+    franchiseId: args.franchiseId,
+    actorAccountType: args.actorAccountType,
+    actorId: args.actorId,
+    enforceSelfApproval: false,
+    decision: args.decision,
+    reason: normalizeEmailDecisionReason(args.reason),
+    timezone: args.timezone,
+    nowIso: args.nowIso,
+    expectedTokenHash: args.tokenHash,
+    lockRequest: (client) => fetchPendingTimeOffByDecisionTokenHash({
+      tokenHash: args.tokenHash,
+      nowIso: args.nowIso,
+      timezone: args.timezone,
+      db: client,
+      forUpdate: true
+    }),
+    fallbackRequestId: null
+  });
+}
+
+async function decideLockedTimeOffRequest(args: {
+  pool: Pool;
+  franchiseId: number;
+  actorAccountType: 'ADMIN' | 'ADMIN_EMAIL';
+  actorId: number | null;
+  enforceSelfApproval: boolean;
+  decision: 'approve' | 'deny';
+  reason: string;
+  timezone: string;
+  nowIso: string;
+  expectedTokenHash: string | null;
+  lockRequest: (client: PoolClient) => Promise<TimeOffRecord | null>;
+  fallbackRequestId: number | null;
+}): Promise<TimeOffDecisionResult> {
   const contact = await safeFetchFranchiseContact(() => fetchFranchiseContact(args.franchiseId));
-  const client = await pool.connect();
+  const client = await args.pool.connect();
   let updated: TimeOffRecord | null = null;
   let calendarEventId: string | null = null;
-  const decisionReason = args.reason?.trim() || 'Email correspondence';
+  const decisionReason = normalizeEmailDecisionReason(args.reason);
   let locked: TimeOffRecord | null = null;
 
   try {
     await client.query('BEGIN');
-    locked = await fetchTimeOffById(args.requestId, args.timezone, client, true);
+    locked = await args.lockRequest(client);
     if (!locked) {
       await client.query('ROLLBACK');
       return { kind: 'not_found' };
@@ -91,8 +235,14 @@ export async function decideTimeOffRequest(args: {
       });
       locked = mergeTimeOffTutorSnapshot(locked, tutor);
     }
-    const validation = validateLockedTimeOffDecision(locked, args.franchiseId, args.actorId);
-    if (validation) {
+    const validation = locked.franchiseId !== args.franchiseId
+      ? 'wrong_franchise'
+      : locked.status !== 'pending'
+        ? 'already_decided'
+        : args.enforceSelfApproval && args.actorId !== null && locked.tutorId === args.actorId
+          ? 'self_approval'
+          : null;
+    if (validation !== null) {
       await client.query('ROLLBACK');
       return { kind: validation, request: locked };
     }
@@ -118,18 +268,22 @@ export async function decideTimeOffRequest(args: {
       actorId: args.actorId,
       reason: decisionReason,
       calendarEventId,
-      timezone: args.timezone
+      timezone: args.timezone,
+      expectedTokenHash: args.expectedTokenHash,
+      nowIso: args.nowIso
     });
     if (!updated) {
       await client.query('ROLLBACK');
-      const current = await fetchTimeOffById(args.requestId, args.timezone);
+      const current = args.fallbackRequestId === null
+        ? null
+        : await fetchTimeOffById(args.fallbackRequestId, args.timezone);
       return current ? { kind: 'already_decided', request: current } : { kind: 'not_found' };
     }
     await appendTimeOffAudit(
       {
         requestId: updated.id,
         action: updated.status,
-        actorAccountType: 'ADMIN',
+        actorAccountType: args.actorAccountType,
         actorAccountId: args.actorId,
         previousStatus: 'pending',
         newStatus: updated.status,
@@ -160,7 +314,7 @@ export async function decideTimeOffRequest(args: {
   }
 
   const decided = updated as TimeOffRecord;
-  const notification = await notifyRequester(decided, contact, args.actorId);
+  const notification = await notifyRequester(decided, contact, args.actorAccountType, args.actorId);
   return { kind: 'ok', request: decided, notification };
 }
 
@@ -189,11 +343,40 @@ export async function retryTimeOffNotification(args: {
   const summary = toNotificationSummary(args.request);
 
   if (args.kind === 'admin_request') {
+    if (args.request.status !== 'pending') {
+      const warning = 'The admin notification cannot be retried after the request has been decided or cancelled.';
+      await audit('admin_email_failed', {
+        notificationKind: 'admin_request',
+        notificationStatus: 'failed',
+        recipient: args.center?.email ?? args.center?.gmailId ?? '',
+        error: warning
+      });
+      return { kind: 'admin_request', status: 'failed', warning };
+    }
+    const decisionToken = await issueTimeOffDecisionToken(
+      new Date().toISOString(),
+      (tokenHash, expiresAt) => storeTimeOffDecisionToken({
+        requestId: args.request.id,
+        tokenHash,
+        expiresAt
+      })
+    );
+    if (!decisionToken) {
+      const warning = 'The request is no longer pending, so a new admin decision link was not sent.';
+      await audit('admin_email_failed', {
+        notificationKind: 'admin_request',
+        notificationStatus: 'failed',
+        recipient: args.center?.email ?? args.center?.gmailId ?? '',
+        error: warning
+      });
+      return { kind: 'admin_request', status: 'failed', warning };
+    }
     return sendAdminRequestNotification(
       {
         request: summary,
         center: args.center ?? { name: `Franchise ${args.request.franchiseId}`, email: null, gmailId: null },
-        appOrigin: args.appOrigin
+        appOrigin: args.appOrigin,
+        rawDecisionToken: decisionToken.rawToken
       },
       { send, audit }
     );
@@ -219,7 +402,8 @@ export async function retryTimeOffNotification(args: {
 async function notifyRequester(
   request: TimeOffRecord,
   contact: FranchiseContact | null,
-  actorId: number
+  actorAccountType: 'ADMIN' | 'ADMIN_EMAIL',
+  actorId: number | null
 ): Promise<TimeOffNotificationResult> {
   return sendRequesterDecisionNotification(
     {
@@ -234,7 +418,7 @@ async function notifyRequester(
         appendTimeOffAudit({
           requestId: request.id,
           action,
-          actorAccountType: 'ADMIN',
+          actorAccountType,
           actorAccountId: actorId,
           previousStatus: request.status,
           newStatus: request.status,

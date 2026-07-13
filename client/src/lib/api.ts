@@ -75,6 +75,24 @@ export interface TimeOffNotificationFailure {
   error?: string;
 }
 
+export interface TimeOffEmailDecisionPreview {
+  requesterName: string;
+  requesterEmail: string;
+  startDate: string;
+  endDate: string;
+  absenceLabel: string;
+  requestReason: string;
+  partialDay: boolean;
+  leaveTime: string | null;
+  returnTime: string | null;
+}
+
+export interface TimeOffEmailDecisionResult {
+  status: 'approved' | 'denied';
+  decisionReason: string;
+  notification: TimeOffNotificationResult;
+}
+
 export interface TimeOffRequest {
   id: number;
   franchiseId?: number;
@@ -397,6 +415,25 @@ export const fetchTimeOff = async (limit = 200): Promise<TimeOffRequest[]> => {
 export const fetchTimeOffPolicy = async (): Promise<TimeOffPolicy> => {
   const result = await apiFetch<{ policy: TimeOffPolicy }>('/api/timeoff/policy');
   return result.policy;
+};
+
+export const previewTimeOffEmailDecision = async (token: string): Promise<TimeOffEmailDecisionPreview> => {
+  const result = await apiFetch<{ request: TimeOffEmailDecisionPreview }>('/api/timeoff/email-decision/preview', {
+    method: 'POST',
+    body: JSON.stringify({ token })
+  });
+  return result.request;
+};
+
+export const decideTimeOffByEmail = async (args: {
+  token: string;
+  decision: 'approve' | 'deny';
+  reason?: string;
+}): Promise<TimeOffEmailDecisionResult> => {
+  return apiFetch<TimeOffEmailDecisionResult>('/api/timeoff/email-decision', {
+    method: 'POST',
+    body: JSON.stringify(args)
+  });
 };
 
 export const submitTimeOff = async (payload: {

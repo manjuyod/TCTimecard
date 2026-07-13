@@ -9,5 +9,8 @@ test('time-off schema preflight reports missing shared Neon columns', () => {
   ]);
   assert.ok(missing.includes('time_off_requests.absence_label'));
   assert.ok(missing.includes('time_off_requests.public_metadata'));
+  assert.ok(missing.includes('time_off_requests.decision_token_hash'));
+  assert.ok(missing.includes('time_off_requests.decision_token_expires_at'));
+  assert.ok(missing.includes('time_off_requests.decision_token_used_at'));
   assert.ok(!missing.includes('time_off_audit.metadata'));
 });

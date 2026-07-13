@@ -104,4 +104,37 @@ describe('time-off email', () => {
     assert.equal(result.mode, 'log_only');
     assert.equal(result.sentAt, '2026-07-12T18:00:00.000Z');
   });
+
+  it('redacts decision tokens from log-only console output', async () => {
+    const token = 'A'.repeat(43);
+    const payload = buildAdminApprovalEmail({
+      to: 'admin@example.com',
+      requesterName: 'Ada Lovelace',
+      requesterEmail: 'ada@example.com',
+      centerName: 'Anthem',
+      startLabel: '2026-07-26',
+      endLabel: '2026-07-27',
+      absenceLabel: 'Paid Time Off',
+      reason: 'Family vacation out of town',
+      reviewUrl: `https://timecard.example.com/timeoff/decision#token=${token}`,
+      approveUrl: `https://timecard.example.com/timeoff/decision#token=${token}&action=approve`,
+      denyUrl: `https://timecard.example.com/timeoff/decision#token=${token}&action=deny`
+    });
+    const logged: string[] = [];
+    const originalLog = console.log;
+    console.log = (value?: unknown) => logged.push(String(value));
+    try {
+      const result = await sendTimeOffGmailDwd(payload, {
+        logOnly: true,
+        dwdSubject: '',
+        nowIso: '2026-07-12T18:00:00.000Z'
+      });
+      assert.equal(result.payload.text.includes(token), true);
+    } finally {
+      console.log = originalLog;
+    }
+
+    assert.equal(logged.some((entry) => entry.includes(token)), false);
+    assert.equal(logged.some((entry) => entry.includes('[decision-link-redacted]')), true);
+  });
 });

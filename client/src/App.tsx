@@ -9,6 +9,7 @@ import { TutorTimeOffPage } from './pages/tutor/TimeOffPage';
 import { AdminDashboardPage } from './pages/admin/Dashboard';
 import { ApprovalsPage } from './pages/admin/ApprovalsPage';
 import { PayPeriodSummaryPage } from './pages/admin/PayPeriodSummaryPage';
+import { EmailDecisionPage } from './pages/timeoff/EmailDecisionPage';
 import { AppShell, NavItem } from './components/layout/AppShell';
 import { WeeklyAttestationGate } from './components/tutor/WeeklyAttestationGate';
 import { useAuth } from './providers/AuthProvider';
@@ -47,6 +48,8 @@ function AdminLayout(): JSX.Element {
 function App(): JSX.Element {
   return (
     <Routes>
+      <Route path="/timeoff/decision" element={<EmailDecisionPage />} />
+
       <Route element={<PublicOnlyRoute />}>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/select-account" element={<SelectAccountPage />} />
