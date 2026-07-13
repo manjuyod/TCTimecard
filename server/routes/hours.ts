@@ -756,8 +756,11 @@ const loadAdminComparisonSummary = async (
 ): Promise<AdminComparisonSummaryResult> => {
   const payPeriod = await resolvePayPeriod(franchiseId, forDate);
   const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
-  const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-  const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+  const dayIds = approvedDays.map((day) => day.id);
+  const [sessionsByDay, breaksByDay] = await Promise.all([
+    fetchSessionsByDayIds(dayIds),
+    fetchBreaksByDayIds(getPostgresPool(), dayIds)
+  ]);
   const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay, breaksByDay);
   const loggedHoursByTutor = buildLoggedHoursByTutor(totalsByTutor);
   const crmHoursByTutor = await fetchReportedCrmHoursByTutor(franchiseId, payPeriod);
@@ -1041,8 +1044,11 @@ router.get(
       const { startAtUtcISO, endAtUtcISO } = localDateRangeToUtcBounds(startLocal, endLocal);
 
       const approvedDays = await fetchApprovedDaysForTutor(context.franchiseId, context.tutorId, startDate, endDate);
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+      const dayIds = approvedDays.map((day) => day.id);
+      const [sessionsByDay, breaksByDay] = await Promise.all([
+        fetchSessionsByDayIds(dayIds),
+        fetchBreaksByDayIds(getPostgresPool(), dayIds)
+      ]);
       const totals = computeRollupTotalsForDays(approvedDays, sessionsByDay, breaksByDay);
 
       const tutoringHoursRaw = totals.tutoringMinutes / 60;
@@ -1084,8 +1090,11 @@ router.get(
         payPeriod.startDate,
         payPeriod.endDate
       );
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+      const dayIds = approvedDays.map((day) => day.id);
+      const [sessionsByDay, breaksByDay] = await Promise.all([
+        fetchSessionsByDayIds(dayIds),
+        fetchBreaksByDayIds(getPostgresPool(), dayIds)
+      ]);
       const totals = computeRollupTotalsForDays(approvedDays, sessionsByDay, breaksByDay);
 
       const tutoringHoursRaw = totals.tutoringMinutes / 60;
@@ -1141,8 +1150,11 @@ router.get(
       const { startAtUtcISO, endAtUtcISO } = localDateRangeToUtcBounds(range.startLocal, range.endLocal);
 
       const approvedDays = await fetchApprovedDaysForTutor(context.franchiseId, context.tutorId, startDate, endDate);
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+      const dayIds = approvedDays.map((day) => day.id);
+      const [sessionsByDay, breaksByDay] = await Promise.all([
+        fetchSessionsByDayIds(dayIds),
+        fetchBreaksByDayIds(getPostgresPool(), dayIds)
+      ]);
       const totals = computeRollupTotalsForDays(approvedDays, sessionsByDay, breaksByDay);
 
       const tutoringHoursRaw = totals.tutoringMinutes / 60;
@@ -1359,8 +1371,11 @@ router.get(
       const payPeriod = await resolvePayPeriod(franchiseId, forDate);
 
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+      const dayIds = approvedDays.map((day) => day.id);
+      const [sessionsByDay, breaksByDay] = await Promise.all([
+        fetchSessionsByDayIds(dayIds),
+        fetchBreaksByDayIds(getPostgresPool(), dayIds)
+      ]);
       const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay, breaksByDay);
       const tutorIds = Array.from(totalsByTutor.keys());
       const namesById = await fetchTutorNamesByIds(tutorIds);
@@ -1394,8 +1409,11 @@ router.get(
       const payPeriod = await resolvePayPeriod(franchiseId, forDate);
 
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+      const dayIds = approvedDays.map((day) => day.id);
+      const [sessionsByDay, breaksByDay] = await Promise.all([
+        fetchSessionsByDayIds(dayIds),
+        fetchBreaksByDayIds(getPostgresPool(), dayIds)
+      ]);
       const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay, breaksByDay);
       const tutorIds = Array.from(totalsByTutor.keys());
       const namesById = await fetchTutorNamesByIds(tutorIds);
@@ -1434,8 +1452,11 @@ router.get(
     try {
       const payPeriod = await resolvePayPeriod(franchiseId, forDate);
       const approvedDays = await fetchApprovedDaysForTutor(franchiseId, tutorIdRaw, payPeriod.startDate, payPeriod.endDate);
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+      const dayIds = approvedDays.map((day) => day.id);
+      const [sessionsByDay, breaksByDay] = await Promise.all([
+        fetchSessionsByDayIds(dayIds),
+        fetchBreaksByDayIds(getPostgresPool(), dayIds)
+      ]);
       const loggedHoursByDate = buildLoggedHoursByDate(approvedDays, sessionsByDay, breaksByDay);
       const crmHoursByDate = await fetchReportedCrmHoursByDate(franchiseId, tutorIdRaw, payPeriod);
       const rows = buildAdminSummaryDetailRows(loggedHoursByDate, crmHoursByDate);
@@ -1486,12 +1507,17 @@ router.get(
         return;
       }
 
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+      const dayIds = approvedDays.map((day) => day.id);
+      const [sessionsByDay, breaksByDay] = await Promise.all([
+        fetchSessionsByDayIds(dayIds),
+        fetchBreaksByDayIds(getPostgresPool(), dayIds)
+      ]);
       const totalsByTutor = buildTutorTotalsByTutor(approvedDays, sessionsByDay, breaksByDay);
       const loggedHoursByTutor = buildLoggedHoursByTutor(totalsByTutor);
-      const crmHoursByTutor = await fetchReportedCrmHoursByTutor(franchiseId, payPeriod);
-      const crmHoursByTutorDate = await fetchReportedCrmHoursByTutorDate(franchiseId, payPeriod);
+      const [crmHoursByTutor, crmHoursByTutorDate] = await Promise.all([
+        fetchReportedCrmHoursByTutor(franchiseId, payPeriod),
+        fetchReportedCrmHoursByTutorDate(franchiseId, payPeriod)
+      ]);
       if (crmHoursByTutorDate.size > MAX_PAY_PERIOD_EXPORT_DETAIL_ROWS) {
         exportTooLarge(res);
         return;
@@ -1556,8 +1582,11 @@ router.get(
       const payPeriod = await resolvePayPeriod(franchiseId, forDate);
 
       const approvedDays = await fetchApprovedDaysForFranchise(franchiseId, payPeriod.startDate, payPeriod.endDate);
-      const sessionsByDay = await fetchSessionsByDayIds(approvedDays.map((day) => day.id));
-      const breaksByDay = await fetchBreaksByDayIds(getPostgresPool(), approvedDays.map((day) => day.id));
+      const dayIds = approvedDays.map((day) => day.id);
+      const [sessionsByDay, breaksByDay] = await Promise.all([
+        fetchSessionsByDayIds(dayIds),
+        fetchBreaksByDayIds(getPostgresPool(), dayIds)
+      ]);
       const namesById = await fetchTutorNamesByIds(approvedDays.map((day) => day.tutorid));
       const rows = buildAdminDailySummaryRows(approvedDays, sessionsByDay, breaksByDay, namesById);
 

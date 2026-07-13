@@ -85,8 +85,11 @@ const createPostgresPool = (args: {
   sessions: SessionRow[];
   breaks?: BreakRow[];
   queries?: string[];
+  assertConcurrentEntryReads?: boolean;
 }) => {
   const settingsByFranchise = new Map(args.settings.map((row) => [row.franchiseid, { ...row }]));
+  let sessionsStarted = false;
+  let breaksStarted = false;
 
   return {
     async query(sqlText: string, params: unknown[] = []): Promise<QueryResult> {
@@ -137,12 +140,22 @@ const createPostgresPool = (args: {
       }
 
       if (sqlText.includes('FROM public.time_entry_sessions')) {
+        sessionsStarted = true;
+        if (args.assertConcurrentEntryReads) {
+          await Promise.resolve();
+          assert.equal(breaksStarted, true, 'break query should start before session query resolves');
+        }
         const requestedIds = new Set(((params[0] as number[]) ?? []).map(Number));
         const rows = args.sessions.filter((row) => requestedIds.has(row.entry_day_id) && row.end_at !== null);
         return { rowCount: rows.length, rows };
       }
 
       if (sqlText.includes('FROM public.time_entry_breaks')) {
+        breaksStarted = true;
+        if (args.assertConcurrentEntryReads) {
+          await Promise.resolve();
+          assert.equal(sessionsStarted, true, 'session query should start before break query resolves');
+        }
         const requestedIds = new Set(((params[0] as number[]) ?? []).map(Number));
         const rows = (args.breaks ?? []).filter((row) => requestedIds.has(row.entry_day_id));
         return { rowCount: rows.length, rows };
@@ -156,8 +169,13 @@ const createPostgresPool = (args: {
 const createMssqlPool = (
   tutors: TutorNameRow[],
   calendarEntries: CalendarEntryRow[] = [],
-  crmEntries: CalendarEntryRow[] = []
-) => ({
+  crmEntries: CalendarEntryRow[] = [],
+  assertConcurrentCrmReads = false
+) => {
+  let crmSummaryStarted = false;
+  let crmDailyStarted = false;
+
+  return ({
   request() {
     const inputs = new Map<string, unknown>();
     return {
@@ -235,7 +253,16 @@ const createMssqlPool = (
             };
           }
 
-          if (sqlText.includes('GROUP BY ds.TutorID, ds.WorkDate')) {
+          const isDailyAggregate = sqlText.includes('GROUP BY ds.TutorID, ds.WorkDate');
+          if (assertConcurrentCrmReads) {
+            if (isDailyAggregate) crmDailyStarted = true;
+            else crmSummaryStarted = true;
+            await Promise.resolve();
+            assert.equal(crmSummaryStarted, true, 'CRM summary query should be in flight');
+            assert.equal(crmDailyStarted, true, 'CRM daily query should be in flight');
+          }
+
+          if (isDailyAggregate) {
             const grouped = new Map<string, number>();
             for (const row of deduped.values()) {
               grouped.set(`${row.tutorId}:${row.scheduleDate}`, (grouped.get(`${row.tutorId}:${row.scheduleDate}`) ?? 0) + 1);
@@ -272,7 +299,8 @@ const createMssqlPool = (
       }
     };
   }
-});
+  });
+};
 
 const createApp = (auth: SessionAuth) => {
   const now = new Date().toISOString();
@@ -367,7 +395,8 @@ test('admin daily summary groups by tutor-day, filters zero totals, and sorts by
         { entry_day_id: 2, start_at: '2026-02-03T18:00:00.000Z', end_at: '2026-02-03T19:00:00.000Z' },
         { entry_day_id: 3, start_at: '2026-02-02T16:00:00.000Z', end_at: '2026-02-02T17:00:00.000Z' },
         { entry_day_id: 4, start_at: '2026-02-03T20:00:00.000Z', end_at: '2026-02-03T21:30:00.000Z' }
-      ]
+      ],
+      assertConcurrentEntryReads: true
     }) as never
   );
   setMssqlPoolOverride(
@@ -779,7 +808,8 @@ test('pay-period export csv returns flat tutor-day rows with session pairs in fr
         { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 1, timeLabel: '10:00 AM' },
         { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-03', timeId: 2, timeLabel: '11:00 AM' },
         { franchiseId: 77, tutorId: 10, scheduleDate: '2026-02-04', timeId: 3, timeLabel: '12:00 PM' }
-      ]
+      ],
+      true
     ) as never
   );
 
