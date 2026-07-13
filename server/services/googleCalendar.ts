@@ -8,10 +8,12 @@ interface ServiceAccount {
   private_key: string;
 }
 
-const parseServiceAccount = (): ServiceAccount => {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+export const resolveCalendarServiceAccountCredentials = (
+  env: Record<string, string | undefined> = process.env
+): ServiceAccount => {
+  const raw = env.GOOGLE_CALENDAR_SERVICE_ACCOUNT_JSON;
   if (!raw || !raw.trim()) {
-    throw new Error('[google_calendar] GOOGLE_SERVICE_ACCOUNT_JSON is required for calendar actions');
+    throw new Error('[google_calendar] GOOGLE_CALENDAR_SERVICE_ACCOUNT_JSON is required for calendar actions');
   }
 
   let parsed: Record<string, unknown>;
@@ -40,6 +42,7 @@ const parseServiceAccount = (): ServiceAccount => {
 
 export interface CalendarClient {
   insertEvent: (calendarId: string, event: Record<string, unknown>) => Promise<{ id: string; htmlLink?: string }>;
+  getEvent: (calendarId: string, eventId: string) => Promise<Record<string, unknown>>;
 }
 
 export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient => {
@@ -48,7 +51,7 @@ export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient 
     throw new Error('Impersonation subject email is required for calendar actions');
   }
 
-  const creds = parseServiceAccount();
+  const creds = resolveCalendarServiceAccountCredentials();
   const jwt = new JWT({
     email: creds.client_email,
     key: creds.private_key,
@@ -88,13 +91,97 @@ export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient 
         (json as { error?: { message?: string } } | null)?.error?.message ||
         response.statusText ||
         'Unknown Google Calendar error';
-      throw new Error(`Google Calendar insert failed (${response.status}): ${message}`);
+      const error = new Error(`Google Calendar insert failed (${response.status}): ${message}`) as Error & {
+        status?: number;
+      };
+      error.status = response.status;
+      throw error;
     }
 
     return (json ?? {}) as { id: string; htmlLink?: string };
   };
 
-  return { insertEvent };
+  const getEvent = async (calendarId: string, eventId: string) => {
+    const tokens = await jwt.authorize();
+    const accessToken = tokens?.access_token;
+    if (!accessToken) throw new Error('Unable to acquire Google access token');
+    const response = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const text = await response.text();
+    const json = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+    if (!response.ok) throw new Error(`Google Calendar event lookup failed (${response.status})`);
+    return json;
+  };
+
+  return { insertEvent, getEvent };
+};
+
+export const buildDeterministicTimeOffEventId = (requestId: number): string => `tctimeoff${requestId.toString(32)}`;
+
+export const buildTimeOffCalendarEvent = (
+  request: import('../types/timeoff').TimeOffCalendarRequest,
+  decisionReason: string
+): Record<string, unknown> => {
+  const requesterName = `${request.firstName} ${request.lastName}`.trim() || `Request ${request.id}`;
+  const identity = request.tutorId
+    ? `Tutor ID: ${request.tutorId}`
+    : `Bridge profile ID: ${request.bridgeProfileId ?? 'unmapped'}`;
+  const description = [
+    `Requester: ${requesterName}`,
+    request.email ? `Email: ${request.email}` : null,
+    identity,
+    `Franchise ID: ${request.franchiseId}`,
+    `Type: ${request.type}`,
+    `Absence label: ${request.absenceLabel}`,
+    request.reason ? `Request reason: ${request.reason}` : null,
+    `Decision reason: ${decisionReason}`,
+    `Request ID: ${request.id}`
+  ].filter(Boolean);
+  const boundaries = request.partialDay
+    ? { start: { dateTime: request.startAt }, end: { dateTime: request.endAt } }
+    : {
+        start: { date: request.startDate },
+        end: { date: DateTime.fromISO(request.endDate).plus({ days: 1 }).toISODate() }
+      };
+
+  return {
+    id: buildDeterministicTimeOffEventId(request.id),
+    summary: `TIME OFF: ${requesterName} (${request.absenceLabel})`,
+    description: description.join('\n'),
+    ...boundaries,
+    extendedProperties: {
+      private: { timeOffRequestId: String(request.id), franchiseId: String(request.franchiseId) }
+    }
+  };
+};
+
+export const insertOrVerifyTimeOffEvent = async (
+  client: CalendarClient,
+  calendarId: string,
+  payload: Record<string, unknown>,
+  requestId: number,
+  franchiseId: number
+): Promise<string> => {
+  try {
+    const inserted = await client.insertEvent(calendarId, payload);
+    const insertedId = String(inserted.id ?? '').trim();
+    if (!insertedId) throw new Error('Google Calendar did not return an event id');
+    return insertedId;
+  } catch (error) {
+    if ((error as { status?: number }).status !== 409) throw error;
+    const eventId = buildDeterministicTimeOffEventId(requestId);
+    const existing = await client.getEvent(calendarId, eventId);
+    const properties = (existing.extendedProperties as { private?: Record<string, unknown> } | undefined)?.private;
+    if (
+      String(properties?.timeOffRequestId ?? '') !== String(requestId) ||
+      String(properties?.franchiseId ?? '') !== String(franchiseId)
+    ) {
+      throw new Error(`Existing Google Calendar event ${eventId} does not match time-off request ${requestId}`);
+    }
+    return String(existing.id ?? eventId);
+  }
 };
 
 export interface TimeOffForCalendar {

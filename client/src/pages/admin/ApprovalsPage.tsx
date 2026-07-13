@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import {
   AdminAttestationTutor,
@@ -8,6 +9,7 @@ import {
   TimeEntryBreakPayTreatment,
   TimeEntryBreakType,
   TimeOffRequest,
+  TimeOffNotificationFailure,
   adminCreateTimeEntryBreak,
   adminEditTimeEntryDay,
   adminUpdateTimeEntryBreak,
@@ -19,6 +21,9 @@ import {
   fetchAdminPendingExtraHours,
   fetchAdminPendingTimeEntries,
   fetchAdminPendingTimeOff,
+  fetchAdminTimeOffDetail,
+  fetchTimeOffNotificationFailures,
+  retryTimeOffNotification,
   fetchAdminAttestationTutors
 } from '../../lib/api';
 import { useAuth } from '../../providers/AuthProvider';
@@ -45,6 +50,7 @@ import {
 } from '../../components/ui/dialog';
 import { Textarea } from '../../components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
+import { parseAdminTimeOffDeepLink } from '../../lib/timeOff';
 
 type DenyContext =
   | { type: 'extra'; request: ExtraHoursRequest }
@@ -286,6 +292,7 @@ function AttestationExportCard({
 
 export function ApprovalsPage(): JSX.Element {
   const { session } = useAuth();
+  const location = useLocation();
   const sessionFranchiseId = getSessionFranchiseId(session);
   const selectorAllowed = isSelectorAllowed(session);
   const [activeTab, setActiveTab] = useState<'extra' | 'timeoff' | 'timeentry'>('timeentry');
@@ -297,6 +304,11 @@ export function ApprovalsPage(): JSX.Element {
     Array<ExtraHoursRequest & { tutorName?: string; tutorEmail?: string; tutorId?: number }>
   >([]);
   const [timeOffRequests, setTimeOffRequests] = useState<TimeOffRequest[]>([]);
+  const [timeOffFailures, setTimeOffFailures] = useState<TimeOffNotificationFailure[]>([]);
+  const [reviewedTimeOff, setReviewedTimeOff] = useState<TimeOffRequest | null>(null);
+  const [approveTimeOffDialog, setApproveTimeOffDialog] = useState<TimeOffRequest | null>(null);
+  const [retryingAuditId, setRetryingAuditId] = useState<number | null>(null);
+  const [handledDeepLink, setHandledDeepLink] = useState('');
   const [timeEntryDays, setTimeEntryDays] = useState<TimeEntryDay[]>([]);
   const [loadingExtra, setLoadingExtra] = useState(false);
   const [loadingTimeOff, setLoadingTimeOff] = useState(false);
@@ -365,8 +377,12 @@ export function ApprovalsPage(): JSX.Element {
     setLoadingTimeOff(true);
     setError(null);
     try {
-      const data = await fetchAdminPendingTimeOff(id, 300);
+      const [data, failures] = await Promise.all([
+        fetchAdminPendingTimeOff(id, 300),
+        fetchTimeOffNotificationFailures(id)
+      ]);
       setTimeOffRequests(data);
+      setTimeOffFailures(failures);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to load time off requests';
       setError(message);
@@ -398,6 +414,39 @@ export function ApprovalsPage(): JSX.Element {
       void loadTimeEntries(franchiseId);
     }
   }, [franchiseId]);
+
+  const timeOffDeepLink = useMemo(() => parseAdminTimeOffDeepLink(location.search), [location.search]);
+
+  useEffect(() => {
+    if (!timeOffDeepLink) return;
+    setActiveTab('timeoff');
+    if (selectorAllowed) {
+      setFranchiseInput(String(timeOffDeepLink.franchiseId));
+      setFranchiseId(timeOffDeepLink.franchiseId);
+    }
+  }, [selectorAllowed, timeOffDeepLink]);
+
+  useEffect(() => {
+    if (!timeOffDeepLink || franchiseId === null) return;
+    const key = `${location.pathname}${location.search}`;
+    if (handledDeepLink === key) return;
+    const effectiveFranchiseId = selectorAllowed ? timeOffDeepLink.franchiseId : franchiseId;
+    setHandledDeepLink(key);
+    void fetchAdminTimeOffDetail(effectiveFranchiseId, timeOffDeepLink.requestId)
+      .then((request) => {
+        setReviewedTimeOff(request);
+        if (request.status !== 'pending') {
+          toast.info(`Time-off request #${request.id} is already ${request.status}.`);
+          return;
+        }
+        if (timeOffDeepLink.action === 'approve') setApproveTimeOffDialog(request);
+        if (timeOffDeepLink.action === 'deny') {
+          setDenyDialog({ type: 'timeoff', request });
+          setDenyReason('');
+        }
+      })
+      .catch((err) => toast.error(err instanceof Error ? err.message : 'Unable to open time-off request'));
+  }, [franchiseId, handledDeepLink, location.pathname, location.search, selectorAllowed, timeOffDeepLink]);
 
   const handleApproveExtra = async (request: ExtraHoursRequest) => {
     if (franchiseId === null && sessionFranchiseId === null) {
@@ -450,13 +499,18 @@ export function ApprovalsPage(): JSX.Element {
         });
         setExtraRequests((prev) => prev.filter((item) => item.id !== denyDialog.request.id));
       } else if (denyDialog.type === 'timeoff') {
-        await decideTimeOff({
+        const result = await decideTimeOff({
           id: denyDialog.request.id,
           decision: 'deny',
           reason: denyReason.trim(),
           franchiseId: targetFranchiseId
         });
         setTimeOffRequests((prev) => prev.filter((item) => item.id !== denyDialog.request.id));
+        setReviewedTimeOff(result.request);
+        if (result.notification.status === 'failed') {
+          toast.warning(result.notification.warning);
+          void loadTimeOff(targetFranchiseId);
+        }
       } else {
         await decideTimeEntryDay({
           id: denyDialog.day.id,
@@ -491,18 +545,49 @@ export function ApprovalsPage(): JSX.Element {
         toast.error('Franchise ID required');
         return;
       }
-      await decideTimeOff({
+      const result = await decideTimeOff({
         id: request.id,
         decision: 'approve',
         franchiseId: targetFranchiseId
       });
       setTimeOffRequests((prev) => prev.filter((item) => item.id !== request.id));
-      toast.success('Time off approved');
+      setReviewedTimeOff(result.request);
+      setApproveTimeOffDialog(null);
+      if (result.notification.status === 'failed') {
+        toast.warning(result.notification.warning);
+        void loadTimeOff(targetFranchiseId);
+      }
+      else toast.success('Time off approved and the requester was notified');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to approve request';
       toast.error(message);
     } finally {
       setActingId(null);
+    }
+  };
+
+  const handleRetryTimeOffNotification = async (failure: TimeOffNotificationFailure) => {
+    const targetFranchiseId = franchiseId ?? sessionFranchiseId;
+    if (targetFranchiseId === null) {
+      toast.error('Franchise ID required');
+      return;
+    }
+    setRetryingAuditId(failure.auditId);
+    try {
+      const result = await retryTimeOffNotification({
+        id: failure.requestId,
+        kind: failure.kind,
+        franchiseId: targetFranchiseId
+      });
+      if (result.notification.status === 'failed') toast.error(result.notification.warning || 'Notification retry failed');
+      else {
+        setTimeOffFailures((previous) => previous.filter((item) => item.auditId !== failure.auditId));
+        toast.success('Notification sent');
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Unable to retry notification');
+    } finally {
+      setRetryingAuditId(null);
     }
   };
 
@@ -862,13 +947,14 @@ export function ApprovalsPage(): JSX.Element {
             <TableHead>Tutor</TableHead>
             <TableHead>Range</TableHead>
             <TableHead>Type</TableHead>
+            <TableHead>Source</TableHead>
             <TableHead>Notes</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {timeOffRequests.map((req) => (
-            <TableRow key={req.id}>
+            <TableRow key={req.id} className={reviewedTimeOff?.id === req.id ? 'bg-brand-blue/10' : undefined}>
               <TableCell>
                 <p className="font-semibold text-slate-900">{req.tutorName || `Tutor #${req.tutorId ?? ''}`}</p>
                 <p className="text-xs text-muted-foreground">{req.tutorEmail || 'Email unavailable'}</p>
@@ -879,7 +965,12 @@ export function ApprovalsPage(): JSX.Element {
               </TableCell>
               <TableCell>
                 <Badge variant="secondary" className="capitalize">
-                  {req.type}
+                  {req.absenceLabel || req.type}
+                </Badge>
+              </TableCell>
+              <TableCell>
+                <Badge variant={req.source === 'public' ? 'warning' : 'muted'}>
+                  {req.source === 'public' ? 'Public form' : 'Authenticated'}
                 </Badge>
               </TableCell>
               <TableCell className="text-sm text-slate-800">{req.notes || '—'}</TableCell>
@@ -887,7 +978,7 @@ export function ApprovalsPage(): JSX.Element {
                 <div className="flex justify-end gap-2">
                   <Button
                     size="sm"
-                    onClick={() => void handleApproveTimeOff(req)}
+                    onClick={() => setApproveTimeOffDialog(req)}
                     disabled={actingId === req.id}
                   >
                     {actingId === req.id ? 'Posting...' : 'Approve'}
@@ -909,7 +1000,7 @@ export function ApprovalsPage(): JSX.Element {
         </TableBody>
       </Table>
     );
-  }, [actingId, loadingTimeOff, timeOffRequests]);
+  }, [actingId, loadingTimeOff, reviewedTimeOff?.id, timeOffRequests]);
 
   const timeEntryContent = useMemo(() => {
     if (loadingTimeEntry) {
@@ -1083,6 +1174,51 @@ export function ApprovalsPage(): JSX.Element {
         </TabsContent>
 
         <TabsContent value="timeoff" className="mt-4">
+          <div className="space-y-4">
+          {reviewedTimeOff ? (
+            <Card className="border-brand-blue/30">
+              <CardHeader>
+                <CardTitle>Linked request #{reviewedTimeOff.id}</CardTitle>
+                <CardDescription>
+                  {reviewedTimeOff.tutorName || reviewedTimeOff.tutorEmail || 'Requester'} · {reviewedTimeOff.status}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-wrap items-center gap-2 text-sm">
+                <StatusBadge status={reviewedTimeOff.status} />
+                <Badge variant="secondary">{reviewedTimeOff.absenceLabel || reviewedTimeOff.type}</Badge>
+                <span>{formatDateRange(reviewedTimeOff.startAt, reviewedTimeOff.endAt)}</span>
+                {reviewedTimeOff.decisionReason ? <span>Reason: {reviewedTimeOff.decisionReason}</span> : null}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {timeOffFailures.length ? (
+            <Card className="border-amber-300">
+              <CardHeader>
+                <CardTitle>Notification failures</CardTitle>
+                <CardDescription>These saved requests or decisions need an email retry.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {timeOffFailures.map((failure) => (
+                  <div key={failure.auditId} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
+                    <div>
+                      <p className="font-semibold">Request #{failure.requestId} · {failure.kind.replace('_', ' ')}</p>
+                      <p className="text-xs text-muted-foreground">{failure.error || 'Notification provider error'}</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void handleRetryTimeOffNotification(failure)}
+                      disabled={retryingAuditId === failure.auditId}
+                    >
+                      {retryingAuditId === failure.auditId ? 'Retrying...' : 'Retry email'}
+                    </Button>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card>
             <CardHeader className="flex flex-row items-center justify-between gap-2">
               <div>
@@ -1093,8 +1229,36 @@ export function ApprovalsPage(): JSX.Element {
             </CardHeader>
             <CardContent>{timeOffContent}</CardContent>
           </Card>
+          </div>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={Boolean(approveTimeOffDialog)} onOpenChange={(open) => !open && setApproveTimeOffDialog(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Approve time off</DialogTitle>
+            <DialogDescription>
+              Confirm request #{approveTimeOffDialog?.id}. Approval creates the franchise Google Calendar event and emails the requester.
+            </DialogDescription>
+          </DialogHeader>
+          {approveTimeOffDialog ? (
+            <div className="rounded-lg border p-3 text-sm">
+              <p className="font-semibold">{approveTimeOffDialog.tutorName || approveTimeOffDialog.tutorEmail || 'Requester'}</p>
+              <p>{formatDateRange(approveTimeOffDialog.startAt, approveTimeOffDialog.endAt)}</p>
+              <p>{approveTimeOffDialog.absenceLabel || approveTimeOffDialog.type}</p>
+            </div>
+          ) : null}
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setApproveTimeOffDialog(null)}>Cancel</Button>
+            <Button
+              onClick={() => approveTimeOffDialog && void handleApproveTimeOff(approveTimeOffDialog)}
+              disabled={!approveTimeOffDialog || actingId === approveTimeOffDialog.id}
+            >
+              {approveTimeOffDialog && actingId === approveTimeOffDialog.id ? 'Posting...' : 'Approve and post'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={Boolean(denyDialog)} onOpenChange={(open) => !open && setDenyDialog(null)}>
         <DialogContent>

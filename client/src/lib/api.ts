@@ -48,14 +48,44 @@ export interface EmailDraft {
   adminReviewUrl: string;
 }
 
-export type TimeOffType = 'pto' | 'sick' | 'unpaid' | 'other';
+export type TimeOffType = 'pto' | 'sick' | 'emergency' | 'unpaid' | 'other';
+
+export interface TimeOffPolicy {
+  timezone: string;
+  today: string;
+  minimumStartDate: string;
+  noticeDays: 14;
+  exemptTypes: Array<'sick' | 'emergency'>;
+  allowedTypes: TimeOffType[];
+  maxDurationHours: number;
+}
+
+export interface TimeOffNotificationResult {
+  kind: 'admin_request' | 'requester_decision';
+  status: 'sent' | 'failed';
+  warning?: string;
+}
+
+export interface TimeOffNotificationFailure {
+  auditId: number;
+  requestId: number;
+  at: string;
+  kind: TimeOffNotificationResult['kind'];
+  recipient?: string;
+  error?: string;
+}
 
 export interface TimeOffRequest {
   id: number;
+  franchiseId?: number;
   startAt: string;
   endAt: string;
+  startDate?: string;
+  endDate?: string;
   type: TimeOffType;
+  absenceLabel?: string;
   notes: string | null;
+  reason?: string | null;
   status: RequestStatus;
   createdAt: string;
   decidedAt: string | null;
@@ -64,7 +94,13 @@ export interface TimeOffRequest {
   googleCalendarEventId?: string | null;
   tutorName?: string;
   tutorEmail?: string;
-  tutorId?: number;
+  tutorId?: number | null;
+  bridgeProfileId?: number | null;
+  partialDay?: boolean;
+  leaveTime?: string | null;
+  returnTime?: string | null;
+  source?: 'authenticated' | 'public';
+  durationHours?: number;
 }
 
 export interface PayPeriod {
@@ -358,12 +394,20 @@ export const fetchTimeOff = async (limit = 200): Promise<TimeOffRequest[]> => {
   return result.requests ?? [];
 };
 
+export const fetchTimeOffPolicy = async (): Promise<TimeOffPolicy> => {
+  const result = await apiFetch<{ policy: TimeOffPolicy }>('/api/timeoff/policy');
+  return result.policy;
+};
+
 export const submitTimeOff = async (payload: {
-  startAt: string;
-  endAt: string;
+  startDate: string;
+  endDate: string;
+  partialDay: boolean;
+  leaveTime?: string | null;
+  returnTime?: string | null;
   type: TimeOffType;
-  notes?: string | null;
-}): Promise<{ request: TimeOffRequest; emailDraft?: EmailDraft }> => {
+  reason: string;
+}): Promise<{ request: TimeOffRequest; notification: TimeOffNotificationResult }> => {
   return apiFetch('/api/timeoff', {
     method: 'POST',
     body: JSON.stringify(payload)
@@ -406,13 +450,38 @@ export const fetchAdminPendingTimeOff = async (franchiseId: number, limit = 200)
   return result.requests ?? [];
 };
 
+export const fetchAdminTimeOffDetail = async (franchiseId: number, requestId: number): Promise<TimeOffRequest> => {
+  const result = await apiFetch<{ request: TimeOffRequest }>(
+    `/api/timeoff/admin/${requestId}?franchiseId=${franchiseId}`
+  );
+  return result.request;
+};
+
+export const fetchTimeOffNotificationFailures = async (franchiseId: number): Promise<TimeOffNotificationFailure[]> => {
+  const result = await apiFetch<{ failures: TimeOffNotificationFailure[] }>(
+    `/api/timeoff/admin/notification-failures?franchiseId=${franchiseId}`
+  );
+  return result.failures ?? [];
+};
+
+export const retryTimeOffNotification = async (args: {
+  id: number;
+  kind: TimeOffNotificationResult['kind'];
+  franchiseId: number;
+}): Promise<{ request: TimeOffRequest; notification: TimeOffNotificationResult }> => {
+  return apiFetch(`/api/timeoff/${args.id}/notifications/${args.kind}/retry`, {
+    method: 'POST',
+    body: JSON.stringify({ franchiseId: args.franchiseId })
+  });
+};
+
 export const decideTimeOff = async (args: {
   id: number;
   decision: 'approve' | 'deny';
   reason?: string | null;
   franchiseId: number;
-}) => {
-  const result = await apiFetch<{ request: TimeOffRequest }>(`/api/timeoff/${args.id}/decide`, {
+}): Promise<{ request: TimeOffRequest; notification: TimeOffNotificationResult }> => {
+  return apiFetch<{ request: TimeOffRequest; notification: TimeOffNotificationResult }>(`/api/timeoff/${args.id}/decide`, {
     method: 'POST',
     body: JSON.stringify({
       decision: args.decision,
@@ -420,7 +489,6 @@ export const decideTimeOff = async (args: {
       franchiseId: args.franchiseId
     })
   });
-  return result.request;
 };
 
 export const fetchPayPeriodCurrent = async (franchiseId?: number | null) => {

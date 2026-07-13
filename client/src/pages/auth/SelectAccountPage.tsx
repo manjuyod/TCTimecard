@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -7,10 +7,13 @@ import { useAuth } from '../../providers/AuthProvider';
 import { SelectionAccount } from '../../lib/api';
 import { toast } from '../../components/ui/toast';
 import { InlineError } from '../../components/shared/InlineError';
+import { returnTarget } from '../../lib/timeOff';
 
 export function SelectAccountPage(): JSX.Element {
   const { selection, selectAccount, clearSelection } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const fromState = (location.state as { from?: Location } | null)?.from;
   const [error, setError] = useState<string | null>(null);
   const [submittingId, setSubmittingId] = useState<number | null>(null);
 
@@ -38,8 +41,13 @@ export function SelectAccountPage(): JSX.Element {
     try {
       const session = await selectAccount(selection.selectionToken, account);
       toast.success(`Signed in as ${session.displayName || account.label}`);
-      const home = session.accountType === 'ADMIN' ? '/admin/dashboard' : '/tutor/dashboard';
-      navigate(home, { replace: true });
+      const rolePath = session.accountType === 'ADMIN' ? '/admin' : '/tutor';
+      const destination = fromState?.pathname.startsWith(rolePath)
+        ? returnTarget(fromState)
+        : session.accountType === 'ADMIN'
+          ? '/admin/dashboard'
+          : '/tutor/dashboard';
+      navigate(destination, { replace: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to finish sign-in';
       setError(message);

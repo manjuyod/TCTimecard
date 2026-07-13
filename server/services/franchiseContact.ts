@@ -4,6 +4,7 @@ export interface FranchiseContact {
   id: number;
   name: string;
   email: string | null;
+  gmailId: string | null;
 }
 
 let franchiseNameColumn: string | null | undefined;
@@ -31,7 +32,7 @@ export const fetchFranchiseContact = async (franchiseId: number): Promise<Franch
 
   const selectName = nameColumn ? `, [${nameColumn}] AS FranchiseName` : '';
   const query = `
-    SELECT ID, FranchiesEmail${selectName}
+    SELECT ID, FranchiesEmail, GmailID${selectName}
     FROM dbo.tblFranchies
     WHERE ID = @franchiseId
   `;
@@ -39,16 +40,21 @@ export const fetchFranchiseContact = async (franchiseId: number): Promise<Franch
   const result = await request.query(query);
   if (!result.recordset?.length) return null;
 
-  const row = result.recordset[0] as Record<string, unknown>;
+  return mapFranchiseContactRow(franchiseId, result.recordset[0] as Record<string, unknown>);
+};
+
+export const mapFranchiseContactRow = (franchiseId: number, row: Record<string, unknown>): FranchiseContact => {
   const nameRaw = (row as Record<string, unknown>).FranchiseName;
   const name =
     typeof nameRaw === 'string' && nameRaw.trim() ? nameRaw.trim() : `Franchise ${franchiseId.toString()}`;
   const emailRaw = row.FranchiesEmail;
+  const gmailIdRaw = row.GmailID;
 
   return {
     id: franchiseId,
     name,
-    email: emailRaw !== undefined && emailRaw !== null ? String(emailRaw) : null
+    email: emailRaw !== undefined && emailRaw !== null && String(emailRaw).trim() ? String(emailRaw).trim() : null,
+    gmailId:
+      gmailIdRaw !== undefined && gmailIdRaw !== null && String(gmailIdRaw).trim() ? String(gmailIdRaw).trim() : null
   };
 };
-

@@ -8,6 +8,7 @@ import { Button } from '../../components/ui/button';
 import { InlineError } from '../../components/shared/InlineError';
 import { useAuth } from '../../providers/AuthProvider';
 import { toast } from '../../components/ui/toast';
+import { returnTarget } from '../../lib/timeOff';
 
 export function LoginPage(): JSX.Element {
   const navigate = useNavigate();
@@ -37,7 +38,7 @@ export function LoginPage(): JSX.Element {
 
       if (result.requiresSelection) {
         toast('Select which account to continue.');
-        navigate('/select-account', { replace: true });
+        navigate('/select-account', { replace: true, state: { from: fromState } });
         return;
       }
 
@@ -46,7 +47,7 @@ export function LoginPage(): JSX.Element {
           (fromState?.pathname &&
             ((result.session.accountType === 'ADMIN' && fromState.pathname.startsWith('/admin')) ||
               (result.session.accountType === 'TUTOR' && fromState.pathname.startsWith('/tutor'))))
-            ? fromState.pathname
+            ? returnTarget(fromState)
             : result.session.accountType === 'ADMIN'
               ? '/admin/dashboard'
               : '/tutor/dashboard';

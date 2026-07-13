@@ -129,16 +129,20 @@ Feature flags / guardrails
 - `MAX_TIME_OFF_DURATION_HOURS` (or `MAX_TIME_OFF_DURATION`) - max hours per time-off request (default `336`).
 - `ENFORCE_TIMEOFF_OVERLAP` - if `true`, rejects overlapping time off requests (default `false`).
 
-Email (optional)
-- `EMAIL_SEND_ENABLED` - if `false`, email payloads are logged instead of sent (default `false`).
+Email
+- `EMAIL_LOG_ONLY` - time-off Gmail DWD safety switch. Set explicitly to `false` to send; failures are recorded in `time_off_audit` for authenticated retry.
+- `GOOGLE_EMAIL_SERVICE_ACCOUNT_JSON` - dedicated Gmail DWD service-account JSON. No shared-service-account fallback is accepted.
+- Time-off emails impersonate the franchise `GmailID`; admin requests go to `FranchiesEmail` with `GmailID` as fallback.
+- `EMAIL_SEND_ENABLED` - independently controls the existing extra-hours SMTP path (default `false`).
 - `EMAIL_PROVIDER` - only `smtp` is supported currently.
 - `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_PASS`
 - `SMTP_FROM` (or `EMAIL_FROM`)
 - `DECISION_EMAIL_ENABLED` - if `true` and `EMAIL_SEND_ENABLED=true`, sends optional approval/denial emails (extra hours decision flow).
 
-Google Calendar (optional; used on time off approvals)
-- `GOOGLE_SERVICE_ACCOUNT_JSON` - JSON string for a service account with Domain-Wide Delegation enabled.
-  - Approval uses the franchise Gmail ID as both the impersonation subject and the `calendarId` for event inserts.
+Google Calendar (used on time off approvals)
+- `GOOGLE_CALENDAR_SERVICE_ACCOUNT_JSON` - dedicated Calendar DWD service-account JSON. No shared-service-account fallback is accepted.
+- Approval uses the franchise Gmail ID as both the impersonation subject and `calendarId`.
+- Full-day requests create true all-day events; partial-day requests use exact date-time boundaries.
 
 ## Database expectations
 This repo expects these Postgres tables to exist (DDL is captured in `specs/archive/AgentPrompts/02_postgres_schema.json`):
@@ -151,6 +155,11 @@ This repo expects these Postgres tables to exist (DDL is captured in `specs/arch
 - `public.time_entry_sessions`
 - `public.time_entry_audit`
 - `public.weekly_attestations`
+
+The shared Neon `time_off_requests` table must include the public-form compatibility columns for requester snapshots,
+`absence_label`, partial-day fields, bridge identity, and `public_metadata`. This app reuses that existing schema and does
+not create a separate time-off migration. Notification send/failure/retry state is appended to `time_off_audit.metadata`.
+Run `npm run db:check-timeoff-schema` for a read-only compatibility preflight before deployment.
 
 ### Postgres migrations
 - Run: `npm run db:migrate`
