@@ -13,7 +13,6 @@ import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
 import { computeTimeEntryComparisonV1 } from '../services/timeEntryComparison';
 import { resolveClockOutSubmission, shouldInvalidateClockDayStatus } from '../services/clockSubmission';
 import {
-  applyAutoLunchBreak,
   computeBreakMinuteTotals,
   fetchBreaksByDayIds,
   getDefaultPayTreatment,
@@ -91,8 +90,7 @@ const appendAudit = async (client: PoolClient, entry: {
     | 'invalidated'
     | 'admin_fixed'
     | 'break_started'
-    | 'break_ended'
-    | 'auto_break_applied';
+    | 'break_ended';
   actorAccountType: 'TUTOR' | 'ADMIN' | 'SYSTEM';
   actorAccountId: number | null;
   previousStatus: TimeEntryStatus | null;
@@ -1142,34 +1140,7 @@ router.post(
             startAt: new Date(session.start_at).toISOString(),
             endAt: session.end_at ? new Date(session.end_at).toISOString() : ''
           }));
-          let breaks = await fetchBreaksByDayId(client, day.id);
-          const autoBreak = await applyAutoLunchBreak({
-            client,
-            entryDayId: day.id,
-            franchiseId: context.franchiseId,
-            tutorId: context.tutorId,
-            sessions: (sessionResult.rows ?? []).map((session) => ({
-              id: session.id,
-              startAt: session.start_at,
-              endAt: session.end_at
-            })),
-            existingBreaks: breaks
-          });
-          if (autoBreak) {
-            breaks = [...breaks, autoBreak];
-            await appendAudit(client, {
-              dayId: day.id,
-              action: 'auto_break_applied',
-              actorAccountType: 'SYSTEM',
-              actorAccountId: null,
-              previousStatus: day.status,
-              newStatus: day.status,
-              metadata: {
-                workDate,
-                break: mapBreakRowToResponse(autoBreak)
-              }
-            });
-          }
+          const breaks = await fetchBreaksByDayId(client, day.id);
 
           const computed = computeTimeEntryComparisonV1({
             sessions: sessionPayload,

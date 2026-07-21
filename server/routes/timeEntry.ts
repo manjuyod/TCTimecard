@@ -14,7 +14,6 @@ import {
 import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
 import { computeTimeEntryComparisonV1, parseTimestamptzMinute, toEpochMinute } from '../services/timeEntryComparison';
 import {
-  applyAutoLunchBreak,
   computeBreakMinuteTotals,
   computeDurationMinutes,
   fetchBreaksByDayIds,
@@ -271,7 +270,6 @@ const appendAudit = async (client: PoolClient, entry: {
     | 'break_created'
     | 'break_updated'
     | 'break_voided'
-    | 'auto_break_applied'
     | 'auto_approved';
   actorAccountType: 'TUTOR' | 'ADMIN' | 'SYSTEM';
   actorAccountId: number | null;
@@ -978,27 +976,7 @@ router.post(
         }
 
         const sessions = await fetchSessionsByDayId(client, existing.id);
-        let breaks = await fetchBreaksByDayId(client, existing.id);
-        const autoBreak = await applyAutoLunchBreak({
-          client,
-          entryDayId: existing.id,
-          franchiseId: existing.franchiseid,
-          tutorId: existing.tutorid,
-          sessions: sessions.map((row) => ({ id: row.id, startAt: row.start_at, endAt: row.end_at })),
-          existingBreaks: breaks
-        });
-        if (autoBreak) {
-          breaks = [...breaks, autoBreak];
-          await appendAudit(client, {
-            dayId: existing.id,
-            action: 'auto_break_applied',
-            actorAccountType: 'SYSTEM',
-            actorAccountId: null,
-            previousStatus: existing.status,
-            newStatus: existing.status,
-            metadata: { workDate, break: mapBreakRowToResponse(autoBreak) }
-          });
-        }
+        const breaks = await fetchBreaksByDayId(client, existing.id);
 
         const sessionPayload = sessions.map((row) => ({
           startAt: new Date(row.start_at).toISOString(),

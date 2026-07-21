@@ -4,10 +4,8 @@ import {
   computeBreakMinuteTotals,
   computeDurationMinutes,
   getDefaultPayTreatment,
-  shouldApplyAutoLunchBreak,
   validateBreakWindow,
-  type TimeEntryBreakForTotals,
-  type TimeEntryBreakRule
+  type TimeEntryBreakForTotals
 } from '../services/timeEntryBreaks';
 
 const baseSession = {
@@ -93,54 +91,4 @@ test('validateBreakWindow: rejects overlapping breaks for same shift', () => {
 
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.error, /overlap/i);
-});
-
-test('shouldApplyAutoLunchBreak: applies once for long completed shift and skips manual lunch', () => {
-  const rule: TimeEntryBreakRule = {
-    breakRulesEnabled: true,
-    autoLunchEnabled: true,
-    autoLunchAfterMinutes: 360,
-    autoLunchDurationMinutes: 30,
-    autoLunchPayTreatment: 'unpaid',
-    autoLunchBreakType: 'lunch'
-  };
-
-  assert.equal(
-    shouldApplyAutoLunchBreak({
-      rule,
-      grossMinutes: 360,
-      existingBreaks: []
-    }),
-    true
-  );
-
-  assert.equal(
-    shouldApplyAutoLunchBreak({
-      rule,
-      grossMinutes: 480,
-      existingBreaks: [
-        {
-          breakType: 'lunch',
-          source: 'employee',
-          status: 'completed'
-        }
-      ]
-    }),
-    false
-  );
-
-  assert.equal(
-    shouldApplyAutoLunchBreak({
-      rule,
-      grossMinutes: 480,
-      existingBreaks: [
-        {
-          breakType: 'lunch',
-          source: 'auto_rule',
-          status: 'completed'
-        }
-      ]
-    }),
-    false
-  );
 });
