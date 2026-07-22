@@ -30,7 +30,7 @@ const emptyForm = (): TimeOffFormValue => ({
   partialDay: false,
   leaveTime: '',
   returnTime: '',
-  type: 'pto',
+  type: 'unpaid',
   reason: ''
 });
 
