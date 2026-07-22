@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import {
   parseAdminTimeOffDeepLink,
@@ -20,6 +21,14 @@ const policy = {
 };
 
 describe('time-off client helpers', () => {
+  it('defaults new tutor requests to unpaid time off', async () => {
+    const source = await readFile(new URL('../src/pages/tutor/TimeOffPage.tsx', import.meta.url), 'utf8');
+    const initializer = source.match(/const emptyForm = \(\): TimeOffFormValue => \(\{[\s\S]*?\n\}\);/)?.[0];
+
+    assert.ok(initializer, 'Expected the tutor time-off form initializer to exist.');
+    assert.match(initializer, /type:\s*'unpaid'/);
+  });
+
   it('parses a fragment-only email decision token and action', () => {
     const token = 'A'.repeat(43);
     assert.deepEqual(parseEmailDecisionFragment(`#token=${token}&action=deny`), {
