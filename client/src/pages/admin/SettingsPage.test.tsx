@@ -21,20 +21,26 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-const installSettingsFetch = () => {
+const installSettingsFetch = ({
+  autoClockOutEnabled = false,
+  payPeriodType = 'biweekly'
+}: {
+  autoClockOutEnabled?: boolean;
+  payPeriodType?: 'weekly' | 'biweekly';
+} = {}) => {
   const calls: Array<{ path: string; init?: RequestInit }> = [];
   globalThis.fetch = async (input, init) => {
     const path = String(input);
     calls.push({ path, init });
     if (path.startsWith('/api/admin/settings')) {
       return new Response(JSON.stringify({
-        settings: { franchiseId: 77, autoClockOutEnabled: false }
+        settings: { franchiseId: 77, autoClockOutEnabled }
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (path.startsWith('/api/pay-period/settings')) {
       return new Response(JSON.stringify({ settings: {
         franchiseId: 77, timezone: 'America/Los_Angeles',
-        payPeriodType: 'biweekly', customPeriod1StartDay: null,
+        payPeriodType, customPeriod1StartDay: null,
         customPeriod1EndDay: null, customPeriod2StartDay: null,
         customPeriod2EndDay: null
       } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -45,6 +51,24 @@ const installSettingsFetch = () => {
 };
 
 describe('admin settings page', () => {
+  it('loads persisted settings for the selected franchise before saving', async () => {
+    const calls = installSettingsFetch({ autoClockOutEnabled: true, payPeriodType: 'weekly' });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    await waitFor(() => {
+      expect(calls.filter((call) => call.init?.method === undefined)).toHaveLength(2);
+      expect(screen.getByRole('switch', { name: /auto clock-out/i })).toBeChecked();
+      expect(screen.getByRole('combobox')).toHaveTextContent('Weekly');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /save automatic timekeeping/i }));
+    await waitFor(() => expect(calls.some((call) => call.init?.method === 'PATCH')).toBe(true));
+    expect(JSON.parse(String(calls.find((call) => call.init?.method === 'PATCH')?.init?.body))).toEqual({
+      franchiseId: 1,
+      autoClockOutEnabled: true
+    });
+  });
+
   it('loads and saves the franchise-wide auto clock-out switch', async () => {
     const calls = installSettingsFetch();
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);

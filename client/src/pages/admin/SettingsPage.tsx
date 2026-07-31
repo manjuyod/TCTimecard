@@ -141,7 +141,7 @@ export function SettingsPage(): JSX.Element {
       if (sessionFranchiseId !== null) void load(sessionFranchiseId);
       return;
     }
-    if (!franchiseIdInput && sessionFranchiseId !== null) {
+    if (sessionFranchiseId !== null) {
       setFranchiseIdInput(String(sessionFranchiseId));
       void load(sessionFranchiseId);
     }
