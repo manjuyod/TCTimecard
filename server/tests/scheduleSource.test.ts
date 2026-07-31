@@ -70,3 +70,28 @@ test('split blocks remain separate and expose the final end', async () => {
     '2026-07-31T20:00:00.000-07:00'
   ]);
 });
+
+test('malformed explicit ranges do not create authoritative intervals', async () => {
+  setMssqlPoolOverride({
+    request: () => ({
+      input() { return this; },
+      async query() {
+        return { recordset: [
+          { FranchiseID: 77, TutorID: 5, WorkDate: new Date('2026-07-31T00:00:00Z'),
+            TimeID: 1, TimeLabel: '3:00 PM - nonsense' }
+        ] };
+      }
+    })
+  } as never);
+  const candidate = {
+    franchiseId: 77, tutorId: 5, workDate: '2026-07-31',
+    timezone: 'America/Los_Angeles'
+  };
+
+  const snapshots = await fetchLatestScheduleSnapshots(
+    [candidate],
+    new Date('2026-07-31T19:00:00Z')
+  );
+
+  assert.deepEqual(snapshots.get(scheduleCandidateKey(candidate))?.intervals, []);
+});

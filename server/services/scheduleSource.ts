@@ -55,6 +55,18 @@ const scheduleNumber = (value: unknown): number => {
   return Number.isFinite(number) ? number : 0;
 };
 
+const hasValidExplicitRange = (timeLabel: string, timezone: string): boolean => {
+  const normalizedLabel = timeLabel.replace(/[–—]/g, '-').trim();
+  const parts = normalizedLabel.split(/\s*-\s*/);
+  if (parts.length === 1) return true;
+  if (parts.length !== 2) return false;
+
+  const formats = ['h:mm a', 'h:mma', 'h a', 'ha', 'H:mm', 'HH:mm', 'H:mm:ss', 'HH:mm:ss'];
+  return parts.every((part) =>
+    formats.some((format) => DateTime.fromFormat(part, format, { zone: timezone, setZone: true }).isValid)
+  );
+};
+
 export const fetchCalendarEntries = async (
   tutorId: number,
   monthStartISO: string,
@@ -161,6 +173,7 @@ ORDER BY requested.FranchiseID, requested.TutorID, schedule.TimeID;
 
   for (const [key, candidate] of uniqueCandidates) {
     const entries = entriesByCandidate.get(key) ?? [];
+    const intervalEntries = entries.filter((entry) => hasValidExplicitRange(entry.timeLabel, candidate.timezone));
     const baseSnapshot: ScheduleSnapshotV1 = {
       version: 1,
       franchiseId: candidate.franchiseId,
@@ -173,7 +186,7 @@ ORDER BY requested.FranchiseID, requested.TutorID, schedule.TimeID;
         workDate: candidate.workDate,
         timezone: candidate.timezone,
         slotMinutes,
-        entries
+        entries: intervalEntries
       }),
       issuedAt: issuedAtISO
     };
