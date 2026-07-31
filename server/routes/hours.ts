@@ -15,7 +15,6 @@ import {
 import {
   deriveIntervalsFromEntries,
   getScheduleSlotMinutes,
-  normalizeScheduleTimeLabel,
   getScheduleSnapshotSigningSecret,
   signScheduleSnapshot,
   type ScheduleSnapshotEntry,
@@ -25,25 +24,9 @@ import { fetchBreaksByDayIds, type TimeEntryBreakRow } from '../services/timeEnt
 import { exportConcurrencyGuard, rejectBusyExport } from '../services/exportConcurrency';
 import { createInFlightCoalescer } from '../services/inFlightCoalescer';
 import { computeTimeAllocation } from '../services/timeAllocation';
+import { fetchCalendarEntries } from '../services/scheduleSource';
 
 const router = express.Router();
-
-const CALENDAR_MONTH_SQL = `
-DECLARE @MonthStart DATE = @p_month_start;
-DECLARE @NextMonthStart DATE = @p_next_month_start;
-
-SELECT
-    s.ScheduleDate,
-    s.TimeID,
-    t.Time AS TimeLabel
-FROM dbo.tblSessionSchedule s
-JOIN dbo.tblTimes t ON s.TimeID = t.ID
-WHERE s.TutorID = @p_tutor_id
-  AND s.ScheduleDate >= @MonthStart
-  AND s.ScheduleDate <  @NextMonthStart
-GROUP BY s.ScheduleDate, s.TimeID, t.Time
-ORDER BY s.ScheduleDate ASC, s.TimeID ASC;
-`;
 
 const CRM_PAY_PERIOD_SUMMARY_SQL = `
 DECLARE @PeriodStart DATE = @p_period_start;
@@ -477,34 +460,6 @@ const formatDateOnly = (value: unknown): string | null => {
   }
 
   return null;
-};
-
-const fetchCalendarEntries = async (
-  tutorId: number,
-  monthStartISO: string,
-  nextMonthStartISO: string
-): Promise<Array<{ scheduleDate: string; timeId: number; timeLabel: string }>> => {
-  const pool = await getMssqlPool();
-  const request = pool.request();
-  request.input('p_month_start', sql.Date, monthStartISO);
-  request.input('p_next_month_start', sql.Date, nextMonthStartISO);
-  request.input('p_tutor_id', sql.Int, tutorId);
-
-  const result = await request.query(CALENDAR_MONTH_SQL);
-  const entries: Array<{ scheduleDate: string; timeId: number; timeLabel: string }> = [];
-
-  for (const row of result.recordset ?? []) {
-    const scheduleDate = formatMssqlDate((row as Record<string, unknown>).ScheduleDate);
-    if (!scheduleDate) continue;
-
-    const timeId = toNumber((row as Record<string, unknown>).TimeID);
-    const timeLabelRaw = (row as Record<string, unknown>).TimeLabel;
-    const timeLabel = normalizeScheduleTimeLabel(timeLabelRaw);
-
-    entries.push({ scheduleDate, timeId, timeLabel });
-  }
-
-  return entries;
 };
 
 type TutorName = { firstName: string; lastName: string };

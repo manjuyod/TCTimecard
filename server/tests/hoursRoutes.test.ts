@@ -1115,6 +1115,7 @@ test('calendar day snapshot normalizes MSSQL time values into usable intervals',
       };
     };
 
+    assert.deepEqual(Object.keys(body), ['snapshot']);
     assert.deepEqual(body.snapshot.entries, [
       { timeId: 3, timeLabel: '10:00 AM' },
       { timeId: 5, timeLabel: '11:00 AM' }
@@ -1131,5 +1132,41 @@ test('calendar day snapshot normalizes MSSQL time values into usable intervals',
     ]);
     assert.equal(queries.filter((sqlText) => sqlText.includes('FROM franchise_payroll_settings')).length, 1);
     assert.equal(queries.filter((sqlText) => sqlText.includes('FROM franchise_pay_period_overrides')).length, 0);
+  });
+});
+
+test('calendar month preserves its range, entries, and snapshots response keys', async () => {
+  setPostgresPoolOverride(createPostgresPool({ settings: [], approvedDays: [], sessions: [] }) as never);
+  setMssqlPoolOverride(
+    createMssqlPool([], [
+      {
+        tutorId: 3228,
+        scheduleDate: new Date('2026-03-07T00:00:00.000Z'),
+        timeId: 3,
+        timeLabel: '10:00 AM - 11:00 AM'
+      }
+    ]) as never
+  );
+
+  const app = createApp({ accountType: 'TUTOR', accountId: 3228, franchiseId: 87, displayName: 'Tutor User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/calendar/me/month?month=2026-03`);
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      range: { month: string; startDate: string; endDate: string; timezone: string };
+      entries: Array<{ scheduleDate: string; timeId: number; timeLabel: string }>;
+      snapshotsByDate: Record<string, { entries: Array<{ timeId: number; timeLabel: string }> }>;
+    };
+
+    assert.deepEqual(Object.keys(body).sort(), ['entries', 'range', 'snapshotsByDate']);
+    assert.deepEqual(Object.keys(body.range).sort(), ['endDate', 'month', 'startDate', 'timezone']);
+    assert.deepEqual(body.entries, [
+      { scheduleDate: '2026-03-07', timeId: 3, timeLabel: '10:00 AM - 11:00 AM' }
+    ]);
+    assert.deepEqual(body.snapshotsByDate['2026-03-07']?.entries, [
+      { timeId: 3, timeLabel: '10:00 AM - 11:00 AM' }
+    ]);
   });
 });
