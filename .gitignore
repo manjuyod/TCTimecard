@@ -17,6 +17,7 @@ Thumbs.db
 specs/
 specs/*
 .gitnexus
+.worktrees/
 .claude/
 AGENTS.md
 CLAUDE.md
