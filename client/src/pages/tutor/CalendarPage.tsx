@@ -224,9 +224,10 @@ export function TutorCalendarPage(): JSX.Element {
     return { ok: true, sessions: sorted.map((s) => ({ startAt: s.startAt, endAt: s.endAt })) };
   };
 
-  const handleSave = async () => {
+  const handlePrepareSubmit = async () => {
     if (!entryDate) return;
-    const current = findDay(entryDate);
+    const workDate = entryDate;
+    const current = findDay(workDate);
     if (current?.status === 'approved') {
       const confirmed = window.confirm('This day is approved. Editing will reset it to pending and require re-approval. Continue?');
       if (!confirmed) return;
@@ -240,9 +241,10 @@ export function TutorCalendarPage(): JSX.Element {
 
     setEntrySaving(true);
     try {
-      const saved = await saveTimeEntryDay({ workDate: entryDate, sessions: payload.sessions });
+      const saved = await saveTimeEntryDay({ workDate, sessions: payload.sessions });
       updateDay(saved);
-      toast.success('Saved.');
+      setSubmitReviewAck(false);
+      setSubmitReviewOpen(true);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         requestOpenWeeklyAttestation();
@@ -254,7 +256,7 @@ export function TutorCalendarPage(): JSX.Element {
     }
   };
 
-  const handleSubmit = async () => {
+  const handleConfirmSubmit = async () => {
     if (!entryDate) return;
     const current = findDay(entryDate);
     if (!current) {
@@ -392,6 +394,7 @@ export function TutorCalendarPage(): JSX.Element {
   const activeSnapshot = entryDate ? snapshotsByDate[entryDate] : null;
   const activeSnapshotIntervals = parseSnapshotIntervals(activeSnapshot);
   const activeComparison = parseTimeEntryComparison(activeDay?.comparison);
+  const entryBusy = entrySaving || entrySubmitting;
 
   return (
     <div className="space-y-4">
@@ -454,7 +457,12 @@ export function TutorCalendarPage(): JSX.Element {
         </CardContent>
       </Card>
 
-      <Dialog open={Boolean(entryDate)} onOpenChange={(open) => !open && setEntryDate(null)}>
+      <Dialog
+        open={Boolean(entryDate)}
+        onOpenChange={(open) => {
+          if (!open && !entryBusy) setEntryDate(null);
+        }}
+      >
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{entryDateLabel ? `Time Entry – ${entryDateLabel}` : 'Time Entry'}</DialogTitle>
@@ -488,6 +496,7 @@ export function TutorCalendarPage(): JSX.Element {
                 <Button
                   variant="outline"
                   onClick={() => setEntryDraftSessions((prev) => [...prev, { start: '', end: '' }])}
+                  disabled={entryBusy}
                 >
                   Add segment
                 </Button>
@@ -505,6 +514,7 @@ export function TutorCalendarPage(): JSX.Element {
                       }))
                     );
                   }}
+                  disabled={entryBusy}
                 >
                   Copy schedule
                 </Button>
@@ -552,6 +562,7 @@ export function TutorCalendarPage(): JSX.Element {
                     <Input
                       type="time"
                       value={row.start}
+                      disabled={entryBusy}
                       onChange={(e) =>
                         setEntryDraftSessions((prev) => prev.map((s, i) => (i === idx ? { ...s, start: e.target.value } : s)))
                       }
@@ -562,6 +573,7 @@ export function TutorCalendarPage(): JSX.Element {
                     <Input
                       type="time"
                       value={row.end}
+                      disabled={entryBusy}
                       onChange={(e) =>
                         setEntryDraftSessions((prev) => prev.map((s, i) => (i === idx ? { ...s, end: e.target.value } : s)))
                       }
@@ -570,7 +582,7 @@ export function TutorCalendarPage(): JSX.Element {
                   <Button
                     variant="outline"
                     onClick={() => setEntryDraftSessions((prev) => prev.filter((_, i) => i !== idx))}
-                    disabled={entryDraftSessions.length <= 1}
+                    disabled={entryBusy || entryDraftSessions.length <= 1}
                   >
                     Remove
                   </Button>
@@ -689,24 +701,22 @@ export function TutorCalendarPage(): JSX.Element {
             ) : null}
 
             <div className="flex flex-wrap justify-end gap-2">
-              <Button variant="outline" onClick={() => void handleSave()} disabled={entrySaving || entrySubmitting}>
-                {entrySaving ? 'Saving…' : 'Save'}
-              </Button>
-              <Button
-                onClick={() => {
-                  setSubmitReviewOpen(true);
-                  setSubmitReviewAck(false);
-                }}
-                disabled={entrySubmitting || !activeDay}
-              >
-                Submit
+              <Button onClick={() => void handlePrepareSubmit()} disabled={entryBusy}>
+                {entrySaving ? 'Saving…' : 'Submit'}
               </Button>
             </div>
           </div>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={submitReviewOpen} onOpenChange={setSubmitReviewOpen}>
+      <Dialog
+        open={submitReviewOpen}
+        onOpenChange={(open) => {
+          if (entrySubmitting) return;
+          setSubmitReviewOpen(open);
+          if (!open) setSubmitReviewAck(false);
+        }}
+      >
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Before you submit</DialogTitle>
@@ -734,6 +744,7 @@ export function TutorCalendarPage(): JSX.Element {
                 id="submitAck"
                 type="checkbox"
                 checked={submitReviewAck}
+                disabled={entrySubmitting}
                 onChange={(e) => setSubmitReviewAck(e.target.checked)}
               />
               <Label htmlFor="submitAck" className="text-sm font-medium">
@@ -743,10 +754,17 @@ export function TutorCalendarPage(): JSX.Element {
           </div>
 
           <div className="flex flex-wrap justify-end gap-2">
-            <Button variant="outline" onClick={() => setSubmitReviewOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSubmitReviewOpen(false);
+                setSubmitReviewAck(false);
+              }}
+              disabled={entrySubmitting}
+            >
               Cancel
             </Button>
-            <Button onClick={() => void handleSubmit()} disabled={!submitReviewAck || entrySubmitting}>
+            <Button onClick={() => void handleConfirmSubmit()} disabled={!submitReviewAck || entrySubmitting}>
               {entrySubmitting ? 'Submitting…' : 'Submit for approval'}
             </Button>
           </div>
