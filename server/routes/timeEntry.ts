@@ -12,9 +12,8 @@ import {
   verifyScheduleSnapshot
 } from '../services/scheduleSnapshot';
 import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
-import { computeTimeEntryComparisonV1, parseTimestamptzMinute, toEpochMinute } from '../services/timeEntryComparison';
+import { computeTimeEntryComparisonV2, parseTimestamptzMinute, toEpochMinute } from '../services/timeEntryComparison';
 import {
-  computeBreakMinuteTotals,
   computeDurationMinutes,
   fetchBreaksByDayIds,
   getDefaultPayTreatment,
@@ -27,6 +26,7 @@ import {
   type TimeEntryBreakRow,
   type TimeEntrySessionWindow
 } from '../services/timeEntryBreaks';
+import { computeTimeAllocation } from '../services/timeAllocation';
 
 type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
 
@@ -229,25 +229,39 @@ const fetchSessionsByDayId = async (client: PoolClient, dayId: number): Promise<
 };
 
 const buildBreakSummary = (sessions: TimeEntrySessionRow[], breaks: TimeEntryBreakRow[]) => {
-  const grossMinutes = sessions.reduce((total, row) => {
-    const startMinute = toEpochMinute(new Date(row.start_at).toISOString());
-    const endMinute = toEpochMinute(new Date(row.end_at).toISOString());
-    if (startMinute === null || endMinute === null || endMinute <= startMinute) return total;
-    return total + endMinute - startMinute;
-  }, 0);
-  const { paidBreakMinutes, unpaidBreakMinutes } = computeBreakMinuteTotals(
-    breaks.map((row) => ({
+  const result = computeTimeAllocation({
+    sessions: sessions.map((row) => ({
+      startAt: row.start_at,
+      endAt: row.end_at
+    })),
+    scheduleIntervals: [],
+    breaks: breaks.map((row) => ({
       payTreatment: row.pay_treatment,
       status: row.status,
+      startTime: row.start_time,
+      endTime: row.end_time,
       durationMinutes: Number(row.duration_minutes)
     }))
-  );
+  });
+
+  if (!result.ok) {
+    return {
+      grossMinutes: 0,
+      paidBreakMinutes: 0,
+      unpaidBreakMinutes: 0,
+      paidMinutes: 0,
+      outsideSessionBreakMinutes: 0,
+      unpositionedBreakMinutes: 0
+    };
+  }
 
   return {
-    grossMinutes,
-    paidBreakMinutes,
-    unpaidBreakMinutes,
-    paidMinutes: Math.max(0, grossMinutes - unpaidBreakMinutes)
+    grossMinutes: result.allocation.manual.grossMinutes,
+    paidBreakMinutes: result.allocation.manual.paidBreakMinutes,
+    unpaidBreakMinutes: result.allocation.manual.unpaidBreakMinutes,
+    paidMinutes: result.allocation.manual.paidMinutes,
+    outsideSessionBreakMinutes: result.allocation.breaks.outsideSessionMinutes,
+    unpositionedBreakMinutes: result.allocation.breaks.unpositionedMinutes
   };
 };
 
@@ -295,6 +309,32 @@ const appendAudit = async (client: PoolClient, entry: {
   );
 };
 
+const computeComparisonForDay = (
+  day: Pick<TimeEntryDayRow, 'schedule_snapshot'>,
+  sessions: TimeEntrySessionRow[],
+  breaks: TimeEntryBreakRow[]
+) => {
+  const snapshot = parseScheduleSnapshotV1(day.schedule_snapshot);
+  if (!snapshot) return null;
+
+  const computed = computeTimeEntryComparisonV2({
+    sessions: sessions.map((row) => ({
+      startAt: row.start_at,
+      endAt: row.end_at
+    })),
+    breaks: breaks.map((row) => ({
+      payTreatment: row.pay_treatment,
+      status: row.status,
+      startTime: row.start_time,
+      endTime: row.end_time,
+      durationMinutes: Number(row.duration_minutes)
+    })),
+    snapshotIntervals: snapshot.intervals
+  });
+
+  return computed.ok ? computed.comparison : null;
+};
+
 const mapDayRowToResponse = (
   day: TimeEntryDayRow,
   sessions: TimeEntrySessionRow[],
@@ -307,7 +347,7 @@ const mapDayRowToResponse = (
   timezone: day.timezone,
   status: day.status,
   scheduleSnapshot: day.schedule_snapshot,
-  comparison: day.comparison,
+  comparison: computeComparisonForDay(day, sessions, breaks) ?? day.comparison,
   submittedAt: day.submitted_at ? new Date(day.submitted_at).toISOString() : null,
   decidedBy: day.decided_by,
   decidedAt: day.decided_at ? new Date(day.decided_at).toISOString() : null,
@@ -524,7 +564,7 @@ const updateDayAfterBreakMutation = async (
   const snapshot = parseScheduleSnapshotV1(day.schedule_snapshot);
   let comparison = day.comparison;
   if (snapshot) {
-    const computed = computeTimeEntryComparisonV1({
+    const computed = computeTimeEntryComparisonV2({
       sessions: sessions.map((row) => ({
         startAt: new Date(row.start_at).toISOString(),
         endAt: new Date(row.end_at).toISOString()
@@ -532,6 +572,8 @@ const updateDayAfterBreakMutation = async (
       breaks: breaks.map((row) => ({
         payTreatment: row.pay_treatment,
         status: row.status,
+        startTime: row.start_time,
+        endTime: row.end_time,
         durationMinutes: Number(row.duration_minutes)
       })),
       snapshotIntervals: snapshot.intervals
@@ -764,6 +806,7 @@ router.put(
 
         const existing = await fetchDayByWorkDate(client, context.franchiseId, context.tutorId, workDate);
         const previousSessions = existing ? await fetchSessionsByDayId(client, existing.id) : [];
+        const existingBreaks = existing ? await fetchBreaksByDayId(client, existing.id) : [];
 
         let day: TimeEntryDayRow;
         let newStatus: TimeEntryStatus = existing?.status ?? 'draft';
@@ -780,8 +823,15 @@ router.put(
         if (existing && newStatus === 'pending' && existing.schedule_snapshot) {
           const snapshot = parseScheduleSnapshotV1(existing.schedule_snapshot);
           if (snapshot) {
-            const computed = computeTimeEntryComparisonV1({
+            const computed = computeTimeEntryComparisonV2({
               sessions: normalizedSessions.map((s) => ({ startAt: s.startAt, endAt: s.endAt })),
+              breaks: existingBreaks.map((row) => ({
+                payTreatment: row.pay_treatment,
+                status: row.status,
+                startTime: row.start_time,
+                endTime: row.end_time,
+                durationMinutes: Number(row.duration_minutes)
+              })),
               snapshotIntervals: snapshot.intervals
             });
             if (computed.ok) {
@@ -983,11 +1033,13 @@ router.post(
           endAt: new Date(row.end_at).toISOString()
         }));
 
-        const computed = computeTimeEntryComparisonV1({
+        const computed = computeTimeEntryComparisonV2({
           sessions: sessionPayload,
           breaks: breaks.map((row) => ({
             payTreatment: row.pay_treatment,
             status: row.status,
+            startTime: row.start_time,
+            endTime: row.end_time,
             durationMinutes: Number(row.duration_minutes)
           })),
           snapshotIntervals: snapshot.intervals
@@ -1009,7 +1061,7 @@ router.post(
 
         const nextStatus: TimeEntryStatus = matches ? 'approved' : 'pending';
         const decidedAt = matches ? new Date().toISOString() : null;
-        const decisionReason = matches ? 'auto-approved (matching scheduled minutes)' : null;
+        const decisionReason = matches ? 'auto-approved (complete scheduled coverage with no payable extra time)' : null;
 
         const updated = await client.query<TimeEntryDayRow>(
           `
@@ -2047,13 +2099,21 @@ router.put(
         }
 
         const previousSessions = await fetchSessionsByDayId(client, existingDay.id);
+        const existingBreaks = await fetchBreaksByDayId(client, existingDay.id);
 
         const snapshot = parseScheduleSnapshotV1(existingDay.schedule_snapshot);
 
         let comparison: unknown | null = existingDay.comparison;
         if (snapshot) {
-          const computed = computeTimeEntryComparisonV1({
+          const computed = computeTimeEntryComparisonV2({
             sessions: normalizedSessions.map((s) => ({ startAt: s.startAt, endAt: s.endAt })),
+            breaks: existingBreaks.map((row) => ({
+              payTreatment: row.pay_treatment,
+              status: row.status,
+              startTime: row.start_time,
+              endTime: row.end_time,
+              durationMinutes: Number(row.duration_minutes)
+            })),
             snapshotIntervals: snapshot.intervals
           });
           if (computed.ok) {

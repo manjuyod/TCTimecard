@@ -529,7 +529,7 @@ test('admin pay-period summary merges CRM and logged hours across tutor unions',
   });
 });
 
-test('admin pay-period summary deducts completed unpaid breaks but not paid breaks', async () => {
+test('admin pay-period summary deducts only completed unpaid break overlap with recorded sessions', async () => {
   setPostgresPoolOverride(
     createPostgresPool({
       settings: [
@@ -593,6 +593,26 @@ test('admin pay-period summary deducts completed unpaid breaks but not paid brea
           source: 'manager',
           status: 'voided',
           duration_minutes: 45
+        },
+        {
+          entry_day_id: 501,
+          break_type: 'other',
+          pay_treatment: 'unpaid',
+          source: 'manager',
+          status: 'completed',
+          start_time: '2026-02-03T16:00:00.000Z',
+          end_time: '2026-02-03T16:45:00.000Z',
+          duration_minutes: 45
+        },
+        {
+          entry_day_id: 501,
+          break_type: 'other',
+          pay_treatment: 'unpaid',
+          source: 'manager',
+          status: 'completed',
+          start_time: null,
+          end_time: null,
+          duration_minutes: 60
         }
       ]
     }) as never

@@ -254,6 +254,7 @@ test('clock out leaves a six-hour day fully paid when the tutor records no lunch
   } | null)?.manual;
   assert.equal(manual?.grossMinutes, 360);
   assert.equal(manual?.paidMinutes, 360);
+  assert.equal((savedComparison as { version?: number } | null)?.version, 2);
   assert.equal(queries.some((sqlText) => sqlText.includes('time_entry_break_rules')), false);
   assert.equal(queries.some((sqlText) => sqlText.includes('INSERT INTO public.time_entry_breaks')), false);
   assert.equal(auditActions.includes('auto_break_applied'), false);

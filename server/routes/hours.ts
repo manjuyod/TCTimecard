@@ -21,9 +21,10 @@ import {
   type ScheduleSnapshotEntry,
   type ScheduleSnapshotV1
 } from '../services/scheduleSnapshot';
-import { computeBreakMinuteTotals, fetchBreaksByDayIds, type TimeEntryBreakRow } from '../services/timeEntryBreaks';
+import { fetchBreaksByDayIds, type TimeEntryBreakRow } from '../services/timeEntryBreaks';
 import { exportConcurrencyGuard, rejectBusyExport } from '../services/exportConcurrency';
 import { createInFlightCoalescer } from '../services/inFlightCoalescer';
+import { computeTimeAllocation } from '../services/timeAllocation';
 
 const router = express.Router();
 
@@ -165,7 +166,10 @@ type ApprovedEntrySessionRow = {
   end_at: unknown;
 };
 
-type ApprovedEntryBreakRow = Pick<TimeEntryBreakRow, 'entry_day_id' | 'pay_treatment' | 'status' | 'duration_minutes'>;
+type ApprovedEntryBreakRow = Pick<
+  TimeEntryBreakRow,
+  'entry_day_id' | 'pay_treatment' | 'status' | 'start_time' | 'end_time' | 'duration_minutes'
+>;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -414,27 +418,33 @@ const computeRollupTotalsForDays = (
   for (const day of days) {
     const sessions = sessionsByDay.get(day.id) ?? [];
     const manualUnion = sessionsToManualUnion(sessions);
-    const dayGrossMinutes = sumIntervalMinutes(manualUnion);
-    const breakTotals = computeBreakMinuteTotals(
-      (breaksByDay.get(day.id) ?? []).map((item) => ({
+    const scheduleUnion = day.schedule_snapshot ? parseScheduleUnionFromSnapshot(day.schedule_snapshot) : [];
+    const allocationResult = computeTimeAllocation({
+      sessions: manualUnion.map((interval) => ({
+        startAt: new Date(interval.startMinute * 60000),
+        endAt: new Date(interval.endMinute * 60000)
+      })),
+      scheduleIntervals: scheduleUnion.map((interval) => ({
+        startAt: new Date(interval.startMinute * 60000).toISOString(),
+        endAt: new Date(interval.endMinute * 60000).toISOString()
+      })),
+      breaks: (breaksByDay.get(day.id) ?? []).map((item) => ({
         payTreatment: item.pay_treatment,
         status: item.status,
+        startTime: item.start_time,
+        endTime: item.end_time,
         durationMinutes: Number(item.duration_minutes)
       }))
-    );
-    const paidManualMinutes = Math.max(0, dayGrossMinutes - breakTotals.unpaidBreakMinutes);
+    });
+    if (!allocationResult.ok) continue;
 
-    const scheduleUnion = day.schedule_snapshot ? parseScheduleUnionFromSnapshot(day.schedule_snapshot) : [];
-    const grossWithinScheduledMinutes = scheduleUnion.length ? overlapMinutes(manualUnion, scheduleUnion) : 0;
-    const withinScheduledMinutes = Math.min(grossWithinScheduledMinutes, paidManualMinutes);
-    const outsideScheduledMinutes = Math.max(0, paidManualMinutes - withinScheduledMinutes);
-
-    tutoringMinutes += withinScheduledMinutes;
-    extraMinutes += outsideScheduledMinutes;
-    totalMinutes += paidManualMinutes;
-    grossMinutes += dayGrossMinutes;
-    paidBreakMinutes += breakTotals.paidBreakMinutes;
-    unpaidBreakMinutes += breakTotals.unpaidBreakMinutes;
+    const { allocation } = allocationResult;
+    tutoringMinutes += allocation.scheduled.payableMinutes;
+    extraMinutes += allocation.extra.paidMinutes;
+    totalMinutes += allocation.manual.paidMinutes;
+    grossMinutes += allocation.manual.grossMinutes;
+    paidBreakMinutes += allocation.manual.paidBreakMinutes;
+    unpaidBreakMinutes += allocation.manual.unpaidBreakMinutes;
   }
 
   return { tutoringMinutes, extraMinutes, totalMinutes, grossMinutes, paidBreakMinutes, unpaidBreakMinutes };

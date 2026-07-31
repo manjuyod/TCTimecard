@@ -10,7 +10,7 @@ import {
   verifyScheduleSnapshot
 } from '../services/scheduleSnapshot';
 import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
-import { computeTimeEntryComparisonV1 } from '../services/timeEntryComparison';
+import { computeTimeEntryComparisonV2 } from '../services/timeEntryComparison';
 import { resolveClockOutSubmission, shouldInvalidateClockDayStatus } from '../services/clockSubmission';
 import {
   computeBreakMinuteTotals,
@@ -1142,11 +1142,13 @@ router.post(
           }));
           const breaks = await fetchBreaksByDayId(client, day.id);
 
-          const computed = computeTimeEntryComparisonV1({
+          const computed = computeTimeEntryComparisonV2({
             sessions: sessionPayload,
             breaks: breaks.map((row) => ({
               payTreatment: row.pay_treatment,
               status: row.status,
+              startTime: row.start_time,
+              endTime: row.end_time,
               durationMinutes: Number(row.duration_minutes)
             })),
             snapshotIntervals: snapshot.intervals

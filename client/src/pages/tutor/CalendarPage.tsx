@@ -30,6 +30,7 @@ import { requestOpenWeeklyAttestation } from '../../components/tutor/WeeklyAttes
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { TIMEKEEPING_QUOTES, WEEKLY_ATTESTATION_STATEMENT, WORKWEEK_DEFINITION } from '../../lib/attestationCopy';
+import { parseTimeEntryComparison } from '../../lib/timeEntryComparison';
 
 type CalendarEventPayload =
   | { type: 'schedule'; entry: CalendarEntry }
@@ -390,15 +391,7 @@ export function TutorCalendarPage(): JSX.Element {
   }, [entryDate, browserTimeZone]);
   const activeSnapshot = entryDate ? snapshotsByDate[entryDate] : null;
   const activeSnapshotIntervals = parseSnapshotIntervals(activeSnapshot);
-  const activeComparison = activeDay?.comparison && typeof activeDay.comparison === 'object' ? (activeDay.comparison as Record<string, unknown>) : null;
-  const manualTotalMinutes = typeof (activeComparison?.manual as Record<string, unknown> | undefined)?.totalMinutes === 'number'
-    ? (activeComparison?.manual as Record<string, unknown>).totalMinutes as number
-    : null;
-  const scheduledTotalMinutes = typeof (activeComparison?.scheduled as Record<string, unknown> | undefined)?.totalMinutes === 'number'
-    ? (activeComparison?.scheduled as Record<string, unknown>).totalMinutes as number
-    : null;
-  const matches = typeof activeComparison?.matches === 'boolean' ? (activeComparison.matches as boolean) : null;
-  const deltaMinutes = manualTotalMinutes !== null && scheduledTotalMinutes !== null ? manualTotalMinutes - scheduledTotalMinutes : null;
+  const activeComparison = parseTimeEntryComparison(activeDay?.comparison);
 
   return (
     <div className="space-y-4">
@@ -593,11 +586,11 @@ export function TutorCalendarPage(): JSX.Element {
                   <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.grossMinutes ?? 0)}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">Paid breaks</p>
+                  <p className="text-xs text-muted-foreground">Paid break overlap</p>
                   <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.paidBreakMinutes ?? 0)}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">Unpaid breaks</p>
+                  <p className="text-xs text-muted-foreground">Unpaid break overlap</p>
                   <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
                 </div>
                 <div>
@@ -642,28 +635,55 @@ export function TutorCalendarPage(): JSX.Element {
             {activeComparison ? (
               <div className="rounded-lg border bg-white p-4 text-sm">
                 <p className="font-semibold text-slate-900">Variance summary</p>
-                <div className="mt-2 grid gap-2 md:grid-cols-3">
+                <div className="mt-2 grid gap-2 md:grid-cols-4">
                   <div>
                     <p className="text-xs text-muted-foreground">Scheduled</p>
                     <p className="font-semibold text-slate-900">
-                      {scheduledTotalMinutes !== null ? `${scheduledTotalMinutes} min` : '-'}
+                      {activeComparison.scheduledMinutes} min
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground">Entered</p>
+                    <p className="text-xs text-muted-foreground">Covered</p>
                     <p className="font-semibold text-slate-900">
-                      {manualTotalMinutes !== null ? `${manualTotalMinutes} min` : '-'}
+                      {activeComparison.coveredMinutes} min
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Delta</p>
                     <p className="font-semibold text-slate-900">
-                      {deltaMinutes !== null ? `${deltaMinutes > 0 ? '+' : ''}${deltaMinutes} min` : '-'}
+                      {activeComparison.deltaMinutes > 0 ? '+' : ''}
+                      {activeComparison.deltaMinutes} min
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Payable extra</p>
+                    <p className="font-semibold text-slate-900">
+                      {activeComparison.payableExtraMinutes} min
                     </p>
                   </div>
                 </div>
-                {matches !== null ? (
-                  <p className="mt-2 text-xs text-muted-foreground">Minutes match: {matches ? 'Yes' : 'No'}</p>
+                {activeComparison.matches !== null ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Meets automatic approval criteria: {activeComparison.matches ? 'Yes' : 'No'}
+                  </p>
+                ) : null}
+                {activeComparison.scheduledBreakOverlapMinutes > 0 ||
+                activeComparison.outsideSessionMinutes > 0 ||
+                activeComparison.unpositionedMinutes > 0 ? (
+                  <div className="mt-3 rounded-lg border border-amber-300/70 bg-amber-50 p-3 text-xs text-amber-950">
+                    <p className="font-semibold">Break placement warnings</p>
+                    <ul className="mt-1 list-disc space-y-1 pl-4">
+                      {activeComparison.scheduledBreakOverlapMinutes > 0 ? (
+                        <li>{activeComparison.scheduledBreakOverlapMinutes} min overlaps scheduled tutoring.</li>
+                      ) : null}
+                      {activeComparison.outsideSessionMinutes > 0 ? (
+                        <li>{activeComparison.outsideSessionMinutes} min falls outside recorded sessions and was not deducted.</li>
+                      ) : null}
+                      {activeComparison.unpositionedMinutes > 0 ? (
+                        <li>{activeComparison.unpositionedMinutes} min has no start/end time and was not deducted.</li>
+                      ) : null}
+                    </ul>
+                  </div>
                 ) : null}
               </div>
             ) : null}

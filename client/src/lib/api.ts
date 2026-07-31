@@ -192,6 +192,8 @@ export interface TimeEntryBreakSummary {
   paidBreakMinutes: number;
   unpaidBreakMinutes: number;
   paidMinutes: number;
+  outsideSessionBreakMinutes: number;
+  unpositionedBreakMinutes: number;
 }
 
 export type ClockStateValue = 0 | 1; // 0 = clocked out, 1 = clocked in

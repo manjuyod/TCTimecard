@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveClockOutSubmission, shouldInvalidateClockDayStatus } from '../services/clockSubmission';
-import { computeTimeEntryComparisonV1 } from '../services/timeEntryComparison';
+import { computeTimeEntryComparisonV2 } from '../services/timeEntryComparison';
 import type { ScheduleSnapshotV1 } from '../services/scheduleSnapshot';
 
 const baseSnapshot: ScheduleSnapshotV1 = {
@@ -16,7 +16,7 @@ const baseSnapshot: ScheduleSnapshotV1 = {
 };
 
 test('clock-out auto submission: mismatched minutes -> pending with auto metadata', () => {
-  const computed = computeTimeEntryComparisonV1({
+  const computed = computeTimeEntryComparisonV2({
     sessions: [{ startAt: '2026-01-02T09:00:00-06:00', endAt: '2026-01-02T10:30:00-06:00' }],
     snapshotIntervals: baseSnapshot.intervals
   });
@@ -35,11 +35,11 @@ test('clock-out auto submission: mismatched minutes -> pending with auto metadat
   assert.equal(decision.decisionReason, null);
   assert.equal(decision.audit.action, 'submitted');
   assert.equal(decision.audit.metadata.auto, true);
-  assert.equal(decision.audit.metadata.reason, 'minutes_mismatch');
+  assert.equal(decision.audit.metadata.reason, 'coverage_or_extra_mismatch');
 });
 
 test('clock-out auto submission: matching minutes -> auto-approved', () => {
-  const computed = computeTimeEntryComparisonV1({
+  const computed = computeTimeEntryComparisonV2({
     sessions: [{ startAt: '2026-01-02T09:00:00-06:00', endAt: '2026-01-02T10:00:00-06:00' }],
     snapshotIntervals: baseSnapshot.intervals
   });
@@ -56,11 +56,12 @@ test('clock-out auto submission: matching minutes -> auto-approved', () => {
 
   assert.equal(decision.nextStatus, 'approved');
   assert.equal(decision.audit.action, 'auto_approved');
+  assert.equal(decision.audit.metadata.reason, 'coverage_complete_no_payable_extra');
   assert.ok(decision.decidedAt);
 });
 
-test('clock-out auto submission: same minutes, different intervals -> auto-approved', () => {
-  const computed = computeTimeEntryComparisonV1({
+test('clock-out auto submission: shifted equal-duration work -> pending', () => {
+  const computed = computeTimeEntryComparisonV2({
     sessions: [{ startAt: '2026-01-02T08:00:00-06:00', endAt: '2026-01-02T09:00:00-06:00' }],
     snapshotIntervals: baseSnapshot.intervals
   });
@@ -75,9 +76,11 @@ test('clock-out auto submission: same minutes, different intervals -> auto-appro
     timezone: baseSnapshot.timezone
   });
 
-  assert.equal(decision.nextStatus, 'approved');
-  assert.equal(decision.audit.action, 'auto_approved');
-  assert.ok(decision.decidedAt);
+  assert.equal(computed.comparison.scheduled.deficitMinutes, 60);
+  assert.equal(computed.comparison.extra.paidMinutes, 60);
+  assert.equal(decision.nextStatus, 'pending');
+  assert.equal(decision.audit.action, 'submitted');
+  assert.equal(decision.decidedAt, null);
 });
 
 test('clock-out invalidation helper: approved/denied should be invalidated', () => {
