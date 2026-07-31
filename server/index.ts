@@ -7,6 +7,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import authRoutes from './routes/auth';
+import adminSettingsRoutes from './routes/adminSettings';
 import payPeriodRoutes from './routes/payPeriod';
 import hoursRoutes from './routes/hours';
 import extraHoursRoutes from './routes/extrahours';
@@ -77,6 +78,7 @@ app.use('/api', healthRoutes);
 app.use(createSessionMiddleware());
 
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminSettingsRoutes);
 app.use('/api/pay-period', payPeriodRoutes);
 app.use('/api', hoursRoutes);
 app.use('/api', extraHoursRoutes);
