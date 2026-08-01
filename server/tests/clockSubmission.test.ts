@@ -89,3 +89,23 @@ test('clock-out invalidation helper: approved/denied should be invalidated', () 
   assert.equal(shouldInvalidateClockDayStatus('pending'), false);
   assert.equal(shouldInvalidateClockDayStatus('draft'), false);
 });
+
+test('automatic worker submission records auto-clock-out source', () => {
+  const computed = computeTimeEntryComparisonV2({
+    sessions: [{ startAt: '2026-01-02T09:00:00-06:00', endAt: '2026-01-02T10:00:00-06:00' }],
+    snapshotIntervals: baseSnapshot.intervals
+  });
+  assert.equal(computed.ok, true);
+  if (!computed.ok) return;
+
+  const decision = resolveClockOutSubmission({
+    snapshot: baseSnapshot,
+    comparison: computed.comparison,
+    workDate: baseSnapshot.workDate,
+    timezone: baseSnapshot.timezone,
+    source: 'auto_clock_out',
+    detectedAt: '2026-01-02T10:01:00-06:00'
+  });
+  assert.equal(decision.audit.metadata.source, 'auto_clock_out');
+  assert.equal(decision.audit.metadata.detectedAt, '2026-01-02T10:01:00-06:00');
+});

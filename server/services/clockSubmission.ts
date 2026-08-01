@@ -1,5 +1,6 @@
 import type { ScheduleSnapshotV1 } from './scheduleSnapshot';
 import type { TimeEntryComparisonV2 } from './timeEntryComparison';
+import type { ClockOutSource } from './clockOutFinalization';
 
 export type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
 
@@ -23,6 +24,8 @@ export const resolveClockOutSubmission = (params: {
   comparison: TimeEntryComparisonV2;
   workDate: string;
   timezone: string;
+  source?: ClockOutSource;
+  detectedAt?: string;
 }): ClockSubmissionDecision => {
   const matches = params.comparison.matches;
   const nextStatus: 'pending' | 'approved' = matches ? 'approved' : 'pending';
@@ -44,7 +47,8 @@ export const resolveClockOutSubmission = (params: {
         comparison: params.comparison,
         auto: true,
         reason: matches ? 'coverage_complete_no_payable_extra' : 'coverage_or_extra_mismatch',
-        source: 'clock_out'
+        source: params.source ?? 'clock_out',
+        ...(params.detectedAt ? { detectedAt: params.detectedAt } : {})
       }
     }
   };
