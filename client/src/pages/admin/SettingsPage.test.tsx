@@ -87,6 +87,49 @@ describe('admin settings page', () => {
     expect(screen.getByText(/choose how recurring pay periods/i)).toBeInTheDocument();
   });
 
+  it('does not save automatic timekeeping under an unapplied franchise ID', async () => {
+    const calls = installSettingsFetch({ autoClockOutEnabled: true });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    const save = screen.getByRole('button', { name: /save automatic timekeeping/i });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.change(screen.getByLabelText(/franchise id/i), { target: { value: '88' } });
+
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(calls.some((call) => call.init?.method === 'PATCH')).toBe(false);
+  });
+
+  it('does not save payroll settings under an unapplied franchise ID', async () => {
+    const calls = installSettingsFetch({ payPeriodType: 'weekly' });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    const save = screen.getByRole('button', { name: /save payroll settings/i });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.change(screen.getByLabelText(/franchise id/i), { target: { value: '88' } });
+
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(calls.some((call) => call.init?.method === 'PUT')).toBe(false);
+  });
+
+  it('disables Apply for blank and non-positive-safe-integer franchise IDs', async () => {
+    installSettingsFetch();
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    const selector = screen.getByLabelText(/franchise id/i);
+    const apply = await screen.findByRole('button', { name: 'Apply' });
+    await waitFor(() => expect(apply).toBeEnabled());
+
+    for (const value of ['', '-1', '0', '1.5', '9007199254740992']) {
+      fireEvent.change(selector, { target: { value } });
+      expect(apply, value).toBeDisabled();
+    }
+
+    fireEvent.change(selector, { target: { value: '77' } });
+    expect(apply).toBeEnabled();
+  });
+
   it('exposes the settings route inside the admin shell', async () => {
     installSettingsFetch();
     render(<MemoryRouter initialEntries={['/admin/settings']}><App /></MemoryRouter>);

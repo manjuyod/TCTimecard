@@ -571,6 +571,10 @@ export const startAutoClockOutScheduler = (
     timer = setTimer(() => {
       timer = undefined;
       if (stopped || running) return;
+      if (!isAutoClockOutMinute(now())) {
+        scheduleNext();
+        return;
+      }
       running = true;
       void runPass()
         .then((summary) => {

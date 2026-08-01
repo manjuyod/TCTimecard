@@ -37,6 +37,7 @@ export function SettingsPage(): JSX.Element {
   const sessionFranchiseId = getSessionFranchiseId(session);
   const selectorAllowed = isSelectorAllowed(session);
   const [franchiseIdInput, setFranchiseIdInput] = useState(sessionFranchiseId !== null ? String(sessionFranchiseId) : '');
+  const [appliedFranchiseId, setAppliedFranchiseId] = useState<number | null>(null);
   const [autoClockOutEnabled, setAutoClockOutEnabled] = useState(false);
   const [payrollSettings, setPayrollSettings] = useState<PayrollSettings | null>(null);
   const [payrollForm, setPayrollForm] = useState<PayrollSettingsFormState>(EMPTY_PAYROLL_SETTINGS_FORM);
@@ -50,8 +51,13 @@ export function SettingsPage(): JSX.Element {
 
   const resolveFranchiseId = (forcedFranchiseId?: number | null): number | null => {
     const franchiseId = forcedFranchiseId ?? (selectorAllowed ? Number(franchiseIdInput) : sessionFranchiseId);
-    return franchiseId === null || !Number.isFinite(franchiseId) ? null : franchiseId;
+    return franchiseId !== null && Number.isSafeInteger(franchiseId) && franchiseId > 0
+      ? franchiseId
+      : null;
   };
+
+  const selectedFranchiseId = resolveFranchiseId();
+  const settingsScopeApplied = appliedFranchiseId !== null && selectedFranchiseId === appliedFranchiseId;
 
   const load = async (forcedFranchiseId?: number | null) => {
     const franchiseId = resolveFranchiseId(forcedFranchiseId);
@@ -73,6 +79,7 @@ export function SettingsPage(): JSX.Element {
       setAutoClockOutEnabled(general.autoClockOutEnabled);
       setPayrollSettings(payroll);
       setPayrollForm(toPayrollSettingsFormState(payroll));
+      setAppliedFranchiseId(franchiseId);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to load franchise settings';
       setAutoError(message);
@@ -85,9 +92,9 @@ export function SettingsPage(): JSX.Element {
   };
 
   const saveAutomaticTimekeeping = async () => {
-    const franchiseId = resolveFranchiseId();
-    if (franchiseId === null) {
-      setAutoError('Franchise ID is required.');
+    const franchiseId = appliedFranchiseId;
+    if (franchiseId === null || selectedFranchiseId !== franchiseId) {
+      setAutoError('Apply a valid Franchise ID before saving.');
       return;
     }
 
@@ -107,9 +114,9 @@ export function SettingsPage(): JSX.Element {
   };
 
   const savePayrollSettings = async () => {
-    const franchiseId = resolveFranchiseId();
-    if (franchiseId === null) {
-      setPayrollError('Franchise ID is required.');
+    const franchiseId = appliedFranchiseId;
+    if (franchiseId === null || selectedFranchiseId !== franchiseId) {
+      setPayrollError('Apply a valid Franchise ID before saving.');
       return;
     }
 
@@ -136,6 +143,7 @@ export function SettingsPage(): JSX.Element {
   };
 
   useEffect(() => {
+    setAppliedFranchiseId(null);
     if (!selectorAllowed) {
       setFranchiseIdInput(sessionFranchiseId !== null ? String(sessionFranchiseId) : '');
       if (sessionFranchiseId !== null) void load(sessionFranchiseId);
@@ -168,7 +176,7 @@ export function SettingsPage(): JSX.Element {
               <InlineError message={contextError} />
             </div>
             <div className="flex flex-wrap gap-3">
-              <Button onClick={() => void load()} disabled={autoLoading || payrollLoading}>
+              <Button onClick={() => void load()} disabled={autoLoading || payrollLoading || selectedFranchiseId === null}>
                 {autoLoading || payrollLoading ? 'Loading...' : 'Apply'}
               </Button>
               <Badge variant="muted" className="self-center">Session franchise: {session?.franchiseId ?? 'N/A'}</Badge>
@@ -192,7 +200,7 @@ export function SettingsPage(): JSX.Element {
           </label>
           <InlineError message={autoError} />
           <div className="flex justify-end">
-            <Button onClick={() => void saveAutomaticTimekeeping()} disabled={autoLoading || autoSaving}>{autoSaving ? 'Saving...' : 'Save automatic timekeeping'}</Button>
+            <Button onClick={() => void saveAutomaticTimekeeping()} disabled={autoLoading || autoSaving || !settingsScopeApplied}>{autoSaving ? 'Saving...' : 'Save automatic timekeeping'}</Button>
           </div>
         </CardContent>
       </Card>
@@ -239,7 +247,7 @@ export function SettingsPage(): JSX.Element {
           <InlineError message={payrollError} />
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-muted-foreground">One-off override rows still take precedence over these recurring settings.</p>
-            <Button onClick={() => void savePayrollSettings()} disabled={payrollSaving || payrollLoading}>{payrollSaving ? 'Saving...' : 'Save payroll settings'}</Button>
+            <Button onClick={() => void savePayrollSettings()} disabled={payrollSaving || payrollLoading || !settingsScopeApplied}>{payrollSaving ? 'Saving...' : 'Save payroll settings'}</Button>
           </div>
         </CardContent>
       </Card>

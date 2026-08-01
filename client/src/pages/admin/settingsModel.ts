@@ -34,6 +34,9 @@ export const buildPayrollSettingsPayload = (
   franchiseId: number
 ): { ok: true; payload: Parameters<typeof import('../../lib/api').updatePayrollSettings>[0] }
  | { ok: false; error: string } => {
+  if (!Number.isSafeInteger(franchiseId) || franchiseId <= 0) {
+    return { ok: false, error: 'Franchise ID must be a positive integer.' };
+  }
   if (form.payPeriodType !== 'custom_semimonthly') {
     return { ok: true, payload: { franchiseId, payPeriodType: form.payPeriodType } };
   }

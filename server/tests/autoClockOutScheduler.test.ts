@@ -32,6 +32,32 @@ test('next tick skips the middle of the hour', () => {
   );
 });
 
+test('a delayed timer skips an ineligible actual fire minute and reschedules from that time', async () => {
+  let current = new Date('2026-07-31T12:49:30.000Z');
+  const queued: Array<{ callback: () => void; delayMs: number }> = [];
+  let passes = 0;
+  const scheduler = startAutoClockOutScheduler({
+    now: () => current,
+    setTimer: (callback, delayMs) => {
+      queued.push({ callback, delayMs });
+      return queued.length as never;
+    },
+    clearTimer: () => undefined,
+    runPass: async () => { passes += 1; },
+    log: { info: () => undefined, error: () => undefined }
+  });
+
+  assert.equal(queued[0].delayMs, 30_000);
+  current = new Date('2026-07-31T13:20:00.000Z');
+  queued[0].callback();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(passes, 0);
+  assert.equal(queued.length, 2);
+  assert.equal(queued[1].delayMs, 30 * 60_000);
+  scheduler.stop();
+});
+
 test('final schedule end selects the last split block', () => {
   const split: ScheduleSnapshotV1 = {
     version: 1, franchiseId: 77, tutorId: 5, workDate: '2026-07-31',
@@ -432,10 +458,11 @@ test('setting disable wins after day lock and rolls back before session work', a
 
 test('scheduler stop during an in-flight pass prevents a later tick', async () => {
   const queued: Array<() => void> = [];
+  let current = new Date('2026-07-31T12:10:00.000Z');
   let resolvePass: (() => void) | undefined;
   let passes = 0;
   const scheduler = startAutoClockOutScheduler({
-    now: () => new Date('2026-07-31T12:10:00.000Z'),
+    now: () => current,
     setTimer: (callback) => { queued.push(callback); return queued.length as never; },
     clearTimer: () => undefined,
     runPass: async () => {
@@ -444,6 +471,7 @@ test('scheduler stop during an in-flight pass prevents a later tick', async () =
     },
     log: { info: () => undefined, error: () => undefined }
   });
+  current = new Date('2026-07-31T12:50:00.000Z');
   queued[0]();
   scheduler.stop();
   resolvePass?.();

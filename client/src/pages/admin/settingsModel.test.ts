@@ -55,4 +55,23 @@ describe('admin settings payroll form', () => {
       }
     });
   });
+
+  it.each([
+    ['blank conversion', Number.NaN],
+    ['negative', -1],
+    ['zero', 0],
+    ['fractional', 1.5],
+    ['unsafe integer', Number.MAX_SAFE_INTEGER + 1]
+  ])('rejects a %s franchise ID', (_case, franchiseId) => {
+    expect(buildPayrollSettingsPayload({
+      payPeriodType: 'weekly',
+      customPeriod1StartDay: '',
+      customPeriod1EndDay: '',
+      customPeriod2StartDay: '',
+      customPeriod2EndDay: ''
+    }, franchiseId)).toEqual({
+      ok: false,
+      error: 'Franchise ID must be a positive integer.'
+    });
+  });
 });
