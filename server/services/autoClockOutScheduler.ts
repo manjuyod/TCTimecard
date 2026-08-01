@@ -5,6 +5,7 @@ import {
   createPostgresClockOutTransaction,
   finalizeClockOutInTransaction,
   type ClockOutFinalizationResult,
+  type FinalizeClockOutInTransaction,
   type TimeEntryDayRow
 } from './clockOutFinalization';
 import {
@@ -13,7 +14,13 @@ import {
   type ScheduleCandidate
 } from './scheduleSource';
 import type { ScheduleSnapshotV1 } from './scheduleSnapshot';
-import type { TimeEntryBreakRow } from './timeEntryBreaks';
+import {
+  isBreakSource,
+  isBreakStatus,
+  isBreakType,
+  isPayTreatment,
+  type TimeEntryBreakRow
+} from './timeEntryBreaks';
 
 const ADVISORY_LOCK_KEY = 739280451;
 const MAX_POSTGRES_CLIENTS = 4;
@@ -247,7 +254,7 @@ const releaseAdvisoryLock = async (client: PoolClient): Promise<void> => {
   }
 };
 
-const acquireProductionLockAndCandidates = async (pool: Pool): Promise<{
+export const acquireProductionLockAndCandidates = async (pool: Pool): Promise<{
   lock: { client: PoolClient; release(): Promise<void> };
   candidates: AutoClockOutCandidate[];
 } | null> => {
@@ -330,20 +337,116 @@ const acquireProductionLockAndCandidates = async (pool: Pool): Promise<{
 };
 
 type LockedDayRow = TimeEntryDayRow & { auto_clock_out_enabled: boolean | null };
+type RuntimeRow = Record<string, unknown>;
 
-const finalizeProductionCandidate = async (
-  input: AutoClockOutFinalizationInput
+const normalizeRequiredTimestamp = (value: unknown, field: string): string => {
+  const epoch = value instanceof Date ? value.getTime() : Date.parse(String(value));
+  if (!Number.isFinite(epoch)) throw new Error(`invalid_${field}`);
+  return new Date(epoch).toISOString();
+};
+
+const normalizeNullableTimestamp = (value: unknown, field: string): string | null =>
+  value === null || value === undefined ? null : normalizeRequiredTimestamp(value, field);
+
+const normalizeNullableId = (value: unknown, field: string): number | null => {
+  if (value === null || value === undefined) return null;
+  const id = normalizeId(value);
+  if (id === null) throw new Error(`invalid_${field}`);
+  return id;
+};
+
+const normalizeClockState = (value: unknown): number => {
+  const state = Number(value);
+  if (state !== 0 && state !== 1) throw new Error('invalid_clock_state');
+  return state;
+};
+
+const normalizeDayRow = (row: RuntimeRow): TimeEntryDayRow => {
+  const id = normalizeId(row.id);
+  const franchiseid = normalizeId(row.franchiseid);
+  const tutorid = normalizeId(row.tutorid);
+  const workDate = normalizeDateOnly(row.work_date);
+  const timezone = typeof row.timezone === 'string' ? row.timezone.trim() : '';
+  const status = row.status;
+  if (!id || !franchiseid || !tutorid || !workDate || !timezone) throw new Error('invalid_day');
+  if (status !== 'draft' && status !== 'pending' && status !== 'approved' && status !== 'denied') {
+    throw new Error('invalid_day_status');
+  }
+  return {
+    id,
+    franchiseid,
+    tutorid,
+    work_date: workDate,
+    timezone,
+    status,
+    clock_state: normalizeClockState(row.clock_state),
+    schedule_snapshot: row.schedule_snapshot ?? null,
+    comparison: row.comparison ?? null,
+    submitted_at: normalizeNullableTimestamp(row.submitted_at, 'submitted_at'),
+    decided_by: normalizeNullableId(row.decided_by, 'decided_by'),
+    decided_at: normalizeNullableTimestamp(row.decided_at, 'decided_at'),
+    decision_reason: row.decision_reason === null || row.decision_reason === undefined
+      ? null
+      : String(row.decision_reason),
+    created_at: normalizeRequiredTimestamp(row.created_at, 'created_at'),
+    updated_at: normalizeRequiredTimestamp(row.updated_at, 'updated_at')
+  };
+};
+
+const normalizeSessionRow = (row: RuntimeRow): { id: number; start_at: string } => {
+  const id = normalizeId(row.id);
+  if (!id) throw new Error('invalid_session_id');
+  return { id, start_at: normalizeRequiredTimestamp(row.start_at, 'session_start_at') };
+};
+
+const normalizeBreakRow = (row: RuntimeRow): TimeEntryBreakRow => {
+  const id = normalizeId(row.id);
+  const entryDayId = normalizeId(row.entry_day_id);
+  const franchiseId = normalizeId(row.franchiseid);
+  const tutorId = normalizeId(row.tutorid);
+  const sessionId = normalizeNullableId(row.time_entry_session_id, 'break_session_id');
+  const durationMinutes = Number(row.duration_minutes);
+  if (!id || !entryDayId || !franchiseId || !tutorId ||
+      !Number.isInteger(durationMinutes) || durationMinutes < 0) {
+    throw new Error('invalid_break');
+  }
+  if (!isBreakType(row.break_type) || !isPayTreatment(row.pay_treatment) ||
+      !isBreakSource(row.source) || !isBreakStatus(row.status)) {
+    throw new Error('invalid_break_status');
+  }
+  return {
+    id,
+    entry_day_id: entryDayId,
+    time_entry_session_id: sessionId,
+    franchiseid: franchiseId,
+    tutorid: tutorId,
+    break_type: row.break_type,
+    pay_treatment: row.pay_treatment,
+    start_time: normalizeNullableTimestamp(row.start_time, 'break_start_time'),
+    end_time: normalizeNullableTimestamp(row.end_time, 'break_end_time'),
+    duration_minutes: durationMinutes,
+    source: row.source,
+    status: row.status,
+    note: row.note === null || row.note === undefined ? null : String(row.note),
+    created_at: normalizeRequiredTimestamp(row.created_at, 'break_created_at'),
+    updated_at: normalizeRequiredTimestamp(row.updated_at, 'break_updated_at')
+  };
+};
+
+export const finalizeProductionCandidate = async (
+  input: AutoClockOutFinalizationInput,
+  finalize: FinalizeClockOutInTransaction = finalizeClockOutInTransaction
 ): Promise<ClockOutFinalizationResult | { kind: 'setting_disabled' }> => {
   const { client, candidate } = input;
   await client.query('BEGIN');
   try {
-    const dayResult = await client.query<TimeEntryDayRow>(
+    const dayResult = await client.query<RuntimeRow>(
       `SELECT * FROM public.time_entry_days
         WHERE id = $1 AND franchiseid = $2 AND tutorid = $3
         FOR UPDATE`,
       [candidate.dayId, candidate.franchiseId, candidate.tutorId]
     );
-    const day = dayResult.rows[0];
+    const dayRow = dayResult.rows[0];
 
     const settingResult = await client.query<Pick<LockedDayRow, 'auto_clock_out_enabled'>>(
       `SELECT auto_clock_out_enabled
@@ -352,25 +455,27 @@ const finalizeProductionCandidate = async (
         FOR UPDATE`,
       [candidate.franchiseId]
     );
-    if (!day || settingResult.rows[0]?.auto_clock_out_enabled !== true) {
+    if (!dayRow || settingResult.rows[0]?.auto_clock_out_enabled !== true) {
       await client.query('ROLLBACK');
       return { kind: 'setting_disabled' };
     }
+    const day = normalizeDayRow(dayRow);
 
-    const sessionResult = await client.query<{ id: number; start_at: string }>(
+    const sessionResult = await client.query<RuntimeRow>(
       `SELECT id, start_at
          FROM public.time_entry_sessions
         WHERE id = $1 AND entry_day_id = $2 AND end_at IS NULL
         FOR UPDATE`,
       [candidate.openSessionId, candidate.dayId]
     );
-    const openSession = sessionResult.rows[0];
-    if (!openSession || Number(day.clock_state) !== 1) {
+    const openSessionRow = sessionResult.rows[0];
+    if (!openSessionRow || day.clock_state !== 1) {
       await client.query('ROLLBACK');
       return { kind: 'already_closed' };
     }
+    const openSession = normalizeSessionRow(openSessionRow);
 
-    const breakResult = await client.query<TimeEntryBreakRow>(
+    const breakResult = await client.query<RuntimeRow>(
       `SELECT * FROM public.time_entry_breaks
         WHERE entry_day_id = $1 AND status = 'active'
         ORDER BY start_time DESC
@@ -379,11 +484,12 @@ const finalizeProductionCandidate = async (
       [candidate.dayId]
     );
 
-    const result = await finalizeClockOutInTransaction({
+    const activeBreak = breakResult.rows[0] ? normalizeBreakRow(breakResult.rows[0]) : null;
+    const result = await finalize({
       transaction: createPostgresClockOutTransaction(client),
       day,
       openSession,
-      activeBreak: breakResult.rows[0] ?? null,
+      activeBreak,
       targetEndAt: input.targetEndAt,
       detectedAt: input.detectedAt,
       snapshot: input.snapshot,
@@ -408,22 +514,31 @@ const finalizeProductionCandidate = async (
   }
 };
 
-const runProductionPass = async (): Promise<AutoClockOutRunSummary> => {
-  const pool = getPostgresPool();
+export interface AutoClockOutProductionPassOptions {
+  pool?: Pool;
+  now?: Date;
+  fetchSchedules?: AutoClockOutPassDependencies['fetchSchedules'];
+  finalize?: AutoClockOutPassDependencies['finalize'];
+}
+
+export const runProductionPass = async (
+  options: AutoClockOutProductionPassOptions = {}
+): Promise<AutoClockOutRunSummary> => {
+  const pool = options.pool ?? getPostgresPool();
   const configuredMax = Number(pool.options.max);
   const maxClients = Math.max(
     1,
     Math.min(MAX_POSTGRES_CLIENTS, Number.isFinite(configuredMax) ? configuredMax : 10)
   );
   return runAutoClockOutPass({
-    now: new Date(),
+    now: options.now ?? new Date(),
     acquireLockAndCandidates: () => acquireProductionLockAndCandidates(pool),
-    fetchSchedules: fetchLatestScheduleSnapshots,
+    fetchSchedules: options.fetchSchedules ?? fetchLatestScheduleSnapshots,
     acquireWorkerClient: async () => {
       const client = await pool.connect();
       return { client, release: () => client.release() };
     },
-    finalize: finalizeProductionCandidate,
+    finalize: options.finalize ?? finalizeProductionCandidate,
     maxClients
   });
 };
