@@ -38,7 +38,7 @@ Tutor:
 - `/tutor/dashboard`, `/tutor/calendar`, `/tutor/time-off` (manual time entry and variance requests live in the dashboard/calendar; the old extra-hours page is removed)
 
 Admin:
-- `/admin/dashboard`, `/admin/approvals`, `/admin/pay-period-summary`
+- `/admin/dashboard`, `/admin/approvals`, `/admin/pay-period-summary`, `/admin/settings`
 
 ## API routes (high level)
 Health:
@@ -49,6 +49,10 @@ Auth:
 - `POST /api/auth/select-account`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
+
+Franchise settings (admin only):
+- `GET /api/admin/settings?franchiseId=...`
+- `PATCH /api/admin/settings` (body: `{ franchiseId, autoClockOutEnabled }`)
 
 Pay periods:
 - `GET /api/pay-period/current`
@@ -164,6 +168,14 @@ Run `npm run db:check-timeoff-schema` for a read-only compatibility preflight be
 ### Postgres migrations
 - Run: `npm run db:migrate`
 - Migration SQL lives in `server/db/migrations/` and is tracked in `public.schema_migrations`.
+- `0007_franchise_auto_clock_out.sql` additively creates the per-franchise `auto_clock_out_enabled` setting with a safe default of `false`.
+
+### Franchise automatic clock-out
+
+- The feature is off by default. An admin enables it for one franchise at a time under `/admin/settings`; the UI uses `GET/PATCH /api/admin/settings`.
+- The Reserved VM worker runs only during UTC minutes `00`-`09` and `50`-`59`. Each pass reads eligible PostgreSQL rows under one advisory lock, fetches the latest MSSQL schedules in one batch, and uses no more than four PostgreSQL connections total (including the lock connection).
+- Split schedules close only after the final valid interval. The open session and any valid active break are backdated to that exact final `endAt`, not the later worker detection time. A missing or malformed schedule is counted and skipped without changing tutor time.
+- Automatic completion may finish an already-open session without presenting the interactive weekly-attestation gate; it does not sign an attestation, relax the attestation policy, or unblock later tutor actions. Manual clock-out still requires the tutor to end an active break first; the automatic worker closes a valid active break at the same exact scheduled target.
 
 Clock state model (Postgres):
 - `public.time_entry_days.clock_state`: `0 = clocked out`, `1 = clocked in` (default `0`).

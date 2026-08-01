@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DateTime } from 'luxon';
+import { finalScheduleEnd, nextWorkerRefreshAt } from '../../lib/autoClockOut';
 import { ApiError } from '../../lib/errors';
 import {
   ClockState,
@@ -75,23 +76,99 @@ export function ClockWidget(): JSX.Element {
   const [acting, setActing] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
   const [breakType, setBreakType] = useState<TimeEntryBreakType>('lunch');
+  const mountedRef = useRef(true);
+  const stateGenerationRef = useRef(0);
+  const refreshInFlightRef = useRef<Promise<ClockState | null> | null>(null);
 
-  const load = useCallback(async () => {
+  const replaceState = useCallback((next: ClockState) => {
+    stateGenerationRef.current += 1;
+    setState(next);
+  }, []);
+
+  const load = useCallback(async (): Promise<ClockState | null> => {
+    const generation = stateGenerationRef.current;
     setLoading(true);
     try {
       const next = await fetchClockState();
-      setState(next);
+      if (!mountedRef.current || generation !== stateGenerationRef.current) return null;
+      replaceState(next);
+      return next;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to load clock state';
-      toast.error(message);
+      if (mountedRef.current && generation === stateGenerationRef.current) {
+        const message = err instanceof Error ? err.message : 'Unable to load clock state';
+        toast.error(message);
+      }
+      return null;
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
+  }, [replaceState]);
+
+  const refreshState = useCallback((): Promise<ClockState | null> => {
+    if (refreshInFlightRef.current) return refreshInFlightRef.current;
+    const refresh = load().finally(() => {
+      if (refreshInFlightRef.current === refresh) refreshInFlightRef.current = null;
+    });
+    refreshInFlightRef.current = refresh;
+    return refresh;
+  }, [load]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stateGenerationRef.current += 1;
+      refreshInFlightRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void refreshState();
+  }, [refreshState]);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      void refreshState();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void refreshState();
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [refreshState]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timeout: number | undefined;
+
+    const scheduleNextRefresh = async (clockState: ClockState): Promise<void> => {
+      try {
+        const snapshot = await fetchTutorScheduleSnapshot(clockState.workDate);
+        const finalEnd = finalScheduleEnd(snapshot);
+        if (!finalEnd || cancelled) return;
+        const refreshAt = nextWorkerRefreshAt(finalEnd, new Date());
+        timeout = window.setTimeout(async () => {
+          const refreshed = await refreshState();
+          if (!cancelled && refreshed?.clockState === 1) {
+            await scheduleNextRefresh(refreshed);
+          }
+        }, Math.max(0, refreshAt.getTime() - Date.now()));
+      } catch {
+        // Schedule refresh is best-effort; manual clock-out keeps its visible error path.
+      }
+    };
+
+    if (state?.clockState === 1 && !acting) void scheduleNextRefresh(state);
+    return () => {
+      cancelled = true;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
+  }, [acting, refreshState, state]);
 
   useEffect(() => {
     const handleAttestationUpdate = () => {
@@ -138,11 +215,12 @@ export function ClockWidget(): JSX.Element {
       return;
     }
 
+    stateGenerationRef.current += 1;
     setActing(true);
     try {
       if (state.clockState === 0) {
         const next = await clockIn();
-        setState(next);
+        replaceState(next);
         toast.success('Clocked in.');
         return;
       }
@@ -157,7 +235,7 @@ export function ClockWidget(): JSX.Element {
       }
 
       const next = await clockOut({ scheduleSnapshot: snapshot });
-      setState(next);
+      replaceState(next);
       if (next.dayStatus === 'pending') {
         toast.success(
           'This time was automatically submitted for director approval because it falls outside scheduled hours.'
@@ -186,10 +264,11 @@ export function ClockWidget(): JSX.Element {
 
   const handleStartBreak = async () => {
     if (!state || state.clockState !== 1) return;
+    stateGenerationRef.current += 1;
     setActing(true);
     try {
       const next = await startClockBreak({ breakType });
-      setState(next);
+      replaceState(next);
       toast.success('Break started.');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to start break';
@@ -202,10 +281,11 @@ export function ClockWidget(): JSX.Element {
 
   const handleEndBreak = async () => {
     if (!state?.activeBreak) return;
+    stateGenerationRef.current += 1;
     setActing(true);
     try {
       const next = await endClockBreak();
-      setState(next);
+      replaceState(next);
       toast.success('Break ended.');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to end break';

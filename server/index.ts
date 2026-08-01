@@ -21,6 +21,7 @@ import { SESSION_SECRET } from './config/session';
 import { createSessionMiddleware } from './config/sessionMiddleware';
 import { closePostgresPool } from './db/postgres';
 import { closeMssqlPool } from './db/mssql';
+import { startAutoClockOutScheduler } from './services/autoClockOutScheduler';
 import { installGracefulShutdown } from './services/gracefulShutdown';
 import { setSensitivePageHeaders } from './middleware/sensitivePageHeaders';
 
@@ -47,6 +48,8 @@ if (process.env.SKIP_DB_VALIDATION !== 'true') {
     process.exit(1);
   }
 }
+
+const autoClockOutScheduler = startAutoClockOutScheduler();
 
 if (!process.env.SESSION_SECRET) {
   console.warn(
@@ -133,6 +136,7 @@ const server = app.listen(PORT, () => {
 installGracefulShutdown({
   server,
   closeResources: async () => {
+    autoClockOutScheduler.stop();
     const results = await Promise.allSettled([closePostgresPool(), closeMssqlPool()]);
     const failed = results.find((result) => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;
