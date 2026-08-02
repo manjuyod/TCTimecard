@@ -4,6 +4,11 @@ import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { setPostgresPoolOverride } from '../db/postgres';
 import timeEntryRoutes from '../routes/timeEntry';
+import {
+  getScheduleSnapshotSigningSecret,
+  signScheduleSnapshot,
+  type ScheduleSnapshotV1
+} from '../services/scheduleSnapshot';
 
 afterEach(() => {
   setPostgresPoolOverride(undefined);
@@ -54,7 +59,7 @@ test('manual submission leaves a six-hour day fully paid when the tutor records 
   const timezone = 'UTC';
   const startAt = '2026-01-02T08:00:00.000Z';
   const endAt = '2026-01-02T14:00:00.000Z';
-  const scheduleSnapshot = {
+  const scheduleSnapshot: ScheduleSnapshotV1 = {
     version: 1,
     franchiseId: 7,
     tutorId: 42,
@@ -174,16 +179,25 @@ test('manual submission leaves a six-hour day fully paid when the tutor records 
   } as never);
 
   await withServer(createTutorApp(), async (baseUrl) => {
+    const signingSecret = getScheduleSnapshotSigningSecret();
+    const submittedSnapshot = signingSecret
+      ? signScheduleSnapshot(scheduleSnapshot, signingSecret)
+      : scheduleSnapshot;
     const response = await fetch(`${baseUrl}/api/time-entry/me/day/${workDate}/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scheduleSnapshot })
+      body: JSON.stringify({ scheduleSnapshot: submittedSnapshot })
     });
     const body = (await response.json()) as {
       error?: string;
       day?: {
         breaks: unknown[];
         breakSummary: { grossMinutes: number; unpaidBreakMinutes: number; paidMinutes: number };
+        comparison: {
+          version: number;
+          scheduled: { totalMinutes: number; coveredMinutes: number; deltaMinutes: number };
+          extra: { paidMinutes: number };
+        };
       };
     };
 
@@ -192,6 +206,11 @@ test('manual submission leaves a six-hour day fully paid when the tutor records 
     assert.equal(body.day?.breakSummary.grossMinutes, 360);
     assert.equal(body.day?.breakSummary.unpaidBreakMinutes, 0);
     assert.equal(body.day?.breakSummary.paidMinutes, 360);
+    assert.equal(body.day?.comparison.version, 2);
+    assert.equal(body.day?.comparison.scheduled.totalMinutes, 360);
+    assert.equal(body.day?.comparison.scheduled.coveredMinutes, 360);
+    assert.equal(body.day?.comparison.scheduled.deltaMinutes, 0);
+    assert.equal(body.day?.comparison.extra.paidMinutes, 0);
   });
 
   const manual = (savedComparison as {
@@ -199,6 +218,7 @@ test('manual submission leaves a six-hour day fully paid when the tutor records 
   } | null)?.manual;
   assert.equal(manual?.grossMinutes, 360);
   assert.equal(manual?.paidMinutes, 360);
+  assert.equal((savedComparison as { version?: number } | null)?.version, 2);
   assert.equal(queries.some((sqlText) => sqlText.includes('time_entry_break_rules')), false);
   assert.equal(queries.some((sqlText) => sqlText.includes('INSERT INTO public.time_entry_breaks')), false);
   assert.equal(auditActions.includes('auto_break_applied'), false);

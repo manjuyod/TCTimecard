@@ -40,6 +40,7 @@ import { Badge } from '../../components/ui/badge';
 import { toast } from '../../components/ui/toast';
 import { formatDateRange, formatDateTime, hoursBetween } from '../../lib/utils';
 import { getSessionFranchiseId, isSelectorAllowed } from '../../lib/franchise';
+import { parseTimeEntryComparison } from '../../lib/timeEntryComparison';
 import {
   Dialog,
   DialogContent,
@@ -75,20 +76,7 @@ const createEmptyBreakDraft = (): BreakDraft => ({
   note: ''
 });
 
-const toComparisonTotals = (
-  day: TimeEntryDay
-): { manualMinutes: number | null; scheduledMinutes: number | null; matches: boolean | null } => {
-  if (!day.comparison || typeof day.comparison !== 'object') return { manualMinutes: null, scheduledMinutes: null, matches: null };
-  const comparison = day.comparison as Record<string, unknown>;
-  const matches = typeof comparison.matches === 'boolean' ? (comparison.matches as boolean) : null;
-
-  const manual = comparison.manual && typeof comparison.manual === 'object' ? (comparison.manual as Record<string, unknown>) : null;
-  const scheduled = comparison.scheduled && typeof comparison.scheduled === 'object' ? (comparison.scheduled as Record<string, unknown>) : null;
-
-  const manualMinutes = manual && typeof manual.totalMinutes === 'number' ? (manual.totalMinutes as number) : null;
-  const scheduledMinutes = scheduled && typeof scheduled.totalMinutes === 'number' ? (scheduled.totalMinutes as number) : null;
-  return { manualMinutes, scheduledMinutes, matches };
-};
+const toComparisonTotals = (day: TimeEntryDay) => parseTimeEntryComparison(day.comparison);
 
 const parseSnapshotIntervals = (snapshot: unknown): Array<{ startAt: string; endAt: string }> => {
   if (!snapshot || typeof snapshot !== 'object') return [];
@@ -1016,7 +1004,10 @@ export function ApprovalsPage(): JSX.Element {
           <TableRow>
             <TableHead>Tutor</TableHead>
             <TableHead>Work Date</TableHead>
+            <TableHead>Scheduled</TableHead>
+            <TableHead>Covered</TableHead>
             <TableHead>Delta</TableHead>
+            <TableHead>Payable Extra</TableHead>
             <TableHead>Flags</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
@@ -1024,10 +1015,6 @@ export function ApprovalsPage(): JSX.Element {
         <TableBody>
           {timeEntryDays.map((day) => {
             const totals = toComparisonTotals(day);
-            const delta =
-              totals.manualMinutes !== null && totals.scheduledMinutes !== null
-                ? totals.manualMinutes - totals.scheduledMinutes
-                : null;
             const editedAfterApproval = Boolean(day.history?.wasEverApproved);
 
             return (
@@ -1041,18 +1028,42 @@ export function ApprovalsPage(): JSX.Element {
                   <p className="text-xs text-muted-foreground">{day.submittedAt ? formatDateTime(day.submittedAt) : ''}</p>
                 </TableCell>
                 <TableCell>
-                  {delta === null ? (
+                  {totals ? formatMinutes(totals.scheduledMinutes) : 'n/a'}
+                </TableCell>
+                <TableCell>
+                  {totals ? formatMinutes(totals.coveredMinutes) : 'n/a'}
+                </TableCell>
+                <TableCell>
+                  {!totals ? (
                     <Badge variant="muted">n/a</Badge>
                   ) : (
-                    <Badge variant={delta === 0 ? 'success' : delta > 0 ? 'warning' : 'secondary'}>
-                      {delta > 0 ? '+' : ''}
-                      {delta} min
+                    <Badge variant={totals.deltaMinutes === 0 ? 'success' : 'secondary'}>
+                      {totals.deltaMinutes > 0 ? '+' : ''}
+                      {totals.deltaMinutes} min
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {!totals ? (
+                    <Badge variant="muted">n/a</Badge>
+                  ) : (
+                    <Badge variant={totals.payableExtraMinutes === 0 ? 'muted' : 'warning'}>
+                      {totals.payableExtraMinutes} min
                     </Badge>
                   )}
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-2">
                     {editedAfterApproval ? <Badge variant="warning">Edited after approval</Badge> : null}
+                    {totals?.scheduledBreakOverlapMinutes ? (
+                      <Badge variant="warning">{totals.scheduledBreakOverlapMinutes}m scheduled break overlap</Badge>
+                    ) : null}
+                    {totals?.outsideSessionMinutes ? (
+                      <Badge variant="muted">{totals.outsideSessionMinutes}m outside sessions</Badge>
+                    ) : null}
+                    {totals?.unpositionedMinutes ? (
+                      <Badge variant="muted">{totals.unpositionedMinutes}m unpositioned</Badge>
+                    ) : null}
                     {day.history?.lastAudit?.action ? (
                       <Badge variant="muted">Last: {day.history.lastAudit.action}</Badge>
                     ) : null}
@@ -1309,35 +1320,59 @@ export function ApprovalsPage(): JSX.Element {
                   <p className="font-semibold text-slate-900">Variance totals</p>
                   {(() => {
                     const totals = toComparisonTotals(selectedDay);
-                    const delta =
-                      totals.manualMinutes !== null && totals.scheduledMinutes !== null
-                        ? totals.manualMinutes - totals.scheduledMinutes
-                        : null;
                     return (
-                      <div className="mt-2 grid gap-2 md:grid-cols-4">
-                        <div>
-                          <p className="text-xs text-muted-foreground">Scheduled</p>
-                          <p className="font-semibold text-slate-900">
-                            {totals.scheduledMinutes !== null ? `${totals.scheduledMinutes} min` : 'n/a'}
+                      <>
+                        <div className="mt-2 grid gap-2 md:grid-cols-4">
+                          <div>
+                            <p className="text-xs text-muted-foreground">Scheduled</p>
+                            <p className="font-semibold text-slate-900">
+                              {totals ? `${totals.scheduledMinutes} min` : 'n/a'}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted-foreground">Covered</p>
+                            <p className="font-semibold text-slate-900">
+                              {totals ? `${totals.coveredMinutes} min` : 'n/a'}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted-foreground">Delta</p>
+                            <p className="font-semibold text-slate-900">
+                              {totals ? `${totals.deltaMinutes} min` : 'n/a'}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted-foreground">Payable extra</p>
+                            <p className="font-semibold text-slate-900">
+                              {totals ? `${totals.payableExtraMinutes} min` : 'n/a'}
+                            </p>
+                          </div>
+                        </div>
+                        {totals && totals.matches !== null ? (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            Meets automatic approval criteria: {totals.matches ? 'Yes' : 'No'}
                           </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Entered</p>
-                          <p className="font-semibold text-slate-900">
-                            {totals.manualMinutes !== null ? `${totals.manualMinutes} min` : 'n/a'}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Delta</p>
-                          <p className="font-semibold text-slate-900">{delta !== null ? `${delta} min` : 'n/a'}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Minutes match</p>
-                          <p className="font-semibold text-slate-900">
-                            {totals.matches === null ? 'n/a' : totals.matches ? 'Yes' : 'No'}
-                          </p>
-                        </div>
-                      </div>
+                        ) : null}
+                        {totals &&
+                        (totals.scheduledBreakOverlapMinutes > 0 ||
+                          totals.outsideSessionMinutes > 0 ||
+                          totals.unpositionedMinutes > 0) ? (
+                          <div className="mt-3 rounded-lg border border-amber-300/70 bg-amber-50 p-3 text-xs text-amber-950">
+                            <p className="font-semibold">Break placement warnings</p>
+                            <ul className="mt-1 list-disc space-y-1 pl-4">
+                              {totals.scheduledBreakOverlapMinutes > 0 ? (
+                                <li>{totals.scheduledBreakOverlapMinutes} min overlaps scheduled tutoring.</li>
+                              ) : null}
+                              {totals.outsideSessionMinutes > 0 ? (
+                                <li>{totals.outsideSessionMinutes} min falls outside recorded sessions and was not deducted.</li>
+                              ) : null}
+                              {totals.unpositionedMinutes > 0 ? (
+                                <li>{totals.unpositionedMinutes} min has no start/end time and was not deducted.</li>
+                              ) : null}
+                            </ul>
+                          </div>
+                        ) : null}
+                      </>
                     );
                   })()}
                 </div>
@@ -1384,11 +1419,11 @@ export function ApprovalsPage(): JSX.Element {
                       <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.grossMinutes ?? 0)}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-muted-foreground">Paid breaks</p>
+                      <p className="text-xs text-muted-foreground">Paid break overlap</p>
                       <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.paidBreakMinutes ?? 0)}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-muted-foreground">Unpaid breaks</p>
+                      <p className="text-xs text-muted-foreground">Unpaid break overlap</p>
                       <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
                     </div>
                     <div>
@@ -1554,11 +1589,11 @@ export function ApprovalsPage(): JSX.Element {
                       <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.grossMinutes ?? 0)}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-muted-foreground">Paid breaks</p>
+                      <p className="text-xs text-muted-foreground">Paid break overlap</p>
                       <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.paidBreakMinutes ?? 0)}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-muted-foreground">Unpaid breaks</p>
+                      <p className="text-xs text-muted-foreground">Unpaid break overlap</p>
                       <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
                     </div>
                     <div>

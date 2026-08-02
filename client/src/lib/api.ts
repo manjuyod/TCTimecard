@@ -144,6 +144,12 @@ export interface PayrollSettings {
   customPeriod2EndDay: number | null;
 }
 
+export interface FranchiseSettings {
+  franchiseId: number;
+  autoClockOutEnabled: boolean;
+  clockInTimeSnapEnabled: boolean;
+}
+
 export interface HoursSummary {
   range?: { startDate: string; endDate: string; month?: string; timezone: string };
   payPeriod?: PayPeriod;
@@ -192,6 +198,8 @@ export interface TimeEntryBreakSummary {
   paidBreakMinutes: number;
   unpaidBreakMinutes: number;
   paidMinutes: number;
+  outsideSessionBreakMinutes: number;
+  unpositionedBreakMinutes: number;
 }
 
 export type ClockStateValue = 0 | 1; // 0 = clocked out, 1 = clocked in
@@ -648,6 +656,40 @@ export const updatePayrollSettings = async (args: {
     method: 'PUT',
     body: JSON.stringify(payload)
   });
+  return result.settings;
+};
+
+export const fetchFranchiseSettings = async (
+  franchiseId?: number | null
+): Promise<FranchiseSettings> => {
+  const query = franchiseId !== undefined && franchiseId !== null
+    ? `?franchiseId=${franchiseId}`
+    : '';
+  const result = await apiFetch<{ settings: FranchiseSettings }>(
+    `/api/admin/settings${query}`
+  );
+  return result.settings;
+};
+
+export const updateFranchiseSettings = async (args: {
+  franchiseId?: number | null;
+  autoClockOutEnabled?: boolean;
+  clockInTimeSnapEnabled?: boolean;
+}): Promise<FranchiseSettings> => {
+  const payload: Record<string, unknown> = {};
+  if (args.franchiseId !== undefined && args.franchiseId !== null) {
+    payload.franchiseId = args.franchiseId;
+  }
+  if (args.autoClockOutEnabled !== undefined) {
+    payload.autoClockOutEnabled = args.autoClockOutEnabled;
+  }
+  if (args.clockInTimeSnapEnabled !== undefined) {
+    payload.clockInTimeSnapEnabled = args.clockInTimeSnapEnabled;
+  }
+  const result = await apiFetch<{ settings: FranchiseSettings }>(
+    '/api/admin/settings',
+    { method: 'PATCH', body: JSON.stringify(payload) }
+  );
   return result.settings;
 };
 

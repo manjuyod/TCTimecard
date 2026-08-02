@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 import type { ScheduleSnapshotInterval } from './scheduleSnapshot';
-import { computeBreakMinuteTotals, type BreakStatus, type PayTreatment } from './timeEntryBreaks';
+import type { BreakStatus, PayTreatment } from './timeEntryBreaks';
+import { computeTimeAllocation } from './timeAllocation';
 
 export type MinuteInterval = { startMinute: number; endMinute: number };
 
@@ -20,6 +21,41 @@ export type TimeEntryComparisonV1 = {
   scheduled: {
     union: Array<{ startAt: string; endAt: string }>;
     totalMinutes: number;
+  };
+  diffs: {
+    manualOnly: Array<{ startAt: string; endAt: string }>;
+    scheduledOnly: Array<{ startAt: string; endAt: string }>;
+  };
+};
+
+export type TimeEntryComparisonV2 = {
+  version: 2;
+  computedAt: string;
+  matches: boolean;
+  exactMatch: boolean;
+  manual: {
+    union: Array<{ startAt: string; endAt: string }>;
+    grossMinutes: number;
+    paidBreakMinutes: number;
+    unpaidBreakMinutes: number;
+    paidMinutes: number;
+    totalMinutes: number;
+  };
+  scheduled: {
+    union: Array<{ startAt: string; endAt: string }>;
+    totalMinutes: number;
+    coveredMinutes: number;
+    deficitMinutes: number;
+    deltaMinutes: number;
+  };
+  extra: {
+    paidMinutes: number;
+  };
+  breaks: {
+    scheduledOverlapMinutes: number;
+    outsideScheduleMinutes: number;
+    outsideSessionMinutes: number;
+    unpositionedMinutes: number;
   };
   diffs: {
     manualOnly: Array<{ startAt: string; endAt: string }>;
@@ -148,66 +184,66 @@ const subtractIntervals = (base: MinuteInterval[], subtract: MinuteInterval[]): 
   return result.filter((i) => i.endMinute > i.startMinute);
 };
 
-export const computeTimeEntryComparisonV1 = (params: {
-  sessions: Array<{ startAt: string; endAt: string }>;
-  breaks?: Array<{ payTreatment: PayTreatment; status: BreakStatus; durationMinutes: number }>;
+export const computeTimeEntryComparisonV2 = (params: {
+  sessions: Array<{ startAt: string | Date; endAt: string | Date }>;
+  breaks?: Array<{
+    payTreatment: PayTreatment;
+    status: BreakStatus;
+    startTime?: string | Date | null;
+    endTime?: string | Date | null;
+    durationMinutes: number;
+  }>;
   snapshotIntervals: ScheduleSnapshotInterval[];
   computedAt?: string;
-}): { ok: true; matches: boolean; comparison: TimeEntryComparisonV1 } | { ok: false; error: string } => {
-  const scheduleUnionResult = toUnionIntervals(params.snapshotIntervals);
-  if (!scheduleUnionResult.ok) return scheduleUnionResult;
+}): { ok: true; matches: boolean; comparison: TimeEntryComparisonV2 } | { ok: false; error: string } => {
+  const result = computeTimeAllocation({
+    sessions: params.sessions,
+    breaks: params.breaks,
+    scheduleIntervals: params.snapshotIntervals
+  });
+  if (!result.ok) return result;
 
-  const manualIntervals: MinuteInterval[] = [];
-  for (const session of params.sessions) {
-    const startIso = parseTimestamptzMinute(session.startAt);
-    const endIso = parseTimestamptzMinute(session.endAt);
-    if (!startIso || !endIso) {
-      return { ok: false, error: 'Sessions must be ISO timestamps with timezone offset, aligned to the minute' };
-    }
+  const { allocation } = result;
+  const toIsoIntervals = (intervals: MinuteInterval[]) =>
+    intervals.map((interval) => ({
+      startAt: minutesToIso(interval.startMinute),
+      endAt: minutesToIso(interval.endMinute)
+    }));
 
-    const startMinute = toEpochMinute(startIso);
-    const endMinute = toEpochMinute(endIso);
-    if (startMinute === null || endMinute === null || endMinute <= startMinute) {
-      return { ok: false, error: 'Session interval is invalid' };
-    }
-
-    manualIntervals.push({ startMinute, endMinute });
-  }
-
-  const manualUnion = normalizeIntervals(manualIntervals);
-  const scheduleUnion = scheduleUnionResult.union;
-  const grossMinutes = sumMinutes(manualUnion);
-  const { paidBreakMinutes, unpaidBreakMinutes } = computeBreakMinuteTotals(params.breaks ?? []);
-  const manualMinutes = Math.max(0, grossMinutes - unpaidBreakMinutes);
-  const scheduledMinutes = sumMinutes(scheduleUnion);
-  const exactMatch = intervalsEqual(manualUnion, scheduleUnion);
-  const matches = manualMinutes === scheduledMinutes;
-
-  const manualOnly = subtractIntervals(manualUnion, scheduleUnion);
-  const scheduledOnly = subtractIntervals(scheduleUnion, manualUnion);
-
-  const comparison: TimeEntryComparisonV1 = {
-    version: 1,
+  const comparison: TimeEntryComparisonV2 = {
+    version: 2,
     computedAt: params.computedAt ?? new Date().toISOString(),
-    matches,
-    exactMatch,
+    matches: allocation.matches,
+    exactMatch: allocation.exactMatch,
     manual: {
-      union: manualUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-      grossMinutes,
-      paidBreakMinutes,
-      unpaidBreakMinutes,
-      paidMinutes: manualMinutes,
-      totalMinutes: manualMinutes
+      union: toIsoIntervals(allocation.manual.union),
+      grossMinutes: allocation.manual.grossMinutes,
+      paidBreakMinutes: allocation.manual.paidBreakMinutes,
+      unpaidBreakMinutes: allocation.manual.unpaidBreakMinutes,
+      paidMinutes: allocation.manual.paidMinutes,
+      totalMinutes: allocation.manual.paidMinutes
     },
     scheduled: {
-      union: scheduleUnion.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-      totalMinutes: scheduledMinutes
+      union: toIsoIntervals(allocation.scheduled.union),
+      totalMinutes: allocation.scheduled.totalMinutes,
+      coveredMinutes: allocation.scheduled.coveredMinutes,
+      deficitMinutes: allocation.scheduled.deficitMinutes,
+      deltaMinutes: allocation.scheduled.deltaMinutes
+    },
+    extra: {
+      paidMinutes: allocation.extra.paidMinutes
+    },
+    breaks: {
+      scheduledOverlapMinutes: allocation.breaks.scheduledOverlapMinutes,
+      outsideScheduleMinutes: allocation.breaks.outsideScheduleMinutes,
+      outsideSessionMinutes: allocation.breaks.outsideSessionMinutes,
+      unpositionedMinutes: allocation.breaks.unpositionedMinutes
     },
     diffs: {
-      manualOnly: manualOnly.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) })),
-      scheduledOnly: scheduledOnly.map((i) => ({ startAt: minutesToIso(i.startMinute), endAt: minutesToIso(i.endMinute) }))
+      manualOnly: toIsoIntervals(allocation.diffs.manualOnly),
+      scheduledOnly: toIsoIntervals(allocation.diffs.scheduledOnly)
     }
   };
 
-  return { ok: true, matches, comparison };
+  return { ok: true, matches: allocation.matches, comparison };
 };

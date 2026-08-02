@@ -30,6 +30,7 @@ import { requestOpenWeeklyAttestation } from '../../components/tutor/WeeklyAttes
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { TIMEKEEPING_QUOTES, WEEKLY_ATTESTATION_STATEMENT, WORKWEEK_DEFINITION } from '../../lib/attestationCopy';
+import { parseTimeEntryComparison } from '../../lib/timeEntryComparison';
 
 type CalendarEventPayload =
   | { type: 'schedule'; entry: CalendarEntry }
@@ -223,9 +224,10 @@ export function TutorCalendarPage(): JSX.Element {
     return { ok: true, sessions: sorted.map((s) => ({ startAt: s.startAt, endAt: s.endAt })) };
   };
 
-  const handleSave = async () => {
+  const handlePrepareSubmit = async () => {
     if (!entryDate) return;
-    const current = findDay(entryDate);
+    const workDate = entryDate;
+    const current = findDay(workDate);
     if (current?.status === 'approved') {
       const confirmed = window.confirm('This day is approved. Editing will reset it to pending and require re-approval. Continue?');
       if (!confirmed) return;
@@ -239,9 +241,10 @@ export function TutorCalendarPage(): JSX.Element {
 
     setEntrySaving(true);
     try {
-      const saved = await saveTimeEntryDay({ workDate: entryDate, sessions: payload.sessions });
+      const saved = await saveTimeEntryDay({ workDate, sessions: payload.sessions });
       updateDay(saved);
-      toast.success('Saved.');
+      setSubmitReviewAck(false);
+      setSubmitReviewOpen(true);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         requestOpenWeeklyAttestation();
@@ -253,7 +256,7 @@ export function TutorCalendarPage(): JSX.Element {
     }
   };
 
-  const handleSubmit = async () => {
+  const handleConfirmSubmit = async () => {
     if (!entryDate) return;
     const current = findDay(entryDate);
     if (!current) {
@@ -390,15 +393,8 @@ export function TutorCalendarPage(): JSX.Element {
   }, [entryDate, browserTimeZone]);
   const activeSnapshot = entryDate ? snapshotsByDate[entryDate] : null;
   const activeSnapshotIntervals = parseSnapshotIntervals(activeSnapshot);
-  const activeComparison = activeDay?.comparison && typeof activeDay.comparison === 'object' ? (activeDay.comparison as Record<string, unknown>) : null;
-  const manualTotalMinutes = typeof (activeComparison?.manual as Record<string, unknown> | undefined)?.totalMinutes === 'number'
-    ? (activeComparison?.manual as Record<string, unknown>).totalMinutes as number
-    : null;
-  const scheduledTotalMinutes = typeof (activeComparison?.scheduled as Record<string, unknown> | undefined)?.totalMinutes === 'number'
-    ? (activeComparison?.scheduled as Record<string, unknown>).totalMinutes as number
-    : null;
-  const matches = typeof activeComparison?.matches === 'boolean' ? (activeComparison.matches as boolean) : null;
-  const deltaMinutes = manualTotalMinutes !== null && scheduledTotalMinutes !== null ? manualTotalMinutes - scheduledTotalMinutes : null;
+  const activeComparison = parseTimeEntryComparison(activeDay?.comparison);
+  const entryBusy = entrySaving || entrySubmitting;
 
   return (
     <div className="space-y-4">
@@ -461,7 +457,12 @@ export function TutorCalendarPage(): JSX.Element {
         </CardContent>
       </Card>
 
-      <Dialog open={Boolean(entryDate)} onOpenChange={(open) => !open && setEntryDate(null)}>
+      <Dialog
+        open={Boolean(entryDate)}
+        onOpenChange={(open) => {
+          if (!open && !entryBusy) setEntryDate(null);
+        }}
+      >
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{entryDateLabel ? `Time Entry – ${entryDateLabel}` : 'Time Entry'}</DialogTitle>
@@ -495,6 +496,7 @@ export function TutorCalendarPage(): JSX.Element {
                 <Button
                   variant="outline"
                   onClick={() => setEntryDraftSessions((prev) => [...prev, { start: '', end: '' }])}
+                  disabled={entryBusy}
                 >
                   Add segment
                 </Button>
@@ -512,6 +514,7 @@ export function TutorCalendarPage(): JSX.Element {
                       }))
                     );
                   }}
+                  disabled={entryBusy}
                 >
                   Copy schedule
                 </Button>
@@ -559,6 +562,7 @@ export function TutorCalendarPage(): JSX.Element {
                     <Input
                       type="time"
                       value={row.start}
+                      disabled={entryBusy}
                       onChange={(e) =>
                         setEntryDraftSessions((prev) => prev.map((s, i) => (i === idx ? { ...s, start: e.target.value } : s)))
                       }
@@ -569,6 +573,7 @@ export function TutorCalendarPage(): JSX.Element {
                     <Input
                       type="time"
                       value={row.end}
+                      disabled={entryBusy}
                       onChange={(e) =>
                         setEntryDraftSessions((prev) => prev.map((s, i) => (i === idx ? { ...s, end: e.target.value } : s)))
                       }
@@ -577,7 +582,7 @@ export function TutorCalendarPage(): JSX.Element {
                   <Button
                     variant="outline"
                     onClick={() => setEntryDraftSessions((prev) => prev.filter((_, i) => i !== idx))}
-                    disabled={entryDraftSessions.length <= 1}
+                    disabled={entryBusy || entryDraftSessions.length <= 1}
                   >
                     Remove
                   </Button>
@@ -593,11 +598,11 @@ export function TutorCalendarPage(): JSX.Element {
                   <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.grossMinutes ?? 0)}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">Paid breaks</p>
+                  <p className="text-xs text-muted-foreground">Paid break overlap</p>
                   <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.paidBreakMinutes ?? 0)}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">Unpaid breaks</p>
+                  <p className="text-xs text-muted-foreground">Unpaid break overlap</p>
                   <p className="font-semibold text-slate-900">{formatMinutes(activeDay?.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
                 </div>
                 <div>
@@ -642,51 +647,76 @@ export function TutorCalendarPage(): JSX.Element {
             {activeComparison ? (
               <div className="rounded-lg border bg-white p-4 text-sm">
                 <p className="font-semibold text-slate-900">Variance summary</p>
-                <div className="mt-2 grid gap-2 md:grid-cols-3">
+                <div className="mt-2 grid gap-2 md:grid-cols-4">
                   <div>
                     <p className="text-xs text-muted-foreground">Scheduled</p>
                     <p className="font-semibold text-slate-900">
-                      {scheduledTotalMinutes !== null ? `${scheduledTotalMinutes} min` : '-'}
+                      {activeComparison.scheduledMinutes} min
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground">Entered</p>
+                    <p className="text-xs text-muted-foreground">Covered</p>
                     <p className="font-semibold text-slate-900">
-                      {manualTotalMinutes !== null ? `${manualTotalMinutes} min` : '-'}
+                      {activeComparison.coveredMinutes} min
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Delta</p>
                     <p className="font-semibold text-slate-900">
-                      {deltaMinutes !== null ? `${deltaMinutes > 0 ? '+' : ''}${deltaMinutes} min` : '-'}
+                      {activeComparison.deltaMinutes > 0 ? '+' : ''}
+                      {activeComparison.deltaMinutes} min
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Payable extra</p>
+                    <p className="font-semibold text-slate-900">
+                      {activeComparison.payableExtraMinutes} min
                     </p>
                   </div>
                 </div>
-                {matches !== null ? (
-                  <p className="mt-2 text-xs text-muted-foreground">Minutes match: {matches ? 'Yes' : 'No'}</p>
+                {activeComparison.matches !== null ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Meets automatic approval criteria: {activeComparison.matches ? 'Yes' : 'No'}
+                  </p>
+                ) : null}
+                {activeComparison.scheduledBreakOverlapMinutes > 0 ||
+                activeComparison.outsideSessionMinutes > 0 ||
+                activeComparison.unpositionedMinutes > 0 ? (
+                  <div className="mt-3 rounded-lg border border-amber-300/70 bg-amber-50 p-3 text-xs text-amber-950">
+                    <p className="font-semibold">Break placement warnings</p>
+                    <ul className="mt-1 list-disc space-y-1 pl-4">
+                      {activeComparison.scheduledBreakOverlapMinutes > 0 ? (
+                        <li>{activeComparison.scheduledBreakOverlapMinutes} min overlaps scheduled tutoring.</li>
+                      ) : null}
+                      {activeComparison.outsideSessionMinutes > 0 ? (
+                        <li>{activeComparison.outsideSessionMinutes} min falls outside recorded sessions and was not deducted.</li>
+                      ) : null}
+                      {activeComparison.unpositionedMinutes > 0 ? (
+                        <li>{activeComparison.unpositionedMinutes} min has no start/end time and was not deducted.</li>
+                      ) : null}
+                    </ul>
+                  </div>
                 ) : null}
               </div>
             ) : null}
 
             <div className="flex flex-wrap justify-end gap-2">
-              <Button variant="outline" onClick={() => void handleSave()} disabled={entrySaving || entrySubmitting}>
-                {entrySaving ? 'Saving…' : 'Save'}
-              </Button>
-              <Button
-                onClick={() => {
-                  setSubmitReviewOpen(true);
-                  setSubmitReviewAck(false);
-                }}
-                disabled={entrySubmitting || !activeDay}
-              >
-                Submit
+              <Button onClick={() => void handlePrepareSubmit()} disabled={entryBusy}>
+                {entrySaving ? 'Saving…' : 'Submit'}
               </Button>
             </div>
           </div>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={submitReviewOpen} onOpenChange={setSubmitReviewOpen}>
+      <Dialog
+        open={submitReviewOpen}
+        onOpenChange={(open) => {
+          if (entrySubmitting) return;
+          setSubmitReviewOpen(open);
+          if (!open) setSubmitReviewAck(false);
+        }}
+      >
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Before you submit</DialogTitle>
@@ -714,6 +744,7 @@ export function TutorCalendarPage(): JSX.Element {
                 id="submitAck"
                 type="checkbox"
                 checked={submitReviewAck}
+                disabled={entrySubmitting}
                 onChange={(e) => setSubmitReviewAck(e.target.checked)}
               />
               <Label htmlFor="submitAck" className="text-sm font-medium">
@@ -723,10 +754,17 @@ export function TutorCalendarPage(): JSX.Element {
           </div>
 
           <div className="flex flex-wrap justify-end gap-2">
-            <Button variant="outline" onClick={() => setSubmitReviewOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSubmitReviewOpen(false);
+                setSubmitReviewAck(false);
+              }}
+              disabled={entrySubmitting}
+            >
               Cancel
             </Button>
-            <Button onClick={() => void handleSubmit()} disabled={!submitReviewAck || entrySubmitting}>
+            <Button onClick={() => void handleConfirmSubmit()} disabled={!submitReviewAck || entrySubmitting}>
               {entrySubmitting ? 'Submitting…' : 'Submit for approval'}
             </Button>
           </div>

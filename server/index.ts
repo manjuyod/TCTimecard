@@ -7,6 +7,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import authRoutes from './routes/auth';
+import adminSettingsRoutes from './routes/adminSettings';
 import payPeriodRoutes from './routes/payPeriod';
 import hoursRoutes from './routes/hours';
 import extraHoursRoutes from './routes/extrahours';
@@ -20,6 +21,7 @@ import { SESSION_SECRET } from './config/session';
 import { createSessionMiddleware } from './config/sessionMiddleware';
 import { closePostgresPool } from './db/postgres';
 import { closeMssqlPool } from './db/mssql';
+import { startAutoClockOutScheduler } from './services/autoClockOutScheduler';
 import { installGracefulShutdown } from './services/gracefulShutdown';
 import { setSensitivePageHeaders } from './middleware/sensitivePageHeaders';
 
@@ -46,6 +48,8 @@ if (process.env.SKIP_DB_VALIDATION !== 'true') {
     process.exit(1);
   }
 }
+
+const autoClockOutScheduler = startAutoClockOutScheduler();
 
 if (!process.env.SESSION_SECRET) {
   console.warn(
@@ -77,6 +81,7 @@ app.use('/api', healthRoutes);
 app.use(createSessionMiddleware());
 
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminSettingsRoutes);
 app.use('/api/pay-period', payPeriodRoutes);
 app.use('/api', hoursRoutes);
 app.use('/api', extraHoursRoutes);
@@ -131,6 +136,7 @@ const server = app.listen(PORT, () => {
 installGracefulShutdown({
   server,
   closeResources: async () => {
+    autoClockOutScheduler.stop();
     const results = await Promise.allSettled([closePostgresPool(), closeMssqlPool()]);
     const failed = results.find((result) => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;

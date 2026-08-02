@@ -1,5 +1,6 @@
 import type { ScheduleSnapshotV1 } from './scheduleSnapshot';
-import type { TimeEntryComparisonV1 } from './timeEntryComparison';
+import type { TimeEntryComparisonV2 } from './timeEntryComparison';
+import type { ClockOutSource } from './clockOutFinalization';
 
 export type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
 
@@ -20,14 +21,16 @@ export const shouldInvalidateClockDayStatus = (status: TimeEntryStatus): boolean
 
 export const resolveClockOutSubmission = (params: {
   snapshot: ScheduleSnapshotV1;
-  comparison: TimeEntryComparisonV1;
+  comparison: TimeEntryComparisonV2;
   workDate: string;
   timezone: string;
+  source?: ClockOutSource;
+  detectedAt?: string;
 }): ClockSubmissionDecision => {
   const matches = params.comparison.matches;
   const nextStatus: 'pending' | 'approved' = matches ? 'approved' : 'pending';
   const decidedAt = matches ? new Date().toISOString() : null;
-  const decisionReason = matches ? 'auto-approved (matching scheduled minutes)' : null;
+  const decisionReason = matches ? 'auto-approved (complete scheduled coverage with no payable extra time)' : null;
 
   return {
     nextStatus,
@@ -43,8 +46,9 @@ export const resolveClockOutSubmission = (params: {
         scheduleSnapshot: params.snapshot,
         comparison: params.comparison,
         auto: true,
-        reason: matches ? 'minutes_match' : 'minutes_mismatch',
-        source: 'clock_out'
+        reason: matches ? 'coverage_complete_no_payable_extra' : 'coverage_or_extra_mismatch',
+        source: params.source ?? 'clock_out',
+        ...(params.detectedAt ? { detectedAt: params.detectedAt } : {})
       }
     }
   };

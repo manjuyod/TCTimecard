@@ -40,7 +40,16 @@ const baseDay = {
   work_date: '2026-01-02',
   timezone: 'America/Los_Angeles',
   status: 'pending',
-  schedule_snapshot: null,
+  schedule_snapshot: {
+    version: 1,
+    franchiseId: 77,
+    tutorId: 88,
+    workDate: '2026-01-02',
+    timezone: 'UTC',
+    slotMinutes: 60,
+    entries: [],
+    intervals: [{ startAt: '2026-01-02T09:00:00.000Z', endAt: '2026-01-02T17:00:00.000Z' }]
+  },
   comparison: null,
   submitted_at: now,
   decided_by: null,
@@ -197,17 +206,132 @@ test('admin break update preserves original break source while auditing manager 
     const body = (await response.json()) as {
       day: {
         breaks: Array<{ source: string; payTreatment: string; note: string | null }>;
-        breakSummary: { paidBreakMinutes: number; unpaidBreakMinutes: number; paidMinutes: number };
+        comparison: {
+          version: number;
+          matches: boolean;
+          breaks: { unpositionedMinutes: number };
+        };
+        breakSummary: {
+          paidBreakMinutes: number;
+          unpaidBreakMinutes: number;
+          paidMinutes: number;
+          unpositionedBreakMinutes: number;
+        };
       };
     };
 
     assert.equal(body.day.breaks[0].source, 'auto_rule');
     assert.equal(body.day.breaks[0].payTreatment, 'paid');
     assert.equal(body.day.breaks[0].note, 'Paid lunch exception');
-    assert.equal(body.day.breakSummary.paidBreakMinutes, 30);
+    assert.equal(body.day.breakSummary.paidBreakMinutes, 0);
     assert.equal(body.day.breakSummary.unpaidBreakMinutes, 0);
     assert.equal(body.day.breakSummary.paidMinutes, 480);
+    assert.equal(body.day.breakSummary.unpositionedBreakMinutes, 30);
+    assert.equal(body.day.comparison.version, 2);
+    assert.equal(body.day.comparison.matches, true);
+    assert.equal(body.day.comparison.breaks.unpositionedMinutes, 30);
     assert.equal((auditMetadata?.break as { source?: string } | undefined)?.source, 'auto_rule');
     assert.equal((auditMetadata?.previousBreak as { source?: string } | undefined)?.source, 'auto_rule');
   });
+});
+
+test('admin session edits recompute comparison with existing break timestamps', async () => {
+  let sessionRows = [{ ...baseSession }];
+  const timedBreak: BreakRow = {
+    ...createBreak(),
+    time_entry_session_id: baseSession.id,
+    start_time: '2026-01-02T09:15:00.000Z',
+    end_time: '2026-01-02T09:45:00.000Z',
+    duration_minutes: 30,
+    source: 'employee'
+  };
+  let storedComparison: Record<string, unknown> | null = null;
+
+  const client = {
+    async query(sql: string, params: unknown[] = []): Promise<QueryResult> {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rowCount: 0, rows: [] };
+      if (sql.includes('FROM public.time_entry_days')) {
+        return { rowCount: 1, rows: [{ ...baseDay }] };
+      }
+      if (sql.includes('DELETE FROM public.time_entry_sessions')) {
+        sessionRows = [];
+        return { rowCount: 0, rows: [] };
+      }
+      if (sql.includes('FROM public.time_entry_sessions')) {
+        return { rowCount: sessionRows.length, rows: sessionRows.map((row) => ({ ...row })) };
+      }
+      if (sql.includes('FROM public.time_entry_breaks') && sql.includes('ANY($1::int[])')) {
+        return { rowCount: 1, rows: [{ ...timedBreak }] };
+      }
+      if (sql.includes('UPDATE public.time_entry_days')) {
+        storedComparison = params[0] as Record<string, unknown>;
+        return {
+          rowCount: 1,
+          rows: [{ ...baseDay, status: 'pending', comparison: storedComparison, updated_at: now }]
+        };
+      }
+      if (sql.includes('INSERT INTO public.time_entry_sessions')) {
+        sessionRows.push({
+          id: 200,
+          entry_day_id: baseDay.id,
+          start_at: String(params[3]),
+          end_at: String(params[4]),
+          sort_order: Number(params[5])
+        });
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.includes('INSERT INTO public.time_entry_audit')) {
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+    release() {
+      return undefined;
+    }
+  };
+
+  setPostgresPoolOverride({ connect: async () => client } as never);
+  const app = createApp({ accountType: 'ADMIN', accountId: 100, franchiseId: 77, displayName: 'Admin User' });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/time-entry/admin/day/${baseDay.id}?franchiseId=77`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason: 'Corrected session start',
+        sessions: [
+          {
+            startAt: '2026-01-02T10:00:00.000Z',
+            endAt: '2026-01-02T17:00:00.000Z'
+          }
+        ]
+      })
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      day: {
+        comparison: {
+          version: number;
+          scheduled: { coveredMinutes: number; deltaMinutes: number };
+          breaks: { outsideSessionMinutes: number };
+        };
+        breakSummary: {
+          unpaidBreakMinutes: number;
+          paidMinutes: number;
+          outsideSessionBreakMinutes: number;
+        };
+      };
+    };
+
+    assert.equal(body.day.comparison.version, 2);
+    assert.equal(body.day.comparison.scheduled.coveredMinutes, 420);
+    assert.equal(body.day.comparison.scheduled.deltaMinutes, -60);
+    assert.equal(body.day.comparison.breaks.outsideSessionMinutes, 30);
+    assert.equal(body.day.breakSummary.unpaidBreakMinutes, 0);
+    assert.equal(body.day.breakSummary.paidMinutes, 420);
+    assert.equal(body.day.breakSummary.outsideSessionBreakMinutes, 30);
+  });
+
+  assert.equal((storedComparison as { version?: number } | null)?.version, 2);
 });

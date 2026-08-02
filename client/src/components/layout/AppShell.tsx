@@ -8,6 +8,7 @@ import {
   LayoutDashboard,
   Menu,
   Moon,
+  Settings,
   Sun,
   Table2,
   Umbrella,
@@ -33,7 +34,8 @@ const iconMap = {
   Clock,
   Umbrella,
   Inbox,
-  Table2
+  Table2,
+  Settings
 };
 
 interface AppShellProps {
@@ -155,6 +157,7 @@ export function AppShell({ navItems, role, userName, onLogout, children }: AppSh
       ) : null}
 
       <aside
+        aria-hidden={!mobileOpen}
         className={cn(
           'fixed inset-y-0 left-0 z-40 flex h-full w-72 flex-col gap-4 bg-card/95 p-4 shadow-xl ring-1 ring-border transition-transform duration-200 md:hidden',
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
