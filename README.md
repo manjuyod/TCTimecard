@@ -52,7 +52,7 @@ Auth:
 
 Franchise settings (admin only):
 - `GET /api/admin/settings?franchiseId=...`
-- `PATCH /api/admin/settings` (body: `{ franchiseId, autoClockOutEnabled }`)
+- `PATCH /api/admin/settings` (partial body: `{ franchiseId, autoClockOutEnabled?, clockInTimeSnapEnabled? }`; at least one setting is required)
 
 Pay periods:
 - `GET /api/pay-period/current`
@@ -169,6 +169,7 @@ Run `npm run db:check-timeoff-schema` for a read-only compatibility preflight be
 - Run: `npm run db:migrate`
 - Migration SQL lives in `server/db/migrations/` and is tracked in `public.schema_migrations`.
 - `0007_franchise_auto_clock_out.sql` additively creates the per-franchise `auto_clock_out_enabled` setting with a safe default of `false`.
+- `0008_clock_in_time_snap.sql` additively creates the per-franchise `clock_in_time_snap_enabled` setting with a safe default of `false`.
 
 ### Franchise automatic clock-out
 
@@ -176,6 +177,13 @@ Run `npm run db:check-timeoff-schema` for a read-only compatibility preflight be
 - The Reserved VM worker runs only during UTC minutes `00`-`09` and `50`-`59`. Each pass reads eligible PostgreSQL rows under one advisory lock, fetches the latest MSSQL schedules in one batch, and uses no more than four PostgreSQL connections total (including the lock connection).
 - Split schedules close only after the final valid interval. The open session and any valid active break are backdated to that exact final `endAt`, not the later worker detection time. A missing or malformed schedule is counted and skipped without changing tutor time.
 - Automatic completion may finish an already-open session without presenting the interactive weekly-attestation gate; it does not sign an attestation, relax the attestation policy, or unblock later tutor actions. Manual clock-out still requires the tutor to end an active break first; the automatic worker closes a valid active break at the same exact scheduled target.
+
+### Franchise Time Snap
+
+- Time Snap is off by default and is enabled per franchise under `/admin/settings`.
+- For schedule intervals that start exactly on the hour, a clock-in from 8 minutes before through 2 minutes after the scheduled start is stored at that scheduled hour. The boundaries are inclusive.
+- Each new clock-in session is evaluated independently. Non-hour starts, missing or malformed schedules, and MSSQL schedule lookup failures use the actual server minute instead; the existing clock-out comparison then routes any mismatch through normal director approval.
+- The snapped hour is the official `time_entry_sessions.start_at`. Audit metadata retains the server-detected minute and whether Time Snap was applied. Breaks cannot start before a future snapped start, and clock-out must be at least one minute after it.
 
 Clock state model (Postgres):
 - `public.time_entry_days.clock_state`: `0 = clocked out`, `1 = clocked in` (default `0`).
@@ -206,7 +214,7 @@ MSSQL tables/fields referenced by the API:
 
 ## How to test (manual QA)
 Clock in/out:
-1. Tutor dashboard → Clock → `Clock In` (creates an open session with server time truncated to the minute).
+1. Tutor dashboard → Clock → `Clock In` (creates an open session with server time truncated to the minute; when Time Snap is enabled, an eligible top-of-hour start is stored at the scheduled hour).
 2. `Clock Out` (closes the open session with server time truncated to the minute).
 3. If the day still has scheduled blocks remaining, choose:
    - **Break** (do not finalize), or

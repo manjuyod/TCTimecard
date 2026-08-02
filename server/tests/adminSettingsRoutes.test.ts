@@ -11,7 +11,11 @@ type SessionAuth = {
   franchiseId: number | null;
 };
 
-type SettingRow = { franchiseid: number; auto_clock_out_enabled: boolean };
+type SettingRow = {
+  franchiseid: number;
+  auto_clock_out_enabled: boolean;
+  clock_in_time_snap_enabled: boolean;
+};
 
 afterEach(() => setPostgresPoolOverride(undefined));
 
@@ -27,7 +31,14 @@ const createPool = (initial: SettingRow[]) => {
       }
       if (/INSERT INTO public\.franchise_payroll_settings/i.test(sql)) {
         lastUpdatedFranchiseId = franchiseId;
-        const row = { franchiseid: franchiseId, auto_clock_out_enabled: params[1] === true };
+        const current = rows.get(franchiseId);
+        const row = {
+          franchiseid: franchiseId,
+          auto_clock_out_enabled: typeof params[1] === 'boolean'
+            ? params[1] : current?.auto_clock_out_enabled ?? false,
+          clock_in_time_snap_enabled: typeof params[2] === 'boolean'
+            ? params[2] : current?.clock_in_time_snap_enabled ?? false
+        };
         rows.set(franchiseId, row);
         return { rowCount: 1, rows: [row] };
       }
@@ -76,13 +87,49 @@ test('admin reads and enables auto clock-out for the scoped franchise', async ()
   await withServer(app, async (baseUrl) => {
     const get = await fetch(`${baseUrl}/api/admin/settings?franchiseId=77`);
     assert.equal(get.status, 200);
-    assert.deepEqual(await get.json(), { settings: { franchiseId: 77, autoClockOutEnabled: false } });
+    assert.deepEqual(await get.json(), {
+      settings: {
+        franchiseId: 77,
+        autoClockOutEnabled: false,
+        clockInTimeSnapEnabled: false
+      }
+    });
     const patch = await fetch(`${baseUrl}/api/admin/settings`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ franchiseId: 77, autoClockOutEnabled: true })
     });
     assert.equal(patch.status, 200);
-    assert.deepEqual(await patch.json(), { settings: { franchiseId: 77, autoClockOutEnabled: true } });
+    assert.deepEqual(await patch.json(), {
+      settings: {
+        franchiseId: 77,
+        autoClockOutEnabled: true,
+        clockInTimeSnapEnabled: false
+      }
+    });
+  });
+});
+
+test('admin enables Time Snap without changing auto clock-out', async () => {
+  const harness = createPool([{
+    franchiseid: 77,
+    auto_clock_out_enabled: true,
+    clock_in_time_snap_enabled: false
+  }]);
+  setPostgresPoolOverride(harness.pool as never);
+  const app = createApp({ accountType: 'ADMIN', accountId: 10, franchiseId: 1 });
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/admin/settings`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ franchiseId: 77, clockInTimeSnapEnabled: true })
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      settings: {
+        franchiseId: 77,
+        autoClockOutEnabled: true,
+        clockInTimeSnapEnabled: true
+      }
+    });
   });
 });
 
@@ -96,6 +143,31 @@ test('non-Boolean auto clock-out payload is rejected', async () => {
     });
     assert.equal(response.status, 400);
     assert.match(((await response.json()) as { error: string }).error, /boolean/i);
+  });
+});
+
+test('invalid Time Snap and empty patches are rejected', async () => {
+  const harness = createPool([]);
+  setPostgresPoolOverride(harness.pool as never);
+  await withServer(createApp({ accountType: 'ADMIN', accountId: 10, franchiseId: 1 }), async (baseUrl) => {
+    const cases: Array<{ body: Record<string, unknown>; error: RegExp }> = [
+      {
+        body: { franchiseId: 77, clockInTimeSnapEnabled: 'true' },
+        error: /clockInTimeSnapEnabled must be a boolean/i
+      },
+      {
+        body: { franchiseId: 77 },
+        error: /at least one automatic timekeeping setting/i
+      }
+    ];
+    for (const { body, error } of cases) {
+      const response = await fetch(`${baseUrl}/api/admin/settings`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      assert.equal(response.status, 400);
+      assert.match(((await response.json()) as { error: string }).error, error);
+    }
   });
 });
 

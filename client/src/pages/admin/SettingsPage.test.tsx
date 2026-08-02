@@ -23,9 +23,11 @@ afterEach(() => {
 
 const installSettingsFetch = ({
   autoClockOutEnabled = false,
+  clockInTimeSnapEnabled = false,
   payPeriodType = 'biweekly'
 }: {
   autoClockOutEnabled?: boolean;
+  clockInTimeSnapEnabled?: boolean;
   payPeriodType?: 'weekly' | 'biweekly';
 } = {}) => {
   const calls: Array<{ path: string; init?: RequestInit }> = [];
@@ -34,7 +36,7 @@ const installSettingsFetch = ({
     calls.push({ path, init });
     if (path.startsWith('/api/admin/settings')) {
       return new Response(JSON.stringify({
-        settings: { franchiseId: 77, autoClockOutEnabled }
+        settings: { franchiseId: 77, autoClockOutEnabled, clockInTimeSnapEnabled }
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (path.startsWith('/api/pay-period/settings')) {
@@ -52,12 +54,17 @@ const installSettingsFetch = ({
 
 describe('admin settings page', () => {
   it('loads persisted settings for the selected franchise before saving', async () => {
-    const calls = installSettingsFetch({ autoClockOutEnabled: true, payPeriodType: 'weekly' });
+    const calls = installSettingsFetch({
+      autoClockOutEnabled: true,
+      clockInTimeSnapEnabled: true,
+      payPeriodType: 'weekly'
+    });
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
 
     await waitFor(() => {
       expect(calls.filter((call) => call.init?.method === undefined)).toHaveLength(2);
       expect(screen.getByRole('switch', { name: /auto clock-out/i })).toBeChecked();
+      expect(screen.getByRole('switch', { name: /time snap/i })).toBeChecked();
       expect(screen.getByRole('combobox')).toHaveTextContent('Weekly');
     });
 
@@ -65,25 +72,31 @@ describe('admin settings page', () => {
     await waitFor(() => expect(calls.some((call) => call.init?.method === 'PATCH')).toBe(true));
     expect(JSON.parse(String(calls.find((call) => call.init?.method === 'PATCH')?.init?.body))).toEqual({
       franchiseId: 1,
-      autoClockOutEnabled: true
+      autoClockOutEnabled: true,
+      clockInTimeSnapEnabled: true
     });
   });
 
-  it('loads and saves the franchise-wide auto clock-out switch', async () => {
+  it('loads and saves both franchise-wide automatic timekeeping switches', async () => {
     const calls = installSettingsFetch();
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
 
     const switchControl = await screen.findByRole('switch', { name: /auto clock-out/i });
+    const timeSnapControl = screen.getByRole('switch', { name: /time snap/i });
     expect(switchControl).not.toBeChecked();
+    expect(timeSnapControl).not.toBeChecked();
     fireEvent.click(switchControl);
+    fireEvent.click(timeSnapControl);
     fireEvent.click(screen.getByRole('button', { name: /save automatic timekeeping/i }));
 
     await waitFor(() => expect(calls.some((call) => call.init?.method === 'PATCH')).toBe(true));
     const patch = calls.find((call) => call.init?.method === 'PATCH');
     expect(JSON.parse(String(patch?.init?.body))).toEqual({
       franchiseId: 1,
-      autoClockOutEnabled: true
+      autoClockOutEnabled: true,
+      clockInTimeSnapEnabled: true
     });
+    expect(screen.getByText(/8 minutes early through 2 minutes late/i)).toBeInTheDocument();
     expect(screen.getByText(/choose how recurring pay periods/i)).toBeInTheDocument();
   });
 

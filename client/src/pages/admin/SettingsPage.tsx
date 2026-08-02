@@ -39,6 +39,7 @@ export function SettingsPage(): JSX.Element {
   const [franchiseIdInput, setFranchiseIdInput] = useState(sessionFranchiseId !== null ? String(sessionFranchiseId) : '');
   const [appliedFranchiseId, setAppliedFranchiseId] = useState<number | null>(null);
   const [autoClockOutEnabled, setAutoClockOutEnabled] = useState(false);
+  const [clockInTimeSnapEnabled, setClockInTimeSnapEnabled] = useState(false);
   const [payrollSettings, setPayrollSettings] = useState<PayrollSettings | null>(null);
   const [payrollForm, setPayrollForm] = useState<PayrollSettingsFormState>(EMPTY_PAYROLL_SETTINGS_FORM);
   const [autoLoading, setAutoLoading] = useState(false);
@@ -77,6 +78,7 @@ export function SettingsPage(): JSX.Element {
         fetchPayrollSettings(franchiseId)
       ]);
       setAutoClockOutEnabled(general.autoClockOutEnabled);
+      setClockInTimeSnapEnabled(general.clockInTimeSnapEnabled);
       setPayrollSettings(payroll);
       setPayrollForm(toPayrollSettingsFormState(payroll));
       setAppliedFranchiseId(franchiseId);
@@ -101,8 +103,13 @@ export function SettingsPage(): JSX.Element {
     setAutoSaving(true);
     setAutoError(null);
     try {
-      const settings = await updateFranchiseSettings({ franchiseId, autoClockOutEnabled });
+      const settings = await updateFranchiseSettings({
+        franchiseId,
+        autoClockOutEnabled,
+        clockInTimeSnapEnabled
+      });
       setAutoClockOutEnabled(settings.autoClockOutEnabled);
+      setClockInTimeSnapEnabled(settings.clockInTimeSnapEnabled);
       toast.success('Automatic timekeeping updated');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to update automatic timekeeping';
@@ -188,7 +195,7 @@ export function SettingsPage(): JSX.Element {
       <Card>
         <CardHeader>
           <CardTitle>Automatic timekeeping</CardTitle>
-          <CardDescription>Clock tutors out at the end of their final scheduled block. Time differences still require approval.</CardDescription>
+          <CardDescription>Configure schedule-based clock behavior for every tutor in this franchise.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <label className="flex items-center justify-between gap-4 rounded-lg border p-4">
@@ -197,6 +204,13 @@ export function SettingsPage(): JSX.Element {
               <span className="block text-sm text-muted-foreground">Applies to every tutor in this franchise.</span>
             </span>
             <input type="checkbox" role="switch" aria-label="Auto clock-out" checked={autoClockOutEnabled} onChange={(event) => setAutoClockOutEnabled(event.target.checked)} disabled={autoLoading || autoSaving} />
+          </label>
+          <label className="flex items-center justify-between gap-4 rounded-lg border p-4">
+            <span>
+              <span className="block text-sm font-semibold">Time Snap</span>
+              <span className="block text-sm text-muted-foreground">For shifts scheduled on the hour, clock-ins from 8 minutes early through 2 minutes late are recorded at the scheduled start.</span>
+            </span>
+            <input type="checkbox" role="switch" aria-label="Time Snap" checked={clockInTimeSnapEnabled} onChange={(event) => setClockInTimeSnapEnabled(event.target.checked)} disabled={autoLoading || autoSaving} />
           </label>
           <InlineError message={autoError} />
           <div className="flex justify-end">

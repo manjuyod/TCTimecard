@@ -147,6 +147,7 @@ export interface PayrollSettings {
 export interface FranchiseSettings {
   franchiseId: number;
   autoClockOutEnabled: boolean;
+  clockInTimeSnapEnabled: boolean;
 }
 
 export interface HoursSummary {
@@ -672,13 +673,18 @@ export const fetchFranchiseSettings = async (
 
 export const updateFranchiseSettings = async (args: {
   franchiseId?: number | null;
-  autoClockOutEnabled: boolean;
+  autoClockOutEnabled?: boolean;
+  clockInTimeSnapEnabled?: boolean;
 }): Promise<FranchiseSettings> => {
-  const payload: Record<string, unknown> = {
-    autoClockOutEnabled: args.autoClockOutEnabled
-  };
+  const payload: Record<string, unknown> = {};
   if (args.franchiseId !== undefined && args.franchiseId !== null) {
     payload.franchiseId = args.franchiseId;
+  }
+  if (args.autoClockOutEnabled !== undefined) {
+    payload.autoClockOutEnabled = args.autoClockOutEnabled;
+  }
+  if (args.clockInTimeSnapEnabled !== undefined) {
+    payload.clockInTimeSnapEnabled = args.clockInTimeSnapEnabled;
   }
   const result = await apiFetch<{ settings: FranchiseSettings }>(
     '/api/admin/settings',

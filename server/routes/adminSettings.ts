@@ -35,14 +35,28 @@ router.get('/settings', requireAdmin, async (req, res, next): Promise<void> => {
 router.patch('/settings', requireAdmin, async (req, res, next): Promise<void> => {
   const franchiseId = resolveScope(req, res);
   if (franchiseId === null) return;
-  if (typeof req.body?.autoClockOutEnabled !== 'boolean') {
+  const body = req.body && typeof req.body === 'object'
+    ? req.body as Record<string, unknown>
+    : {};
+  const hasAutoClockOut = Object.prototype.hasOwnProperty.call(body, 'autoClockOutEnabled');
+  const hasClockInTimeSnap = Object.prototype.hasOwnProperty.call(body, 'clockInTimeSnapEnabled');
+  if (!hasAutoClockOut && !hasClockInTimeSnap) {
+    res.status(400).json({ error: 'At least one automatic timekeeping setting is required' });
+    return;
+  }
+  if (hasAutoClockOut && typeof body.autoClockOutEnabled !== 'boolean') {
     res.status(400).json({ error: 'autoClockOutEnabled must be a boolean' });
+    return;
+  }
+  if (hasClockInTimeSnap && typeof body.clockInTimeSnapEnabled !== 'boolean') {
+    res.status(400).json({ error: 'clockInTimeSnapEnabled must be a boolean' });
     return;
   }
   try {
     const settings = await updateFranchiseSettings({
       franchiseId,
-      autoClockOutEnabled: req.body.autoClockOutEnabled
+      ...(hasAutoClockOut ? { autoClockOutEnabled: body.autoClockOutEnabled as boolean } : {}),
+      ...(hasClockInTimeSnap ? { clockInTimeSnapEnabled: body.clockInTimeSnapEnabled as boolean } : {})
     });
     res.status(200).json({ settings });
   } catch (error) {

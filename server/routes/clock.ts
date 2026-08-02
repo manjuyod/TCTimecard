@@ -7,8 +7,12 @@ import { getFranchisePayrollSettings, resolvePayPeriod } from '../payroll/payPer
 import {
   getScheduleSnapshotSigningSecret,
   parseScheduleSnapshotV1,
-  verifyScheduleSnapshot
+  verifyScheduleSnapshot,
+  type ScheduleSnapshotInterval
 } from '../services/scheduleSnapshot';
+import { getFranchiseSettings } from '../services/franchiseSettings';
+import { resolveClockInStartAt } from '../services/clockInTimeSnap';
+import { fetchLatestScheduleSnapshots, scheduleCandidateKey } from '../services/scheduleSource';
 import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
 import {
   ClockOutFinalizationError,
@@ -345,10 +349,12 @@ router.post(
       return;
     }
 
+    const detectedAt = new Date();
+
     try {
       const payPeriod = await resolvePayPeriod(context.franchiseId, null);
       const timezone = payPeriod.timezone;
-      const workDate = DateTime.now().setZone(timezone).toISODate();
+      const workDate = DateTime.fromJSDate(detectedAt, { zone: 'utc' }).setZone(timezone).toISODate();
       if (!workDate) {
         res.status(500).json({ error: 'Unable to resolve current work date' });
         return;
@@ -371,6 +377,30 @@ router.post(
         });
         return;
       }
+
+      const settings = await getFranchiseSettings(context.franchiseId);
+      let scheduleIntervals: ScheduleSnapshotInterval[] = [];
+      if (settings.clockInTimeSnapEnabled) {
+        try {
+          const candidate = {
+            franchiseId: context.franchiseId,
+            tutorId: context.tutorId,
+            workDate,
+            timezone
+          };
+          const snapshots = await fetchLatestScheduleSnapshots([candidate], detectedAt);
+          scheduleIntervals = snapshots.get(scheduleCandidateKey(candidate))?.intervals ?? [];
+        } catch (error) {
+          console.error('[clock] Time Snap schedule lookup failed; using the actual clock-in minute.', error);
+        }
+      }
+      const clockInTime = resolveClockInStartAt({
+        detectedAt,
+        timezone,
+        workDate,
+        enabled: settings.clockInTimeSnapEnabled,
+        intervals: scheduleIntervals
+      });
 
       const pool = getPostgresPool();
       const client = await pool.connect();
@@ -503,10 +533,10 @@ router.post(
           `
             INSERT INTO public.time_entry_sessions
               (entry_day_id, franchiseid, tutorid, start_at, end_at, sort_order, created_at, updated_at)
-            VALUES ($1, $2, $3, DATE_TRUNC('minute', NOW()), NULL, $4, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, NULL, $5, NOW(), NOW())
             RETURNING id, start_at
           `,
-          [day.id, context.franchiseId, context.tutorId, nextSortOrder]
+          [day.id, context.franchiseId, context.tutorId, clockInTime.startAt, nextSortOrder]
         );
 
         const session = insertedSession.rows[0];
@@ -550,7 +580,10 @@ router.post(
             workDate,
             timezone,
             sessionId: session.id,
+            detectedAt: clockInTime.detectedAt,
             startedAt: new Date(session.start_at).toISOString(),
+            timeSnapApplied: clockInTime.timeSnapApplied,
+            matchedScheduledStartAt: clockInTime.matchedScheduledStartAt,
             previousClockState,
             newClockState: 1
           }
@@ -662,7 +695,8 @@ router.post(
                 created_at,
                 updated_at
               )
-            VALUES ($1, $2, $3, $4, $5, $6, DATE_TRUNC('minute', NOW()), NULL, 0, 'employee', 'active', NULL, NOW(), NOW())
+            SELECT $1, $2, $3, $4, $5, $6, DATE_TRUNC('minute', NOW()), NULL, 0, 'employee', 'active', NULL, NOW(), NOW()
+            WHERE DATE_TRUNC('minute', NOW()) >= $7::timestamptz
             RETURNING
               id,
               entry_day_id,
@@ -680,8 +714,21 @@ router.post(
               created_at,
               updated_at
           `,
-          [day.id, openSession.id, context.franchiseId, context.tutorId, breakTypeRaw, payTreatment]
+          [
+            day.id,
+            openSession.id,
+            context.franchiseId,
+            context.tutorId,
+            breakTypeRaw,
+            payTreatment,
+            openSession.start_at
+          ]
         );
+        if (!inserted.rowCount) {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'A break cannot start before your recorded clock-in time.' });
+          return;
+        }
         const breakRow = inserted.rows[0];
 
         await appendAudit(client, {
@@ -920,6 +967,19 @@ router.post(
           return;
         }
 
+        const targetEndAt = await transaction.resolveTargetEndAt();
+        const targetEndEpoch = new Date(targetEndAt).getTime();
+        const sessionStartEpoch = new Date(openSession.start_at).getTime();
+        if (
+          Number.isFinite(targetEndEpoch) &&
+          Number.isFinite(sessionStartEpoch) &&
+          targetEndEpoch <= sessionStartEpoch
+        ) {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'Clock-out must be after your recorded clock-in time.' });
+          return;
+        }
+
         const storedSnapshot = parseScheduleSnapshotV1(day.schedule_snapshot);
         let snapshot =
           storedSnapshot &&
@@ -978,6 +1038,7 @@ router.post(
           day,
           openSession,
           activeBreak,
+          targetEndAt,
           detectedAt: new Date().toISOString(),
           snapshot,
           source: 'clock_out',

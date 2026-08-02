@@ -517,13 +517,13 @@ test('invalid stored session comparison returns the existing 400 and rolls back'
   assert.equal(harness.transactions[harness.transactions.length - 1], 'ROLLBACK');
 });
 
-test('invalid clock-out end returns the stored-session 400 and never commits', async () => {
+test('clock-out at or before the recorded session start returns a clear 409 and never commits', async () => {
   const harness = createClockOutHarness({ futureSession: true });
   await withServer(harness.app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/clock/me/out`, { method: 'POST' });
-    assert.equal(response.status, 400);
+    assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: 'Stored sessions are invalid; re-save your day sessions.'
+      error: 'Clock-out must be after your recorded clock-in time.'
     });
   });
   assert.equal(harness.transactions.includes('COMMIT'), false);
