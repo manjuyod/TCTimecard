@@ -5,7 +5,8 @@ import { buildTimeOffPolicy, normalizeTimeOffSubmission } from '../services/time
 const options = {
   timezone: 'America/Los_Angeles',
   nowIso: '2026-07-12T18:00:00.000Z',
-  maxDurationHours: 336
+  maxDurationHours: 336,
+  noticeRequired: true
 };
 
 describe('time-off policy', () => {
@@ -15,6 +16,20 @@ describe('time-off policy', () => {
       today: '2026-07-12',
       minimumStartDate: '2026-07-26',
       noticeDays: 14,
+      noticeRequired: true,
+      exemptTypes: ['sick', 'emergency'],
+      allowedTypes: ['pto', 'sick', 'emergency', 'unpaid', 'other'],
+      maxDurationHours: 336
+    });
+  });
+
+  it('returns today as the effective minimum when notice is disabled', () => {
+    assert.deepEqual(buildTimeOffPolicy({ ...options, noticeRequired: false }), {
+      timezone: 'America/Los_Angeles',
+      today: '2026-07-12',
+      minimumStartDate: '2026-07-12',
+      noticeDays: 14,
+      noticeRequired: false,
       exemptTypes: ['sick', 'emergency'],
       allowedTypes: ['pto', 'sick', 'emergency', 'unpaid', 'other'],
       maxDurationHours: 336
@@ -64,6 +79,37 @@ describe('time-off policy', () => {
 
     assert.equal(result.valid, false);
     assert.match(result.errors.join('\n'), /at least 14 days/i);
+  });
+
+  it('allows a non-exempt request today when notice is disabled', () => {
+    const result = normalizeTimeOffSubmission(
+      {
+        startDate: '2026-07-12',
+        endDate: '2026-07-12',
+        partialDay: false,
+        type: 'pto',
+        reason: 'Family vacation starting today'
+      },
+      { ...options, noticeRequired: false }
+    );
+
+    assert.equal(result.valid, true);
+  });
+
+  it('still rejects a past request when notice is disabled', () => {
+    const result = normalizeTimeOffSubmission(
+      {
+        startDate: '2026-07-11',
+        endDate: '2026-07-11',
+        partialDay: false,
+        type: 'pto',
+        reason: 'Family vacation started yesterday'
+      },
+      { ...options, noticeRequired: false }
+    );
+
+    assert.equal(result.valid, false);
+    assert.match(result.errors.join('\n'), /cannot be in the past/i);
   });
 
   it('allows sick and emergency requests today but rejects past starts', () => {

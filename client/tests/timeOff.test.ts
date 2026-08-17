@@ -13,6 +13,7 @@ const policy = {
   today: '2026-07-12',
   minimumStartDate: '2026-07-26',
   noticeDays: 14 as const,
+  noticeRequired: true,
   exemptTypes: ['sick', 'emergency'] as Array<'sick' | 'emergency'>,
   allowedTypes: ['pto', 'sick', 'emergency', 'unpaid', 'other'] as Array<
     'pto' | 'sick' | 'emergency' | 'unpaid' | 'other'
@@ -59,6 +60,26 @@ describe('time-off client helpers', () => {
         .startDate ?? '',
       /past/i
     );
+  });
+
+  it('allows a non-exempt request today when notice is disabled', () => {
+    const errors = validateTimeOffForm(
+      {
+        startDate: '2026-07-12',
+        endDate: '2026-07-12',
+        partialDay: false,
+        leaveTime: '',
+        returnTime: '',
+        type: 'pto',
+        reason: 'Family vacation starting today'
+      },
+      {
+        ...policy,
+        noticeRequired: false
+      }
+    );
+
+    assert.equal(errors.startDate, undefined);
   });
 
   it('requires partial-day times and a 10-character reason', () => {

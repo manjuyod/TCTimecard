@@ -15,6 +15,7 @@ type SettingRow = {
   franchiseid: number;
   auto_clock_out_enabled: boolean;
   clock_in_time_snap_enabled: boolean;
+  time_off_notice_required: boolean;
 };
 
 afterEach(() => setPostgresPoolOverride(undefined));
@@ -37,7 +38,9 @@ const createPool = (initial: SettingRow[]) => {
           auto_clock_out_enabled: typeof params[1] === 'boolean'
             ? params[1] : current?.auto_clock_out_enabled ?? false,
           clock_in_time_snap_enabled: typeof params[2] === 'boolean'
-            ? params[2] : current?.clock_in_time_snap_enabled ?? false
+            ? params[2] : current?.clock_in_time_snap_enabled ?? false,
+          time_off_notice_required: typeof params[3] === 'boolean'
+            ? params[3] : current?.time_off_notice_required ?? true
         };
         rows.set(franchiseId, row);
         return { rowCount: 1, rows: [row] };
@@ -91,7 +94,8 @@ test('admin reads and enables auto clock-out for the scoped franchise', async ()
       settings: {
         franchiseId: 77,
         autoClockOutEnabled: false,
-        clockInTimeSnapEnabled: false
+        clockInTimeSnapEnabled: false,
+        timeOffNoticeRequired: true
       }
     });
     const patch = await fetch(`${baseUrl}/api/admin/settings`, {
@@ -103,7 +107,8 @@ test('admin reads and enables auto clock-out for the scoped franchise', async ()
       settings: {
         franchiseId: 77,
         autoClockOutEnabled: true,
-        clockInTimeSnapEnabled: false
+        clockInTimeSnapEnabled: false,
+        timeOffNoticeRequired: true
       }
     });
   });
@@ -113,7 +118,8 @@ test('admin enables Time Snap without changing auto clock-out', async () => {
   const harness = createPool([{
     franchiseid: 77,
     auto_clock_out_enabled: true,
-    clock_in_time_snap_enabled: false
+    clock_in_time_snap_enabled: false,
+    time_off_notice_required: false
   }]);
   setPostgresPoolOverride(harness.pool as never);
   const app = createApp({ accountType: 'ADMIN', accountId: 10, franchiseId: 1 });
@@ -127,7 +133,34 @@ test('admin enables Time Snap without changing auto clock-out', async () => {
       settings: {
         franchiseId: 77,
         autoClockOutEnabled: true,
-        clockInTimeSnapEnabled: true
+        clockInTimeSnapEnabled: true,
+        timeOffNoticeRequired: false
+      }
+    });
+  });
+});
+
+test('admin disables time-off notice without changing automatic timekeeping', async () => {
+  const harness = createPool([{
+    franchiseid: 77,
+    auto_clock_out_enabled: true,
+    clock_in_time_snap_enabled: true,
+    time_off_notice_required: true
+  }]);
+  setPostgresPoolOverride(harness.pool as never);
+  const app = createApp({ accountType: 'ADMIN', accountId: 10, franchiseId: 1 });
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/admin/settings`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ franchiseId: 77, timeOffNoticeRequired: false })
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      settings: {
+        franchiseId: 77,
+        autoClockOutEnabled: true,
+        clockInTimeSnapEnabled: true,
+        timeOffNoticeRequired: false
       }
     });
   });
@@ -146,7 +179,7 @@ test('non-Boolean auto clock-out payload is rejected', async () => {
   });
 });
 
-test('invalid Time Snap and empty patches are rejected', async () => {
+test('invalid Time Snap, time-off notice, and empty patches are rejected', async () => {
   const harness = createPool([]);
   setPostgresPoolOverride(harness.pool as never);
   await withServer(createApp({ accountType: 'ADMIN', accountId: 10, franchiseId: 1 }), async (baseUrl) => {
@@ -156,8 +189,12 @@ test('invalid Time Snap and empty patches are rejected', async () => {
         error: /clockInTimeSnapEnabled must be a boolean/i
       },
       {
+        body: { franchiseId: 77, timeOffNoticeRequired: 'false' },
+        error: /timeOffNoticeRequired must be a boolean/i
+      },
+      {
         body: { franchiseId: 77 },
-        error: /at least one automatic timekeeping setting/i
+        error: /at least one franchise setting/i
       }
     ];
     for (const { body, error } of cases) {

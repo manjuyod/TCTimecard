@@ -51,15 +51,74 @@ describe('time-off routes', () => {
   });
 
   it('returns server-calculated policy for the authenticated tutor franchise', async () => {
+    let resolvedFranchiseId: number | null = null;
     const origin = await startApp('TUTOR', {
       resolveTimezone: async () => 'America/Los_Angeles',
+      resolveTimeOffNoticeRequired: async (franchiseId: number) => {
+        resolvedFranchiseId = franchiseId;
+        return false;
+      },
       nowIso: () => '2026-07-12T18:00:00.000Z'
     });
     const response = await fetch(`${origin}/api/timeoff/policy`);
     assert.equal(response.status, 200);
-    const body = await response.json() as { policy: { today: string; minimumStartDate: string } };
+    const body = await response.json() as {
+      policy: { today: string; minimumStartDate: string; noticeRequired: boolean };
+    };
     assert.equal(body.policy.today, '2026-07-12');
-    assert.equal(body.policy.minimumStartDate, '2026-07-26');
+    assert.equal(body.policy.minimumStartDate, '2026-07-12');
+    assert.equal(body.policy.noticeRequired, false);
+    assert.equal(resolvedFranchiseId, 6);
+  });
+
+  it('rejects short-notice PTO when the franchise requires notice', async () => {
+    const origin = await startApp('TUTOR', {
+      resolveTimezone: async () => 'America/Los_Angeles',
+      resolveTimeOffNoticeRequired: async () => true,
+      nowIso: () => '2026-07-12T18:00:00.000Z'
+    });
+
+    const response = await fetch(`${origin}/api/timeoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        startDate: '2026-07-12', endDate: '2026-07-12', partialDay: false,
+        type: 'pto', reason: 'Family vacation starting today'
+      })
+    });
+
+    assert.equal(response.status, 400);
+    assert.match(((await response.json()) as { error: string }).error, /at least 14 days/i);
+  });
+
+  it('accepts short-notice PTO when the franchise disables notice', async () => {
+    let created = false;
+    const origin = await startApp('TUTOR', {
+      resolveTimezone: async () => 'America/Los_Angeles',
+      resolveTimeOffNoticeRequired: async () => false,
+      nowIso: () => '2026-07-12T18:00:00.000Z',
+      checkOverlap: async () => false,
+      fetchTutor: async () => ({ tutorId: 123, firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com' }),
+      fetchCenter: async () => ({ id: 6, name: 'Anthem', email: 'admin@example.com', gmailId: null }),
+      createRequest: async () => {
+        created = true;
+        return baseRequest;
+      },
+      appendAudit: async () => undefined,
+      sendAdminNotification: async () => ({ kind: 'admin_request', status: 'sent' })
+    });
+
+    const response = await fetch(`${origin}/api/timeoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        startDate: '2026-07-12', endDate: '2026-07-12', partialDay: false,
+        type: 'pto', reason: 'Family vacation starting today'
+      })
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal(created, true);
   });
 
   it('saves a valid request and returns a notification warning without failing submission', async () => {
@@ -307,7 +366,10 @@ async function startApp(accountType: 'TUTOR' | 'ADMIN', overrides: Record<string
     } as Request['session'];
     next();
   });
-  app.use('/api', createTimeOffRouter(overrides));
+  app.use('/api', createTimeOffRouter({
+    resolveTimeOffNoticeRequired: async () => true,
+    ...overrides
+  }));
   const server = app.listen(0);
   servers.push(server);
   await new Promise<void>((resolve) => server.once('listening', resolve));
@@ -318,7 +380,10 @@ async function startApp(accountType: 'TUTOR' | 'ADMIN', overrides: Record<string
 async function startPublicApp(overrides: Record<string, unknown>): Promise<string> {
   const app = express();
   app.use(express.json());
-  app.use('/api', createTimeOffRouter(overrides));
+  app.use('/api', createTimeOffRouter({
+    resolveTimeOffNoticeRequired: async () => true,
+    ...overrides
+  }));
   const server = app.listen(0);
   servers.push(server);
   await new Promise<void>((resolve) => server.once('listening', resolve));

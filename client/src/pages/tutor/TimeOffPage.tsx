@@ -70,7 +70,7 @@ export function TutorTimeOffPage(): JSX.Element {
   }, [requests, sortOrder]);
 
   const minimumStart = policy
-    ? policy.exemptTypes.includes(form.type as 'sick' | 'emergency')
+    ? !policy.noticeRequired || policy.exemptTypes.includes(form.type as 'sick' | 'emergency')
       ? policy.today
       : policy.minimumStartDate
     : undefined;
@@ -211,7 +211,9 @@ export function TutorTimeOffPage(): JSX.Element {
             <CardHeader>
               <CardTitle>Request time off</CardTitle>
               <CardDescription>
-                PTO, Unpaid, and Other require 14 days notice. Sick and Emergency requests may begin today.
+                {policy?.noticeRequired
+                  ? 'PTO, Unpaid, and Other require 14 days notice. Sick and Emergency requests may begin today.'
+                  : 'All time-off requests may begin today. Past dates are not allowed.'}
                 {policy ? ` Dates use ${policy.timezone}.` : ''}
               </CardDescription>
             </CardHeader>

@@ -8,6 +8,7 @@ export interface TimeOffPolicy {
   today: string;
   minimumStartDate: string;
   noticeDays: 14;
+  noticeRequired: boolean;
   exemptTypes: Array<'sick' | 'emergency'>;
   allowedTypes: TimeOffType[];
   maxDurationHours: number;

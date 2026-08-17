@@ -40,8 +40,9 @@ router.patch('/settings', requireAdmin, async (req, res, next): Promise<void> =>
     : {};
   const hasAutoClockOut = Object.prototype.hasOwnProperty.call(body, 'autoClockOutEnabled');
   const hasClockInTimeSnap = Object.prototype.hasOwnProperty.call(body, 'clockInTimeSnapEnabled');
-  if (!hasAutoClockOut && !hasClockInTimeSnap) {
-    res.status(400).json({ error: 'At least one automatic timekeeping setting is required' });
+  const hasTimeOffNotice = Object.prototype.hasOwnProperty.call(body, 'timeOffNoticeRequired');
+  if (!hasAutoClockOut && !hasClockInTimeSnap && !hasTimeOffNotice) {
+    res.status(400).json({ error: 'At least one franchise setting is required' });
     return;
   }
   if (hasAutoClockOut && typeof body.autoClockOutEnabled !== 'boolean') {
@@ -52,11 +53,16 @@ router.patch('/settings', requireAdmin, async (req, res, next): Promise<void> =>
     res.status(400).json({ error: 'clockInTimeSnapEnabled must be a boolean' });
     return;
   }
+  if (hasTimeOffNotice && typeof body.timeOffNoticeRequired !== 'boolean') {
+    res.status(400).json({ error: 'timeOffNoticeRequired must be a boolean' });
+    return;
+  }
   try {
     const settings = await updateFranchiseSettings({
       franchiseId,
       ...(hasAutoClockOut ? { autoClockOutEnabled: body.autoClockOutEnabled as boolean } : {}),
-      ...(hasClockInTimeSnap ? { clockInTimeSnapEnabled: body.clockInTimeSnapEnabled as boolean } : {})
+      ...(hasClockInTimeSnap ? { clockInTimeSnapEnabled: body.clockInTimeSnapEnabled as boolean } : {}),
+      ...(hasTimeOffNotice ? { timeOffNoticeRequired: body.timeOffNoticeRequired as boolean } : {})
     });
     res.status(200).json({ settings });
   } catch (error) {

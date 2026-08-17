@@ -16,6 +16,7 @@ export interface TimeOffPolicyOptions {
   timezone: string;
   nowIso?: string;
   maxDurationHours: number;
+  noticeRequired: boolean;
 }
 
 export type TimeOffValidationResult =
@@ -27,8 +28,9 @@ export function buildTimeOffPolicy(options: TimeOffPolicyOptions): TimeOffPolicy
   return {
     timezone: options.timezone,
     today: today.toISODate() as string,
-    minimumStartDate: today.plus({ days: NOTICE_DAYS }).toISODate() as string,
+    minimumStartDate: today.plus({ days: options.noticeRequired ? NOTICE_DAYS : 0 }).toISODate() as string,
     noticeDays: NOTICE_DAYS,
+    noticeRequired: options.noticeRequired,
     exemptTypes: [...EXEMPT_TYPES],
     allowedTypes: [...ALLOWED_TYPES],
     maxDurationHours: options.maxDurationHours
@@ -69,7 +71,11 @@ export function normalizeTimeOffSubmission(
   if (startLocalDate < today) {
     return { valid: false, errors: ['Start date cannot be in the past.'] };
   }
-  if (!EXEMPT_TYPES.includes(type as 'sick' | 'emergency') && startLocalDate < today.plus({ days: NOTICE_DAYS })) {
+  if (
+    options.noticeRequired &&
+    !EXEMPT_TYPES.includes(type as 'sick' | 'emergency') &&
+    startLocalDate < today.plus({ days: NOTICE_DAYS })
+  ) {
     return { valid: false, errors: ['Non-sick and non-emergency requests must be submitted at least 14 days before the start date.'] };
   }
 

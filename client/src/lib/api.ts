@@ -55,6 +55,7 @@ export interface TimeOffPolicy {
   today: string;
   minimumStartDate: string;
   noticeDays: 14;
+  noticeRequired: boolean;
   exemptTypes: Array<'sick' | 'emergency'>;
   allowedTypes: TimeOffType[];
   maxDurationHours: number;
@@ -148,6 +149,7 @@ export interface FranchiseSettings {
   franchiseId: number;
   autoClockOutEnabled: boolean;
   clockInTimeSnapEnabled: boolean;
+  timeOffNoticeRequired: boolean;
 }
 
 export interface HoursSummary {
@@ -675,6 +677,7 @@ export const updateFranchiseSettings = async (args: {
   franchiseId?: number | null;
   autoClockOutEnabled?: boolean;
   clockInTimeSnapEnabled?: boolean;
+  timeOffNoticeRequired?: boolean;
 }): Promise<FranchiseSettings> => {
   const payload: Record<string, unknown> = {};
   if (args.franchiseId !== undefined && args.franchiseId !== null) {
@@ -685,6 +688,9 @@ export const updateFranchiseSettings = async (args: {
   }
   if (args.clockInTimeSnapEnabled !== undefined) {
     payload.clockInTimeSnapEnabled = args.clockInTimeSnapEnabled;
+  }
+  if (args.timeOffNoticeRequired !== undefined) {
+    payload.timeOffNoticeRequired = args.timeOffNoticeRequired;
   }
   const result = await apiFetch<{ settings: FranchiseSettings }>(
     '/api/admin/settings',

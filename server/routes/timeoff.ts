@@ -5,6 +5,7 @@ import { requireAdmin, requireTutor } from '../middleware/auth';
 import { enforceFranchiseScope } from '../middleware/franchiseScope';
 import { getFranchisePayrollSettings } from '../payroll/payPeriodResolution';
 import { fetchFranchiseContact, FranchiseContact } from '../services/franchiseContact';
+import { getFranchiseSettings } from '../services/franchiseSettings';
 import {
   decideTimeOffByEmailToken,
   decideTimeOffRequest,
@@ -41,6 +42,7 @@ export interface TimeOffRouteDeps {
   previewEmailDecision: typeof previewTimeOffEmailDecision;
   decideEmailRequest: typeof decideTimeOffByEmailToken;
   resolveTimezone: (franchiseId: number) => Promise<string>;
+  resolveTimeOffNoticeRequired: (franchiseId: number) => Promise<boolean>;
   fetchTutor: (tutorId: number) => Promise<TutorDirectoryIdentity | null>;
   fetchTutors: (tutorIds: number[]) => Promise<Map<number, TutorDirectoryIdentity>>;
   fetchCenter: (franchiseId: number) => Promise<FranchiseContact | null>;
@@ -84,6 +86,8 @@ const defaultDeps: TimeOffRouteDeps = {
   previewEmailDecision: previewTimeOffEmailDecision,
   decideEmailRequest: decideTimeOffByEmailToken,
   resolveTimezone: async (franchiseId) => (await getFranchisePayrollSettings(franchiseId)).timezone,
+  resolveTimeOffNoticeRequired: async (franchiseId) =>
+    (await getFranchiseSettings(franchiseId)).timeOffNoticeRequired,
   fetchTutor: fetchTimeOffTutorById,
   fetchTutors: fetchTimeOffTutorsByIds,
   fetchCenter: fetchFranchiseContact,
@@ -174,12 +178,16 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
   router.get('/timeoff/policy', requireTutor, asyncHandler(async (req, res) => {
     const context = tutorContext(req);
     if (!context) return res.status(400).json({ error: 'Tutor context missing' });
-    const timezone = await deps.resolveTimezone(context.franchiseId);
+    const [timezone, noticeRequired] = await Promise.all([
+      deps.resolveTimezone(context.franchiseId),
+      deps.resolveTimeOffNoticeRequired(context.franchiseId)
+    ]);
     return res.json({
       policy: buildTimeOffPolicy({
         timezone,
         nowIso: deps.nowIso(),
-        maxDurationHours: MAX_TIME_OFF_DURATION_HOURS
+        maxDurationHours: MAX_TIME_OFF_DURATION_HOURS,
+        noticeRequired
       })
     });
   }));
@@ -187,11 +195,15 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
   router.post('/timeoff', requireTutor, asyncHandler(async (req, res) => {
     const context = tutorContext(req);
     if (!context) return res.status(400).json({ error: 'Tutor context missing' });
-    const timezone = await deps.resolveTimezone(context.franchiseId);
+    const [timezone, noticeRequired] = await Promise.all([
+      deps.resolveTimezone(context.franchiseId),
+      deps.resolveTimeOffNoticeRequired(context.franchiseId)
+    ]);
     const normalized = normalizeTimeOffSubmission(req.body ?? {}, {
       timezone,
       nowIso: deps.nowIso(),
-      maxDurationHours: MAX_TIME_OFF_DURATION_HOURS
+      maxDurationHours: MAX_TIME_OFF_DURATION_HOURS,
+      noticeRequired
     });
     if (!normalized.valid) return res.status(400).json({ error: normalized.errors[0], errors: normalized.errors });
     if (await deps.checkOverlap(context.tutorId, normalized.value.startAt, normalized.value.endAt)) {
