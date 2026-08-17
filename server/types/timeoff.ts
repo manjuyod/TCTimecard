@@ -1,3 +1,5 @@
+import type { PtoPolicyStatus } from './pto';
+
 export type TimeOffType = 'pto' | 'sick' | 'emergency' | 'unpaid' | 'other';
 export type StoredTimeOffType = Exclude<TimeOffType, 'emergency'>;
 export type TimeOffStatus = 'pending' | 'approved' | 'denied' | 'cancelled';
@@ -12,6 +14,7 @@ export interface TimeOffPolicy {
   exemptTypes: Array<'sick' | 'emergency'>;
   allowedTypes: TimeOffType[];
   maxDurationHours: number;
+  pto?: PtoPolicyStatus;
 }
 
 export interface TimeOffSubmissionInput {

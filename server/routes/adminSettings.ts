@@ -5,8 +5,19 @@ import {
   getFranchiseSettings,
   updateFranchiseSettings
 } from '../services/franchiseSettings';
+import { getPtoCenterStatus } from '../services/pto';
 
 const router = express.Router();
+
+const withPtoStatus = async <T extends object>(franchiseId: number, settings: T) => {
+  const pto = await getPtoCenterStatus(franchiseId);
+  return {
+    ...settings,
+    ptoEnabled: pto.enabled,
+    ptoFirstActivatedAt: pto.firstActivatedAt,
+    ptoLastSuccessfulSyncAt: pto.lastSuccessfulSyncAt
+  };
+};
 
 const resolveScope = (req: Request, res: Response): number | null => {
   const scope = enforceFranchiseScope(req, {
@@ -26,7 +37,7 @@ router.get('/settings', requireAdmin, async (req, res, next): Promise<void> => {
   const franchiseId = resolveScope(req, res);
   if (franchiseId === null) return;
   try {
-    res.status(200).json({ settings: await getFranchiseSettings(franchiseId) });
+    res.status(200).json({ settings: await withPtoStatus(franchiseId, await getFranchiseSettings(franchiseId)) });
   } catch (error) {
     next(error);
   }
@@ -64,7 +75,7 @@ router.patch('/settings', requireAdmin, async (req, res, next): Promise<void> =>
       ...(hasClockInTimeSnap ? { clockInTimeSnapEnabled: body.clockInTimeSnapEnabled as boolean } : {}),
       ...(hasTimeOffNotice ? { timeOffNoticeRequired: body.timeOffNoticeRequired as boolean } : {})
     });
-    res.status(200).json({ settings });
+    res.status(200).json({ settings: await withPtoStatus(franchiseId, settings) });
   } catch (error) {
     next(error);
   }

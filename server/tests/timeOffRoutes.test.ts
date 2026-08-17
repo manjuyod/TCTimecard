@@ -348,6 +348,89 @@ describe('time-off routes', () => {
   });
 });
 
+describe('PTO lifecycle integration', () => {
+  it('publishes PTO status and omits PTO when the current-center identity is ineligible', async () => {
+    const origin = await startApp('TUTOR', {
+      resolveTimezone: async () => 'America/Los_Angeles', resolveTimeOffNoticeRequired: async () => false,
+      nowIso: () => '2026-08-16T12:00:00.000Z',
+      getPtoPolicyStatus: async () => ({ enabled: false, reason: 'center_disabled' })
+    });
+    const response = await fetch(`${origin}/api/timeoff/policy`);
+    const body = await response.json() as { policy: { allowedTypes: string[]; pto: { reason: string } } };
+    assert.equal(response.status, 200);
+    assert.equal(body.policy.allowedTypes.includes('pto'), false);
+    assert.equal(body.policy.pto.reason, 'center_disabled');
+  });
+
+  it('quotes PTO before insert and rejects an ineligible request without writing', async () => {
+    let created = false;
+    const origin = await startApp('TUTOR', {
+      resolveTimezone: async () => 'America/Los_Angeles', resolveTimeOffNoticeRequired: async () => false,
+      nowIso: () => '2026-08-16T12:00:00.000Z',
+      quotePto: async () => ({ eligible: false, reason: 'insufficient_balance', chargeDays: 1,
+        cycleAllocations: [{ cycleStart: '2026-01-01', days: 1 }] }),
+      checkOverlap: async () => false,
+      fetchTutor: async () => ({ tutorId: 123, firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com' }),
+      fetchCenter: async () => null,
+      createRequest: async () => { created = true; return baseRequest; },
+      appendAudit: async () => undefined,
+      sendAdminNotification: async () => ({ kind: 'admin_request', status: 'sent' })
+    });
+    const response = await fetch(`${origin}/api/timeoff`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startDate: '2026-08-17', endDate: '2026-08-17', partialDay: false,
+        type: 'pto', reason: 'Family vacation request' })
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json() as { code: string }).code, 'PTO_INSUFFICIENT_BALANCE');
+    assert.equal(created, false);
+  });
+
+  it('does not quote or alter non-PTO insertion behavior', async () => {
+    let quoted = false;
+    let created = false;
+    const sick = { ...baseRequest, type: 'sick' as const, absenceLabel: 'Sick Leave' };
+    const origin = await startApp('TUTOR', {
+      resolveTimezone: async () => 'America/Los_Angeles', resolveTimeOffNoticeRequired: async () => false,
+      nowIso: () => '2026-08-16T12:00:00.000Z',
+      quotePto: async () => { quoted = true; return { eligible: true, reason: 'eligible', chargeDays: 1, cycleAllocations: [] }; },
+      checkOverlap: async () => false,
+      fetchTutor: async () => ({ tutorId: 123, firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com' }),
+      fetchCenter: async () => null,
+      createRequest: async () => { created = true; return sick; },
+      appendAudit: async () => undefined,
+      sendAdminNotification: async () => ({ kind: 'admin_request', status: 'sent' })
+    });
+    const response = await fetch(`${origin}/api/timeoff`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startDate: '2026-08-17', endDate: '2026-08-17', partialDay: false,
+        type: 'sick', reason: 'Medical appointment' })
+    });
+    assert.equal(response.status, 201);
+    assert.equal(quoted, false);
+    assert.equal(created, true);
+  });
+
+  it('maps a disabled-center insert race to safe conflict JSON', async () => {
+    const origin = await startApp('TUTOR', {
+      resolveTimezone: async () => 'America/Los_Angeles', resolveTimeOffNoticeRequired: async () => false,
+      nowIso: () => '2026-08-16T12:00:00.000Z',
+      quotePto: async () => ({ eligible: true, reason: 'eligible', chargeDays: 1,
+        cycleAllocations: [{ cycleStart: '2026-01-01', days: 1 }] }),
+      checkOverlap: async () => false,
+      fetchTutor: async () => ({ tutorId: 123, firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com' }),
+      createRequest: async () => { throw Object.assign(new Error('PTO_CENTER_DISABLED'), { code: 'P0001' }); }
+    });
+    const response = await fetch(`${origin}/api/timeoff`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startDate: '2026-08-17', endDate: '2026-08-17', partialDay: false,
+        type: 'pto', reason: 'Family vacation request' })
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: 'PTO is disabled for this center', code: 'PTO_CENTER_DISABLED' });
+  });
+});
+
 async function startApp(accountType: 'TUTOR' | 'ADMIN', overrides: Record<string, unknown>): Promise<string> {
   const app = express();
   app.use(express.json());
@@ -368,6 +451,12 @@ async function startApp(accountType: 'TUTOR' | 'ADMIN', overrides: Record<string
   });
   app.use('/api', createTimeOffRouter({
     resolveTimeOffNoticeRequired: async () => true,
+    getPtoPolicyStatus: async () => ({ enabled: true, reason: 'eligible', balance: {
+      cycleStart: '2026-01-01', cycleEnd: '2026-12-31', renewsOn: '2027-01-01',
+      grantedDays: 5, adjustedDays: 0, availableDays: 5, reservedDays: 0, usedDays: 0
+    } }),
+    quotePto: async (input) => ({ eligible: true, reason: 'eligible', chargeDays: input.chargeDays,
+      cycleAllocations: [{ cycleStart: '2026-01-01', days: input.chargeDays }] }),
     ...overrides
   }));
   const server = app.listen(0);

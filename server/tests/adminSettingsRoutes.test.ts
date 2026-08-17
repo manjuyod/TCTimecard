@@ -18,14 +18,27 @@ type SettingRow = {
   time_off_notice_required: boolean;
 };
 
+type PtoSettingRow = {
+  franchiseid: number;
+  enabled: boolean;
+  first_activated_at: string | null;
+  last_successful_sync_at: string | null;
+  last_sync_error: string | null;
+};
+
 afterEach(() => setPostgresPoolOverride(undefined));
 
-const createPool = (initial: SettingRow[]) => {
+const createPool = (initial: SettingRow[], ptoInitial: PtoSettingRow[] = []) => {
   const rows = new Map(initial.map((row) => [row.franchiseid, { ...row }]));
+  const ptoRows = new Map(ptoInitial.map((row) => [row.franchiseid, { ...row }]));
   let lastUpdatedFranchiseId: number | null = null;
   const pool = {
     async query(sql: string, params: unknown[] = []) {
       const franchiseId = Number(params[0]);
+      if (/FROM public\.pto_center_settings/i.test(sql)) {
+        const row = ptoRows.get(franchiseId);
+        return row ? { rowCount: 1, rows: [{ ...row }] } : { rowCount: 0, rows: [] };
+      }
       if (/SELECT franchiseid, auto_clock_out_enabled/i.test(sql)) {
         const row = rows.get(franchiseId);
         return row ? { rowCount: 1, rows: [{ ...row }] } : { rowCount: 0, rows: [] };
@@ -95,7 +108,10 @@ test('admin reads and enables auto clock-out for the scoped franchise', async ()
         franchiseId: 77,
         autoClockOutEnabled: false,
         clockInTimeSnapEnabled: false,
-        timeOffNoticeRequired: true
+        timeOffNoticeRequired: true,
+        ptoEnabled: false,
+        ptoFirstActivatedAt: null,
+        ptoLastSuccessfulSyncAt: null
       }
     });
     const patch = await fetch(`${baseUrl}/api/admin/settings`, {
@@ -108,7 +124,10 @@ test('admin reads and enables auto clock-out for the scoped franchise', async ()
         franchiseId: 77,
         autoClockOutEnabled: true,
         clockInTimeSnapEnabled: false,
-        timeOffNoticeRequired: true
+        timeOffNoticeRequired: true,
+        ptoEnabled: false,
+        ptoFirstActivatedAt: null,
+        ptoLastSuccessfulSyncAt: null
       }
     });
   });
@@ -134,7 +153,10 @@ test('admin enables Time Snap without changing auto clock-out', async () => {
         franchiseId: 77,
         autoClockOutEnabled: true,
         clockInTimeSnapEnabled: true,
-        timeOffNoticeRequired: false
+        timeOffNoticeRequired: false,
+        ptoEnabled: false,
+        ptoFirstActivatedAt: null,
+        ptoLastSuccessfulSyncAt: null
       }
     });
   });
@@ -160,7 +182,10 @@ test('admin disables time-off notice without changing automatic timekeeping', as
         franchiseId: 77,
         autoClockOutEnabled: true,
         clockInTimeSnapEnabled: true,
-        timeOffNoticeRequired: false
+        timeOffNoticeRequired: false,
+        ptoEnabled: false,
+        ptoFirstActivatedAt: null,
+        ptoLastSuccessfulSyncAt: null
       }
     });
   });
@@ -194,6 +219,10 @@ test('invalid Time Snap, time-off notice, and empty patches are rejected', async
       },
       {
         body: { franchiseId: 77 },
+        error: /at least one franchise setting/i
+      },
+      {
+        body: { franchiseId: 77, ptoEnabled: true },
         error: /at least one franchise setting/i
       }
     ];
