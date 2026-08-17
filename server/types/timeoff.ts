@@ -14,7 +14,7 @@ export interface TimeOffPolicy {
   exemptTypes: Array<'sick' | 'emergency'>;
   allowedTypes: TimeOffType[];
   maxDurationHours: number;
-  pto?: PtoPolicyStatus;
+  pto: PtoPolicyStatus;
 }
 
 export interface TimeOffSubmissionInput {

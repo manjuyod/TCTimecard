@@ -54,6 +54,7 @@ const baseDeps = (): PtoRouteDeps => ({
   deactivateCenter: async (input) => ({ franchiseId: input.franchiseId, enabled: false, firstActivatedAt: '2026-01-01T00:00:00.000Z', lastSuccessfulSyncAt: '2026-08-15T00:00:00.000Z', lastSyncError: null }),
   getTutorProfile: async () => profile,
   getBalanceSummary: async () => quote.balance,
+  authorizePublicCenter: async () => ({ franchiseId: 6 }),
   quoteAuthenticated: async () => quote,
   quotePublic: async () => quote,
   listProfiles: async () => ({ items: [], page: 1, pageSize: 25, total: 0 }),
@@ -112,6 +113,31 @@ test('authenticated tutor reads the canonical profile and receives a balance-bea
   assert.equal(quoteInput?.chargeDays, 1);
 });
 
+test('tutor profile and quote use the center-local date across a UTC year boundary', async () => {
+  let profileBalanceDate = '';
+  let quoteBalanceDate: unknown;
+  const deps = baseDeps();
+  deps.nowIso = () => '2027-01-01T00:30:00.000Z';
+  deps.resolveTimezone = async () => 'America/Los_Angeles';
+  deps.getBalanceSummary = async (_profileId, balanceDate) => {
+    profileBalanceDate = balanceDate;
+    return quote.balance;
+  };
+  deps.quoteAuthenticated = async (input) => {
+    quoteBalanceDate = (input as typeof input & { balanceDate?: string }).balanceDate;
+    return quote;
+  };
+  const base = await startApp(deps, { accountType: 'TUTOR', accountId: 123, franchiseId: 6 });
+  assert.equal((await fetch(`${base}/api/pto/me`)).status, 200);
+  const response = await fetch(`${base}/api/pto/me/quote`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ startDate: '2026-12-31', endDate: '2026-12-31', partialDay: false })
+  });
+  assert.equal(response.status, 200);
+  assert.equal(profileBalanceDate, '2026-12-31');
+  assert.equal(quoteBalanceDate, '2026-12-31');
+});
+
 test('tutor email mutations derive profile and membership and reject CRM email deletion', async () => {
   let added: Parameters<PtoRouteDeps['addEmail']>[0] | undefined;
   const deps = baseDeps();
@@ -130,7 +156,8 @@ test('tutor email mutations derive profile and membership and reject CRM email d
 test('public quote requires a bearer center token and never exposes identity or balances', async () => {
   let rawToken = '';
   const deps = baseDeps();
-  deps.quotePublic = async (input) => { rawToken = input.token; return quote; };
+  deps.authorizePublicCenter = async (token) => { rawToken = token; return { franchiseId: 6 }; };
+  deps.quotePublic = async () => quote;
   const base = await startApp(deps);
   assert.equal((await fetch(`${base}/api/pto/public/quote`, { method: 'POST' })).status, 401);
   const response = await fetch(`${base}/api/pto/public/quote`, {
@@ -141,6 +168,49 @@ test('public quote requires a bearer center token and never exposes identity or 
   assert.equal(rawToken, 'center-secret');
   const body = await response.json() as Record<string, unknown>;
   assert.deepEqual(Object.keys(body).sort(), ['chargeDays', 'cycleAllocations', 'eligible', 'reason']);
+});
+
+test('public quote authorizes the center token before validating identity or dates', async () => {
+  let quoted = false;
+  const deps = { ...baseDeps(), authorizePublicCenter: async () => null } as PtoRouteDeps;
+  deps.quotePublic = async () => { quoted = true; return quote; };
+  const base = await startApp(deps);
+  const response = await fetch(`${base}/api/pto/public/quote`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer inactive-secret' },
+    body: JSON.stringify({ email: 'invalid', startDate: 'not-a-date', partialDay: false })
+  });
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Center link is invalid or inactive', code: 'PTO_CENTER_LINK_INVALID' });
+  assert.equal(quoted, false);
+});
+
+test('public quote uses the authorized center timezone, local date, and notice policy', async () => {
+  let timezoneCenter = 0;
+  let noticeCenter = 0;
+  let quoteInput: Record<string, unknown> | undefined;
+  const deps = { ...baseDeps(), authorizePublicCenter: async () => ({ franchiseId: 77 }) } as PtoRouteDeps;
+  deps.nowIso = () => '2027-01-01T00:30:00.000Z';
+  deps.resolveTimezone = async (franchiseId) => { timezoneCenter = franchiseId; return 'America/Los_Angeles'; };
+  deps.resolveTimeOffNoticeRequired = async (franchiseId) => { noticeCenter = franchiseId; return false; };
+  deps.quotePublic = async (input) => { quoteInput = input as unknown as Record<string, unknown>; return quote; };
+  const base = await startApp(deps);
+  const response = await fetch(`${base}/api/pto/public/quote`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer center-secret' },
+    body: JSON.stringify({ email: 'ada@example.com', startDate: '2026-12-31', endDate: '2026-12-31', partialDay: false })
+  });
+  assert.equal(response.status, 200);
+  assert.equal(timezoneCenter, 77);
+  assert.equal(noticeCenter, 77);
+  assert.equal(quoteInput?.franchiseId, 77);
+  assert.equal(quoteInput?.balanceDate, '2026-12-31');
+
+  deps.resolveTimeOffNoticeRequired = async () => true;
+  const noticeBase = await startApp(deps);
+  const noticeResponse = await fetch(`${noticeBase}/api/pto/public/quote`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer center-secret' },
+    body: JSON.stringify({ email: 'ada@example.com', startDate: '2026-12-31', endDate: '2026-12-31', partialDay: false })
+  });
+  assert.equal(noticeResponse.status, 400);
 });
 
 test('admin PTO routes enforce selected center scope and expose every lifecycle endpoint', async () => {
@@ -191,6 +261,23 @@ test('fixed-center admin cannot override the session franchise and invalid ids a
   const response = await fetch(`${base}/api/pto/admin/profiles/10?franchiseId=77`);
   assert.equal(response.status, 200);
   assert.equal(receivedCenter, 9);
+});
+
+test('an admin linked to the canonical profile may mutate another listed center membership', async () => {
+  let received: Record<string, unknown> | undefined;
+  const deps = baseDeps();
+  deps.detachMembership = async (input) => {
+    received = input as unknown as Record<string, unknown>;
+    return { sourceProfileId: input.profileId, detachedProfileId: '11' };
+  };
+  const base = await startApp(deps, { accountType: 'ADMIN', accountId: 900, franchiseId: 9 });
+  const response = await fetch(`${base}/api/pto/admin/profiles/10/memberships/200/detach`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ franchiseId: 77 })
+  });
+  assert.equal(response.status, 200);
+  assert.equal(received?.profileId, '10');
+  assert.equal(received?.membershipId, '200');
+  assert.equal(received?.actorFranchiseId, 9);
 });
 
 test('invalid pagination is rejected before PTO list services run', async () => {
@@ -250,4 +337,55 @@ test('stable PTO domain failures map to safe conflict responses', async () => {
   });
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), { error: 'Insufficient PTO balance', code: 'PTO_INSUFFICIENT_BALANCE' });
+});
+
+test('real repository permission, identity, and email failures map without leaking raw details', async () => {
+  const deps = baseDeps();
+  deps.detachMembership = async () => { throw new Error('Actor center is not authorized for PTO membership 987654'); };
+  deps.addEmail = async (input) => {
+    if (input.email === 'provenance@example.com') {
+      throw new Error('PTO email provenance membership is not active on this profile');
+    }
+    throw new Error('PTO email would be ambiguous in this center');
+  };
+  deps.decideAlias = async () => { throw new Error('PTO alias candidate 123456 does not exist'); };
+  const base = await startApp(deps, { accountType: 'ADMIN', accountId: 900, franchiseId: 9 });
+  const forbidden = await fetch(`${base}/api/pto/admin/profiles/10/memberships/20/detach`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert.equal(forbidden.status, 403);
+  assert.deepEqual(await forbidden.json(), { error: 'Not authorized for this PTO profile', code: 'PTO_FORBIDDEN' });
+  const conflict = await fetch(`${base}/api/pto/admin/profiles/10/emails`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ membershipId: 20, email: 'valid@example.com' })
+  });
+  assert.equal(conflict.status, 409);
+  assert.deepEqual(await conflict.json(), { error: 'PTO email conflicts with another profile', code: 'PTO_EMAIL_AMBIGUOUS' });
+  const provenance = await fetch(`${base}/api/pto/admin/profiles/10/emails`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ membershipId: 20, email: 'provenance@example.com' })
+  });
+  assert.equal(provenance.status, 422);
+  assert.deepEqual(await provenance.json(), { error: 'PTO email provenance is invalid', code: 'PTO_EMAIL_PROVENANCE_INVALID' });
+  const missing = await fetch(`${base}/api/pto/admin/aliases/12/decide`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'confirm' })
+  });
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: 'PTO record was not found', code: 'PTO_NOT_FOUND' });
+});
+
+test('a real PTO identity conflict maps safely and unknown failures are sanitized at the router boundary', async () => {
+  const deps = baseDeps();
+  deps.getTutorProfile = async () => {
+    throw new Error('PTO roster membership belongs to a different canonical profile');
+  };
+  const base = await startApp(deps, { accountType: 'TUTOR', accountId: 123, franchiseId: 6 });
+  const response = await fetch(`${base}/api/pto/me`);
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'PTO identity state conflicts with this request', code: 'PTO_IDENTITY_CONFLICT' });
+  deps.getTutorProfile = async () => { throw new Error('sensitive repository row detail'); };
+  const unknownBase = await startApp(deps, { accountType: 'TUTOR', accountId: 123, franchiseId: 6 });
+  const unknown = await fetch(`${unknownBase}/api/pto/me`);
+  assert.equal(unknown.status, 500);
+  assert.deepEqual(await unknown.json(), { error: 'PTO operation failed', code: 'PTO_INTERNAL_ERROR' });
 });

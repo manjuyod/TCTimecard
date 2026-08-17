@@ -12,13 +12,15 @@ export interface PtoQuoteDayCharge {
 export interface AuthenticatedPtoQuoteInput {
   franchiseId: number;
   tutorId: number;
+  balanceDate: string;
   chargeDays: number;
   dayCharges: PtoQuoteDayCharge[];
 }
 
 export interface PublicPtoQuoteInput {
-  token: string;
+  franchiseId: number;
   email: string;
+  balanceDate: string;
   chargeDays: number;
   dayCharges: PtoQuoteDayCharge[];
 }
@@ -58,26 +60,30 @@ const resolveAuthenticatedProfile = async (db: Queryable, franchiseId: number, t
   return result.rowCount === 1 ? String(result.rows[0].profile_id) : null;
 };
 
-const resolvePublicContext = async (db: Queryable, token: string, email: string): Promise<{ franchiseId: number; profileId: string } | null> => {
+const resolvePublicCenter = async (db: Queryable, token: string): Promise<{ franchiseId: number } | null> => {
   const tokenHash = createHash('sha256').update(token, 'utf8').digest('hex');
   const result = await db.query(`
-    SELECT link.franchiseid, public.pto_canonical_profile_id(email.profile_id) AS profile_id
+    SELECT link.franchiseid
     FROM public.time_off_center_links link
-    JOIN public.pto_profile_emails email ON email.franchiseid = link.franchiseid
-      AND email.email = $2 AND email.active
-    JOIN public.pto_profile_centers center ON center.franchiseid = link.franchiseid
+    WHERE link.token_hash = $1 AND link.active
+  `, [tokenHash]);
+  return result.rowCount === 1 ? { franchiseId: number(result.rows[0].franchiseid) } : null;
+};
+
+const resolvePublicProfile = async (db: Queryable, franchiseId: number, emailAddress: string): Promise<string | null> => {
+  const result = await db.query(`
+    SELECT public.pto_canonical_profile_id(email.profile_id) AS profile_id
+    FROM public.pto_profile_emails email
+    JOIN public.pto_profile_centers center ON center.franchiseid = email.franchiseid
       AND center.active
       AND (center.id = email.source_membership_id
         OR (email.source_membership_id IS NULL AND center.profile_id = email.profile_id))
     JOIN public.pto_profiles profile ON profile.id = public.pto_canonical_profile_id(email.profile_id)
       AND profile.active
-    WHERE link.token_hash = $1 AND link.active
-      AND (link.expires_at IS NULL OR link.expires_at > NOW())
-    GROUP BY link.franchiseid, public.pto_canonical_profile_id(email.profile_id)
-  `, [tokenHash, email]);
-  return result.rowCount === 1
-    ? { franchiseId: number(result.rows[0].franchiseid), profileId: String(result.rows[0].profile_id) }
-    : null;
+    WHERE email.franchiseid = $1 AND email.email = $2 AND email.active
+    GROUP BY public.pto_canonical_profile_id(email.profile_id)
+  `, [franchiseId, emailAddress]);
+  return result.rowCount === 1 ? String(result.rows[0].profile_id) : null;
 };
 
 const balanceSummary = async (db: Queryable, profileId: string, balanceDate: string): Promise<PtoBalanceSummary> => {
@@ -152,6 +158,7 @@ const buildQuote = async (
   chargeDays: number,
   charges: PtoQuoteDayCharge[],
   authenticated: boolean,
+  balanceDate: string,
   missingReason: PtoEligibilityReason = 'identity_unresolved'
 ): Promise<PtoQuote> => {
   const allocations = await cycleAllocations(db, charges);
@@ -163,11 +170,12 @@ const buildQuote = async (
   const noBalance = summaries.length > 0 && summaries.every((summary) => summary.availableDays <= 0);
   const reason: PtoEligibilityReason = noBalance ? 'no_balance' : insufficient ? 'insufficient_balance' : 'eligible';
   const result: PtoQuote = { eligible: reason === 'eligible', reason, chargeDays, cycleAllocations: allocations };
-  if (authenticated) result.balance = await balanceSummary(db, context.profileId, new Date().toISOString().slice(0, 10));
+  if (authenticated) result.balance = await balanceSummary(db, context.profileId, balanceDate);
   return result;
 };
 
 export const createPtoRouteStore = (pool: Pool) => ({
+  authorizePublicCenter: (token: string) => resolvePublicCenter(pool, token),
   getBalanceSummary: (profileId: string, balanceDate: string) => balanceSummary(pool, profileId, balanceDate),
   getPolicyStatus: async (input: { franchiseId: number; tutorId: number; balanceDate: string }): Promise<PtoPolicyStatus> => {
     const status = await getStatus(pool, input.franchiseId);
@@ -184,16 +192,21 @@ export const createPtoRouteStore = (pool: Pool) => ({
       profileId ? { franchiseId: input.franchiseId, profileId } : null,
       input.chargeDays,
       input.dayCharges,
-      true
+      true,
+      input.balanceDate
     );
   },
-  quotePublic: async (input: PublicPtoQuoteInput) => buildQuote(
-    pool,
-    await resolvePublicContext(pool, input.token, input.email),
-    input.chargeDays,
-    input.dayCharges,
-    false
-  ),
+  quotePublic: async (input: PublicPtoQuoteInput) => {
+    const profileId = await resolvePublicProfile(pool, input.franchiseId, input.email);
+    return buildQuote(
+      pool,
+      profileId ? { franchiseId: input.franchiseId, profileId } : null,
+      input.chargeDays,
+      input.dayCharges,
+      false,
+      input.balanceDate
+    );
+  },
   deactivateCenter: async (input: { franchiseId: number; actorId: string }): Promise<PtoCenterStatus> => {
     const result = await pool.query('SELECT * FROM public.pto_deactivate_center($1, $2)', [input.franchiseId, input.actorId]);
     return centerStatus(input.franchiseId, result.rows[0]);
@@ -203,6 +216,7 @@ export const createPtoRouteStore = (pool: Pool) => ({
 let defaultStore: ReturnType<typeof createPtoRouteStore> | undefined;
 const store = () => defaultStore ??= createPtoRouteStore(getPostgresPool());
 export const getPtoBalanceSummary = (profileId: string, balanceDate: string) => store().getBalanceSummary(profileId, balanceDate);
+export const authorizePublicPtoCenter = (token: string) => store().authorizePublicCenter(token);
 export const getAuthenticatedPtoPolicyStatus = (input: { franchiseId: number; tutorId: number; balanceDate: string }) =>
   store().getPolicyStatus(input);
 export const quoteAuthenticatedPto = (input: AuthenticatedPtoQuoteInput) => store().quoteAuthenticated(input);

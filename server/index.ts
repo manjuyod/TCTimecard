@@ -24,6 +24,7 @@ import { closePostgresPool } from './db/postgres';
 import { closeMssqlPool } from './db/mssql';
 import { startAutoClockOutScheduler } from './services/autoClockOutScheduler';
 import { installGracefulShutdown } from './services/gracefulShutdown';
+import { mapPtoHttpError } from './services/pto/errors';
 import { setSensitivePageHeaders } from './middleware/sensitivePageHeaders';
 
 dotenv.config();
@@ -111,6 +112,11 @@ if (fs.existsSync(distPath)) {
 
 // Centralized error handler to ensure API routes always return JSON instead of Express HTML error pages
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  const ptoError = mapPtoHttpError(err);
+  if (ptoError) {
+    res.status(ptoError.status).json({ error: ptoError.error, code: ptoError.code });
+    return;
+  }
   const status =
     typeof (err as { status?: number } | null | undefined)?.status === 'number'
       ? (err as { status: number }).status

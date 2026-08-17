@@ -9,11 +9,12 @@ import {
   listPtoAudit, previewPtoActivation, removePtoEmail, syncPtoRoster
 } from '../services/pto';
 import {
-  deactivatePtoCenter, getPtoBalanceSummary, quoteAuthenticatedPto, quotePublicPto,
+  authorizePublicPtoCenter, deactivatePtoCenter, getPtoBalanceSummary, quoteAuthenticatedPto, quotePublicPto,
   type AuthenticatedPtoQuoteInput, type PublicPtoQuoteInput
 } from '../services/pto/routeStore';
+import { mapPtoHttpError } from '../services/pto/errors';
 import { calculatePtoCharge } from '../services/ptoCharge';
-import { normalizeTimeOffSubmission } from '../services/timeOffPolicy';
+import { localDateForTimeZone, normalizeTimeOffSubmission } from '../services/timeOffPolicy';
 import type { PtoBalanceSummary, PtoQuote } from '../types/pto';
 
 type ServiceInput<T extends (...args: never[]) => unknown> = Parameters<T>[0];
@@ -28,7 +29,8 @@ export interface PtoRouteDeps {
   syncRoster: typeof syncPtoRoster;
   deactivateCenter: typeof deactivatePtoCenter;
   getTutorProfile: typeof getTutorPtoProfile;
-  getBalanceSummary?: (profileId: string, balanceDate: string) => Promise<PtoBalanceSummary>;
+  getBalanceSummary: (profileId: string, balanceDate: string) => Promise<PtoBalanceSummary>;
+  authorizePublicCenter: typeof authorizePublicPtoCenter;
   quoteAuthenticated: (input: AuthenticatedPtoQuoteInput) => Promise<PtoQuote>;
   quotePublic: (input: PublicPtoQuoteInput) => Promise<PtoQuote>;
   listProfiles: typeof listAdminPtoProfiles;
@@ -52,6 +54,7 @@ const defaultDeps: PtoRouteDeps = {
   deactivateCenter: deactivatePtoCenter,
   getTutorProfile: getTutorPtoProfile,
   getBalanceSummary: getPtoBalanceSummary,
+  authorizePublicCenter: authorizePublicPtoCenter,
   quoteAuthenticated: quoteAuthenticatedPto,
   quotePublic: quotePublicPto,
   listProfiles: listAdminPtoProfiles,
@@ -71,12 +74,14 @@ export function createPtoRouter(overrides: Partial<PtoRouteDeps> = {}) {
   router.get('/pto/me', requireTutor, asyncHandler(async (req, res) => {
     const context = tutorContext(req);
     if (!context) return res.status(400).json({ error: 'Tutor context missing' });
-    const [result, policy, center] = await Promise.all([
-      deps.getTutorProfile(context), deps.getProgramPolicy(), deps.getCenterStatus(context.franchiseId)
+    const nowIso = deps.nowIso();
+    const [result, policy, center, timezone] = await Promise.all([
+      deps.getTutorProfile(context), deps.getProgramPolicy(), deps.getCenterStatus(context.franchiseId),
+      deps.resolveTimezone(context.franchiseId)
     ]);
-    const balance = result.profile && deps.getBalanceSummary
-      ? await deps.getBalanceSummary(result.profile.id, deps.nowIso().slice(0, 10))
-      : result.balance;
+    const balance = result.profile
+      ? await deps.getBalanceSummary(result.profile.id, localDateForTimeZone(nowIso, timezone))
+      : null;
     return res.json({ ...result, balance, policy, center });
   }));
 
@@ -125,14 +130,18 @@ export function createPtoRouter(overrides: Partial<PtoRouteDeps> = {}) {
     const authorization = req.get('authorization') ?? '';
     const match = /^Bearer ([^\s]+)$/i.exec(authorization);
     if (!match) return res.status(401).json({ error: 'A bearer center token is required' });
+    const center = await deps.authorizePublicCenter(match[1]);
+    if (!center) {
+      return res.status(401).json({ error: 'Center link is invalid or inactive', code: 'PTO_CENTER_LINK_INVALID' });
+    }
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
       return res.status(400).json({ error: 'A valid email address is required' });
     }
-    const charge = await normalizedCharge(req, res, deps, 0);
+    const charge = await normalizedCharge(req, res, deps, center.franchiseId);
     if (!charge) return;
     try {
-      const result = await deps.quotePublic({ token: match[1], email, ...charge });
+      const result = await deps.quotePublic({ franchiseId: center.franchiseId, email, ...charge });
       return res.json({ eligible: result.eligible, reason: result.reason, chargeDays: result.chargeDays,
         cycleAllocations: result.cycleAllocations });
     } catch (error) { return sendPtoError(res, error); }
@@ -197,16 +206,21 @@ export function createPtoRouter(overrides: Partial<PtoRouteDeps> = {}) {
 }
 
 async function normalizedCharge(req: Request, res: Response, deps: PtoRouteDeps, franchiseId: number) {
-  const [timezone, noticeRequired] = franchiseId > 0
-    ? await Promise.all([deps.resolveTimezone(franchiseId), deps.resolveTimeOffNoticeRequired(franchiseId)])
-    : ['UTC', false] as const;
+  const [timezone, noticeRequired] = await Promise.all([
+    deps.resolveTimezone(franchiseId), deps.resolveTimeOffNoticeRequired(franchiseId)
+  ]);
+  const nowIso = deps.nowIso();
   const normalized = normalizeTimeOffSubmission({ ...req.body, type: 'pto', reason: 'PTO quote request' }, {
-    timezone, nowIso: deps.nowIso(), maxDurationHours: 336, noticeRequired
+    timezone, nowIso, maxDurationHours: 336, noticeRequired
   });
   if (!normalized.valid) { res.status(400).json({ error: normalized.errors[0], errors: normalized.errors }); return null; }
   const calculated = calculatePtoCharge({ startDate: normalized.value.startDate, endDate: normalized.value.endDate,
     partialDay: normalized.value.partialDay, durationHours: normalized.value.durationHours });
-  return { chargeDays: calculated.totalDays, dayCharges: calculated.dayCharges.map(({ date, days }) => ({ date, days })) };
+  return {
+    balanceDate: localDateForTimeZone(nowIso, timezone),
+    chargeDays: calculated.totalDays,
+    dayCharges: calculated.dayCharges.map(({ date, days }) => ({ date, days }))
+  };
 }
 
 async function tutorIdentity(deps: PtoRouteDeps, context: { franchiseId: number; tutorId: number }) {
@@ -259,19 +273,15 @@ function calendarDate(value: string) {
     && date.getUTCDate() === Number(match[3]);
 }
 function requiredId(res: Response, value: unknown, label: string) { const parsed = id(value); if (!parsed) res.status(400).json({ error: `Invalid ${label} id` }); return parsed; }
-function asyncHandler(handler: (req: Request, res: Response) => Promise<unknown>) { return (req: Request, res: Response, next: NextFunction) => { Promise.resolve(handler(req, res)).catch(next); }; }
+function asyncHandler(handler: (req: Request, res: Response) => Promise<unknown>) {
+  return (req: Request, res: Response, _next: NextFunction) => {
+    Promise.resolve(handler(req, res)).catch((error) => sendPtoError(res, error));
+  };
+}
 
 export function sendPtoError(res: Response, error: unknown) {
-  const code = typeof (error as { code?: unknown })?.code === 'string' ? String((error as { code: string }).code) : '';
-  const mappings: Record<string, [number, string]> = {
-    PTO_CENTER_DISABLED: [409, 'PTO is disabled for this center'],
-    PTO_IDENTITY_UNRESOLVED: [422, 'PTO identity is unresolved'],
-    PTO_NO_BALANCE: [409, 'No PTO balance is available'],
-    PTO_INSUFFICIENT_BALANCE: [409, 'Insufficient PTO balance']
-  };
-  if (mappings[code]) return res.status(mappings[code][0]).json({ error: mappings[code][1], code });
-  if (error instanceof RangeError) return res.status(400).json({ error: error.message });
-  throw error;
+  const mapped = mapPtoHttpError(error, true) as NonNullable<ReturnType<typeof mapPtoHttpError>>;
+  return res.status(mapped.status).json({ error: mapped.error, code: mapped.code });
 }
 
 export default createPtoRouter();

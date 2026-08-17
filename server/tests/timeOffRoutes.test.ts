@@ -362,6 +362,27 @@ describe('PTO lifecycle integration', () => {
     assert.equal(body.policy.pto.reason, 'center_disabled');
   });
 
+  it('resolves PTO policy balance on the center-local date at the UTC year boundary', async () => {
+    let balanceDate = '';
+    const origin = await startApp('TUTOR', {
+      resolveTimezone: async () => 'America/Los_Angeles', resolveTimeOffNoticeRequired: async () => false,
+      nowIso: () => '2027-01-01T00:30:00.000Z',
+      getPtoPolicyStatus: async (input: { balanceDate: string }) => {
+        balanceDate = input.balanceDate;
+        return { enabled: true, reason: 'eligible', balance: {
+          cycleStart: '2026-01-01', cycleEnd: '2026-12-31', renewsOn: '2027-01-01',
+          grantedDays: 5, adjustedDays: 0, availableDays: 5, reservedDays: 0, usedDays: 0
+        } };
+      }
+    });
+    const response = await fetch(`${origin}/api/timeoff/policy`);
+    const body = await response.json() as { policy: { today: string; pto: { balance: { cycleStart: string } } } };
+    assert.equal(response.status, 200);
+    assert.equal(body.policy.today, '2026-12-31');
+    assert.equal(body.policy.pto.balance.cycleStart, '2026-01-01');
+    assert.equal(balanceDate, '2026-12-31');
+  });
+
   it('quotes PTO before insert and rejects an ineligible request without writing', async () => {
     let created = false;
     const origin = await startApp('TUTOR', {
@@ -428,6 +449,21 @@ describe('PTO lifecycle integration', () => {
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), { error: 'PTO is disabled for this center', code: 'PTO_CENTER_DISABLED' });
+  });
+
+  it('maps a real PostgreSQL identity failure during quote without exposing repository details', async () => {
+    const origin = await startApp('TUTOR', {
+      resolveTimezone: async () => 'America/Los_Angeles', resolveTimeOffNoticeRequired: async () => false,
+      nowIso: () => '2026-08-16T12:00:00.000Z',
+      quotePto: async () => { throw new Error('Authenticated PTO identity requires an active CRM membership'); }
+    });
+    const response = await fetch(`${origin}/api/timeoff`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startDate: '2026-08-17', endDate: '2026-08-17', partialDay: false,
+        type: 'pto', reason: 'Family vacation request' })
+    });
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), { error: 'PTO identity is unresolved', code: 'PTO_IDENTITY_UNRESOLVED' });
   });
 });
 

@@ -21,7 +21,8 @@ test('authenticated quote resolves the exact membership once and compares every 
     throw new Error(`Unexpected query: ${sql}`);
   } };
   const result = await createPtoRouteStore(pool as never).quoteAuthenticated({
-    franchiseId: 6, tutorId: 123, chargeDays: 1, dayCharges: [{ date: '2026-08-17', days: 1 }]
+    franchiseId: 6, tutorId: 123, balanceDate: '2026-08-16', chargeDays: 1,
+    dayCharges: [{ date: '2026-08-17', days: 1 }]
   });
   assert.equal(identityReads, 1);
   assert.equal(result.eligible, true);
@@ -34,16 +35,52 @@ test('public quote sends only the SHA-256 bearer hash to PostgreSQL and returns 
   let tokenParameter = '';
   const pool = { query: async (sql: string, params: unknown[] = []) => {
     if (/FROM public\.time_off_center_links/i.test(sql)) {
-      tokenParameter = String(params[0]); return { rowCount: 1, rows: [{ franchiseid: 6, profile_id: '10' }] };
+      tokenParameter = String(params[0]); return { rowCount: 1, rows: [{ franchiseid: 6 }] };
     }
+    if (/FROM public\.pto_profile_emails email/i.test(sql)) return { rowCount: 1, rows: [{ profile_id: '10' }] };
     if (/JSONB_TO_RECORDSET/i.test(sql)) return { rowCount: 1, rows: [{ cycle_start: '2026-01-01', days: '1.00' }] };
     if (/FROM public\.pto_center_settings/i.test(sql)) return { rowCount: 1, rows: [{ enabled: true }] };
     if (/WITH policy AS/i.test(sql)) return { rowCount: 1, rows: [balanceRow] };
     throw new Error(`Unexpected query: ${sql}`);
   } };
-  const result = await createPtoRouteStore(pool as never).quotePublic({ token, email: 'ada@example.com',
+  const store = createPtoRouteStore(pool as never);
+  const center = await store.authorizePublicCenter(token);
+  assert.deepEqual(center, { franchiseId: 6 });
+  const result = await store.quotePublic({ franchiseId: 6, email: 'ada@example.com', balanceDate: '2026-08-16',
     chargeDays: 1, dayCharges: [{ date: '2026-08-17', days: 1 }] });
   assert.equal(tokenParameter, createHash('sha256').update(token).digest('hex'));
   assert.equal(tokenParameter.includes(token), false);
   assert.equal('balance' in result, false);
+});
+
+test('inactive or unknown public center tokens fail authorization before identity lookup', async () => {
+  let identityReads = 0;
+  const pool = { query: async (sql: string) => {
+    if (/FROM public\.time_off_center_links/i.test(sql)) return { rowCount: 0, rows: [] };
+    if (/FROM public\.pto_profile_emails/i.test(sql)) identityReads += 1;
+    return { rowCount: 0, rows: [] };
+  } };
+  assert.equal(await createPtoRouteStore(pool as never).authorizePublicCenter('inactive-token'), null);
+  assert.equal(identityReads, 0);
+});
+
+test('authenticated quote keeps true cross-January allocations in separate entitlement cycles', async () => {
+  const pool = { query: async (sql: string) => {
+    if (/FROM public\.pto_profile_centers center[\s\S]*pto_profile_crm_ids/i.test(sql)) {
+      return { rowCount: 1, rows: [{ profile_id: '10' }] };
+    }
+    if (/JSONB_TO_RECORDSET/i.test(sql)) return { rowCount: 2, rows: [
+      { cycle_start: '2026-01-01', days: '1.00' }, { cycle_start: '2027-01-01', days: '1.00' }
+    ] };
+    if (/FROM public\.pto_center_settings/i.test(sql)) return { rowCount: 1, rows: [{ enabled: true }] };
+    if (/WITH policy AS/i.test(sql)) return { rowCount: 1, rows: [balanceRow] };
+    throw new Error(`Unexpected query: ${sql}`);
+  } };
+  const result = await createPtoRouteStore(pool as never).quoteAuthenticated({
+    franchiseId: 6, tutorId: 123, balanceDate: '2026-12-31', chargeDays: 2,
+    dayCharges: [{ date: '2026-12-31', days: 1 }, { date: '2027-01-01', days: 1 }]
+  });
+  assert.deepEqual(result.cycleAllocations, [
+    { cycleStart: '2026-01-01', days: 1 }, { cycleStart: '2027-01-01', days: 1 }
+  ]);
 });

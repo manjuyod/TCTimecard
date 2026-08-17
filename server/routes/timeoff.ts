@@ -17,8 +17,9 @@ import {
 import { fetchTimeOffTutorById, fetchTimeOffTutorsByIds, TutorDirectoryIdentity } from '../services/timeOffDirectory';
 import { sendTimeOffGmailDwd } from '../services/timeOffEmail';
 import { createTimeOffDecisionToken, CreatedTimeOffDecisionToken } from '../services/timeOffDecisionToken';
-import { buildTimeOffPolicy, normalizeTimeOffSubmission } from '../services/timeOffPolicy';
+import { buildTimeOffPolicy, localDateForTimeZone, normalizeTimeOffSubmission } from '../services/timeOffPolicy';
 import { calculatePtoCharge } from '../services/ptoCharge';
+import { mapPtoHttpError } from '../services/pto/errors';
 import { getAuthenticatedPtoPolicyStatus, quoteAuthenticatedPto } from '../services/pto/routeStore';
 import {
   appendTimeOffAudit,
@@ -32,7 +33,7 @@ import {
   NotificationFailureRow
 } from '../services/timeOffRepository';
 import { sendAdminRequestNotification } from '../services/timeOffWorkflow';
-import { NormalizedTimeOffSubmission, TimeOffNotificationResult, TimeOffRecord } from '../types/timeoff';
+import { NormalizedTimeOffSubmission, TimeOffNotificationResult, TimeOffPolicy, TimeOffRecord } from '../types/timeoff';
 import type { PtoPolicyStatus, PtoQuote } from '../types/pto';
 
 const MAX_TIME_OFF_DURATION_HOURS = 336;
@@ -189,14 +190,17 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
       deps.resolveTimezone(context.franchiseId),
       deps.resolveTimeOffNoticeRequired(context.franchiseId)
     ]);
-    const pto = await deps.getPtoPolicyStatus({ ...context, balanceDate: deps.nowIso().slice(0, 10) });
-    const policy = buildTimeOffPolicy({
+    const nowIso = deps.nowIso();
+    const pto = await deps.getPtoPolicyStatus({
+      ...context,
+      balanceDate: localDateForTimeZone(nowIso, timezone)
+    });
+    const policy: TimeOffPolicy = { ...buildTimeOffPolicy({
         timezone,
-        nowIso: deps.nowIso(),
+        nowIso,
         maxDurationHours: MAX_TIME_OFF_DURATION_HOURS,
         noticeRequired
-      });
-    policy.pto = pto;
+      }), pto };
     if (pto.reason !== 'eligible' || (pto.balance?.availableDays ?? 0) <= 0) {
       policy.allowedTypes = policy.allowedTypes.filter((type) => type !== 'pto');
     }
@@ -210,9 +214,10 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
       deps.resolveTimezone(context.franchiseId),
       deps.resolveTimeOffNoticeRequired(context.franchiseId)
     ]);
+    const nowIso = deps.nowIso();
     const normalized = normalizeTimeOffSubmission(req.body ?? {}, {
       timezone,
-      nowIso: deps.nowIso(),
+      nowIso,
       maxDurationHours: MAX_TIME_OFF_DURATION_HOURS,
       noticeRequired
     });
@@ -224,11 +229,18 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
         partialDay: normalized.value.partialDay,
         durationHours: normalized.value.durationHours
       });
-      const quote = await deps.quotePto({
-        ...context,
-        chargeDays: charge.totalDays,
-        dayCharges: charge.dayCharges.map(({ date, days }) => ({ date, days }))
-      });
+      let quote: PtoQuote;
+      try {
+        quote = await deps.quotePto({
+          ...context,
+          balanceDate: localDateForTimeZone(nowIso, timezone),
+          chargeDays: charge.totalDays,
+          dayCharges: charge.dayCharges.map(({ date, days }) => ({ date, days }))
+        });
+      } catch (error) {
+        const mapped = mapPtoHttpError(error, true) as NonNullable<ReturnType<typeof mapPtoHttpError>>;
+        return res.status(mapped.status).json({ error: mapped.error, code: mapped.code });
+      }
       if (!quote.eligible) return sendIneligiblePto(res, quote);
     }
     if (await deps.checkOverlap(context.tutorId, normalized.value.startAt, normalized.value.endAt)) {
@@ -252,16 +264,8 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
       });
     } catch (error) {
       if (normalized.value.type === 'pto') {
-        const message = error instanceof Error ? error.message : '';
-        if (message.includes('PTO_CENTER_DISABLED')) {
-          return res.status(409).json({ error: 'PTO is disabled for this center', code: 'PTO_CENTER_DISABLED' });
-        }
-        if (/Insufficient shared PTO balance/i.test(message)) {
-          return res.status(409).json({ error: 'Insufficient PTO balance', code: 'PTO_INSUFFICIENT_BALANCE' });
-        }
-        if (/PTO identity|active CRM membership/i.test(message)) {
-          return res.status(422).json({ error: 'PTO identity is unresolved', code: 'PTO_IDENTITY_UNRESOLVED' });
-        }
+        const mapped = mapPtoHttpError(error, true) as NonNullable<ReturnType<typeof mapPtoHttpError>>;
+        return res.status(mapped.status).json({ error: mapped.error, code: mapped.code });
       }
       throw error;
     }

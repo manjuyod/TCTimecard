@@ -10,6 +10,7 @@ test('route migration adds hashed center links and never stores a raw bearer tok
   assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.time_off_center_links/i);
   assert.match(sql, /token_hash/i);
   assert.doesNotMatch(sql, /raw_token|plaintext_token/i);
+  assert.doesNotMatch(sql, /expires_at/i);
   assert.match(sql, /UNIQUE\s*\(token_hash\)/i);
 });
 

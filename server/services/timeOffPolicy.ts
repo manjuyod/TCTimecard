@@ -23,7 +23,7 @@ export type TimeOffValidationResult =
   | { valid: true; errors: []; value: NormalizedTimeOffSubmission }
   | { valid: false; errors: string[]; value?: undefined };
 
-export function buildTimeOffPolicy(options: TimeOffPolicyOptions): TimeOffPolicy {
+export function buildTimeOffPolicy(options: TimeOffPolicyOptions): Omit<TimeOffPolicy, 'pto'> {
   const today = currentLocalDate(options);
   return {
     timezone: options.timezone,
@@ -35,6 +35,12 @@ export function buildTimeOffPolicy(options: TimeOffPolicyOptions): TimeOffPolicy
     allowedTypes: [...ALLOWED_TYPES],
     maxDurationHours: options.maxDurationHours
   };
+}
+
+export function localDateForTimeZone(nowIso: string, timezone: string): string {
+  const local = DateTime.fromISO(nowIso, { setZone: true }).setZone(timezone);
+  if (!local.isValid) throw new RangeError('Current time is invalid');
+  return local.toISODate() as string;
 }
 
 export function normalizeTimeOffSubmission(

@@ -3,7 +3,6 @@ CREATE TABLE IF NOT EXISTS public.time_off_center_links (
   franchiseid INTEGER NOT NULL,
   token_hash TEXT NOT NULL CHECK (token_hash ~ '^[0-9a-f]{64}$'),
   active BOOLEAN NOT NULL DEFAULT TRUE,
-  expires_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (token_hash)
