@@ -222,3 +222,18 @@ test('admin roster pagination is server-side and bounded to 100 rows', async () 
   await service.listAdminPtoProfiles({ franchiseId: 77, search: ' ada ', page: -2, pageSize: 5000 });
   assert.deepEqual(captured, { franchiseId: 77, search: 'ada', page: 1, pageSize: 100 });
 });
+
+test('alias decisions return the stored outcome instead of echoing a contradictory request', async () => {
+  const service = createPtoService({
+    store: createStore({
+      decideAlias: async (input) => ({ profileId: '4', decision: input.decision === 'confirm' ? 'reject' : input.decision })
+    }),
+    rosterSource: roster(async () => [])
+  });
+
+  const result = await service.decidePtoAlias({
+    candidateId: '9', decision: 'confirm', actorId: 'admin-1', actorFranchiseId: 77
+  });
+
+  assert.deepEqual(result, { profileId: '4', decision: 'reject' });
+});

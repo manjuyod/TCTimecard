@@ -49,20 +49,11 @@ const profile = (row: Record<string, unknown>): PtoProfileSummary => ({
 
 const profileSelect = `
   SELECT profile.id, profile.first_name, profile.last_name, profile.identity_status, profile.active,
-    COALESCE(cycle.entitlement_days, 0) AS granted_days,
-    COALESCE(ledger.balance_days, 0) AS balance_days,
-    COALESCE(ledger.reserved_days, 0) AS reserved_days,
+    COALESCE(balance.granted_days, 0) AS granted_days,
+    COALESCE(balance.balance_days, 0) AS balance_days,
+    COALESCE(balance.reserved_days, 0) AS reserved_days,
     COALESCE(balance.available_days, 0) AS available_days
   FROM public.pto_profiles profile
-  LEFT JOIN LATERAL (
-    SELECT entitlement_days FROM public.pto_entitlement_cycles
-    WHERE profile_id = profile.id AND CURRENT_DATE BETWEEN starts_on AND ends_on LIMIT 1
-  ) cycle ON TRUE
-  LEFT JOIN LATERAL (
-    SELECT COALESCE(SUM(balance_delta), 0) AS balance_days,
-      COALESCE(SUM(reserved_delta), 0) AS reserved_days
-    FROM public.pto_ledger_entries WHERE profile_id = profile.id
-  ) ledger ON TRUE
   LEFT JOIN LATERAL public.pto_profile_balance(profile.id, CURRENT_DATE) balance ON TRUE
 `;
 
@@ -119,21 +110,35 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       WITH incoming AS (
         SELECT * FROM JSONB_TO_RECORDSET($2::JSONB)
           AS tutor(id BIGINT, first_name TEXT, last_name TEXT)
-      ), existing AS (
-        SELECT tutor_id FROM public.pto_profile_centers WHERE franchiseid = $1
+      ), new_incoming AS (
+        SELECT incoming.* FROM incoming
+        WHERE NOT EXISTS (
+          SELECT 1 FROM public.pto_profile_crm_ids crm
+          WHERE crm.provider = 'timecard-center:' || ($1::INTEGER)::TEXT
+            AND crm.crm_id = incoming.id::TEXT
+        )
+      ), candidate_pairs AS (
+        SELECT 'existing:' || incoming.id || ':' || public.pto_canonical_profile_id(profile.id) AS pair_key
+        FROM new_incoming incoming
+        JOIN public.pto_profiles profile
+          ON profile.active
+          AND profile.normalized_first_name = LOWER(BTRIM(incoming.first_name))
+          AND profile.normalized_last_name = LOWER(BTRIM(incoming.last_name))
+        UNION
+        SELECT 'incoming:' || LEAST(left_tutor.id, right_tutor.id) || ':'
+          || GREATEST(left_tutor.id, right_tutor.id)
+        FROM new_incoming left_tutor
+        JOIN new_incoming right_tutor ON left_tutor.id < right_tutor.id
+          AND LOWER(BTRIM(left_tutor.first_name)) = LOWER(BTRIM(right_tutor.first_name))
+          AND LOWER(BTRIM(left_tutor.last_name)) = LOWER(BTRIM(right_tutor.last_name))
       )
       SELECT
-        (SELECT COUNT(*) FROM incoming WHERE id NOT IN (SELECT tutor_id FROM existing)) AS new_memberships,
-        (SELECT COUNT(*) FROM incoming i WHERE NOT EXISTS (
-          SELECT 1 FROM public.pto_profile_crm_ids crm
-          WHERE crm.provider = 'timecard-center:' || $1 AND crm.crm_id = i.id::TEXT
-        )) AS new_profiles,
-        (SELECT COUNT(*) FROM incoming i WHERE EXISTS (
-          SELECT 1 FROM public.pto_profiles profile
-          WHERE profile.active
-            AND profile.normalized_first_name = LOWER(BTRIM(i.first_name))
-            AND profile.normalized_last_name = LOWER(BTRIM(i.last_name))
-        )) AS pending_candidates
+        (SELECT COUNT(*) FROM incoming WHERE NOT EXISTS (
+          SELECT 1 FROM public.pto_profile_centers center
+          WHERE center.franchiseid = $1::INTEGER AND center.tutor_id = incoming.id
+        )) AS new_memberships,
+        (SELECT COUNT(*) FROM new_incoming) AS new_profiles,
+        (SELECT COUNT(*) FROM candidate_pairs) AS pending_candidates
     `, [franchiseId, JSON.stringify(tutors.map((tutor) => ({
       id: tutor.id, first_name: tutor.firstName, last_name: tutor.lastName
     })))]);
@@ -151,6 +156,21 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     if (!input.tutors.every((tutor) => tutor.franchiseId === input.franchiseId)) {
       throw new Error('CRM roster contained a tutor from another franchise');
     }
+    const priorCenterRows = await queryRows(db, `
+      SELECT enabled, first_activated_at, last_successful_sync_at, last_sync_error
+      FROM public.pto_center_settings WHERE franchiseid = $1
+    `, [input.franchiseId]);
+    const priorRosterRows = await queryRows(db, `
+      SELECT tutor_id FROM public.pto_profile_centers
+      WHERE franchiseid = $1 AND active AND tutor_id IS NOT NULL ORDER BY tutor_id
+    `, [input.franchiseId]);
+    const priorCenter = {
+      enabled: Boolean(priorCenterRows[0]?.enabled),
+      firstActivatedAt: iso(priorCenterRows[0]?.first_activated_at),
+      lastSuccessfulSyncAt: iso(priorCenterRows[0]?.last_successful_sync_at),
+      lastSyncError: priorCenterRows[0]?.last_sync_error == null ? null : String(priorCenterRows[0].last_sync_error),
+      activeTutorIds: priorRosterRows.map((row) => number(row.tutor_id))
+    };
     if (input.activate) {
       await db.query(`
         INSERT INTO public.pto_center_settings (franchiseid, enabled)
@@ -171,7 +191,8 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       }
       const provider = `timecard-center:${input.franchiseId}`;
       let identity = await queryRows(db, `
-        SELECT profile_id FROM public.pto_profile_crm_ids WHERE provider = $1 AND crm_id = $2
+        SELECT public.pto_canonical_profile_id(profile_id) AS profile_id
+        FROM public.pto_profile_crm_ids WHERE provider = $1 AND crm_id = $2
       `, [provider, String(tutor.id)]);
       let profileId: string;
       if (!identity[0]) {
@@ -188,15 +209,30 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
         await db.query(`UPDATE public.pto_profiles SET first_name = $2, last_name = $3
           WHERE id = $1`, [profileId, tutor.firstName.trim(), tutor.lastName.trim()]);
       }
-      const membership = await queryRows(db, `
-        INSERT INTO public.pto_profile_centers
+      let membership = await queryRows(db, `
+        SELECT id, profile_id, FALSE AS inserted FROM public.pto_profile_centers
+        WHERE franchiseid = $1 AND tutor_id = $2 FOR UPDATE
+      `, [input.franchiseId, tutor.id]);
+      if (membership[0]) {
+        const membershipCanonical = await queryRows(db,
+          'SELECT public.pto_canonical_profile_id($1) AS id', [membership[0].profile_id]);
+        if (String(membershipCanonical[0].id) !== profileId) {
+          throw new Error('PTO roster membership belongs to a different canonical profile');
+        }
+        membership = await queryRows(db, `UPDATE public.pto_profile_centers SET
+          active = TRUE, crm_snapshot = $2, updated_at = NOW()
+          WHERE id = $1 RETURNING id, profile_id, FALSE AS inserted`,
+        [membership[0].id, tutor]);
+      } else {
+        membership = await queryRows(db, `INSERT INTO public.pto_profile_centers
           (profile_id, franchiseid, tutor_id, active, crm_snapshot, updated_at)
         VALUES ($1, $2, $3, TRUE, $4, NOW())
         ON CONFLICT (profile_id, franchiseid) DO UPDATE SET
           tutor_id = EXCLUDED.tutor_id, active = TRUE,
           crm_snapshot = EXCLUDED.crm_snapshot, updated_at = NOW()
-        RETURNING id, (xmax = 0) AS inserted
-      `, [profileId, input.franchiseId, tutor.id, tutor]);
+        RETURNING id, profile_id, (xmax = 0) AS inserted`,
+        [profileId, input.franchiseId, tutor.id, tutor]);
+      }
       if (membership[0]?.inserted) activatedMembershipCount += 1;
       const membershipId = String(membership[0].id);
       await db.query(`UPDATE public.pto_profile_emails SET active = FALSE, updated_at = NOW()
@@ -207,10 +243,10 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
           INSERT INTO public.pto_profile_emails
             (profile_id, franchiseid, email, active, source, source_membership_id)
           VALUES ($1, $2, $3, TRUE, 'crm', $4)
-          ON CONFLICT (profile_id, franchiseid, email) DO UPDATE SET
-            active = TRUE, source = 'crm', source_membership_id = EXCLUDED.source_membership_id,
+          ON CONFLICT (profile_id, franchiseid, email, source) DO UPDATE SET
+            active = TRUE, source_membership_id = EXCLUDED.source_membership_id,
             updated_at = NOW()
-        `, [profileId, input.franchiseId, tutor.email.trim().toLowerCase(), membershipId]);
+        `, [membership[0].profile_id, input.franchiseId, tutor.email.trim().toLowerCase(), membershipId]);
       }
       await db.query('SELECT public.pto_get_or_create_cycle($1, CURRENT_DATE)', [profileId]);
       const candidates = await db.query(`
@@ -237,17 +273,14 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
         enabled = public.pto_center_settings.enabled OR EXCLUDED.enabled,
         last_successful_sync_at = EXCLUDED.last_successful_sync_at,
         last_sync_error = NULL
-      RETURNING last_successful_sync_at
+      RETURNING enabled, first_activated_at, last_successful_sync_at, last_sync_error
     `, [input.franchiseId, input.activate]);
+    const nextRosterRows = await queryRows(db, `
+      SELECT tutor_id FROM public.pto_profile_centers
+      WHERE franchiseid = $1 AND active AND tutor_id IS NOT NULL ORDER BY tutor_id
+    `, [input.franchiseId]);
     const lastSuccessfulSyncAt = iso(syncRows[0].last_successful_sync_at) ?? new Date().toISOString();
-    await db.query(`
-      INSERT INTO public.pto_audit_events
-        (franchiseid, actor_id, event_type, after_state, idempotency_key)
-      VALUES ($1, $2, $3, $4, $5)
-    `, [input.franchiseId, input.actorId, input.activate ? 'center_activated_and_synced' : 'roster_synced', {
-      activeTutorCount: activeIds.length, lastSuccessfulSyncAt
-    }, `roster-sync:${input.franchiseId}:${randomUUID()}`]);
-    return {
+    const summary = {
       activeTutorCount: activeIds.length,
       activatedMembershipCount,
       deactivatedMembershipCount: deactivated.rowCount ?? 0,
@@ -255,6 +288,21 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       pendingCandidateCount,
       lastSuccessfulSyncAt
     };
+    const nextCenter = {
+      enabled: Boolean(syncRows[0].enabled),
+      firstActivatedAt: iso(syncRows[0].first_activated_at),
+      lastSuccessfulSyncAt,
+      lastSyncError: syncRows[0].last_sync_error == null ? null : String(syncRows[0].last_sync_error),
+      activeTutorIds: nextRosterRows.map((row) => number(row.tutor_id))
+    };
+    await db.query(`
+      INSERT INTO public.pto_audit_events
+        (franchiseid, actor_id, event_type, before_state, after_state, idempotency_key)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [input.franchiseId, input.actorId,
+      input.activate ? 'center_activated_and_synced' : 'roster_synced',
+      priorCenter, { ...nextCenter, summary }, `roster-sync:${input.franchiseId}:${randomUUID()}`]);
+    return summary;
   },
 
   getTutorProfile: async ({ franchiseId, tutorId }): Promise<PtoTutorProfileResult> => {
@@ -368,40 +416,65 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
 
   addEmail: async (input: AddPtoEmailInput): Promise<PtoEmail> => {
     await db.query('SELECT public.pto_assert_profile_admin($1, $2)', [input.profileId, input.actorFranchiseId]);
-    const membership = await queryRows(db, `SELECT id, franchiseid FROM public.pto_profile_centers
-      WHERE id = $1 AND profile_id = $2 AND active`, [input.membershipId, input.profileId]);
+    const canonicalRows = await queryRows(db,
+      'SELECT public.pto_canonical_profile_id($1) AS id', [input.profileId]);
+    const canonicalProfileId = String(canonicalRows[0].id);
+    const membership = await queryRows(db, `SELECT id, profile_id, franchiseid FROM public.pto_profile_centers
+      WHERE id = $1 AND public.pto_canonical_profile_id(profile_id) = $2 AND active`,
+    [input.membershipId, canonicalProfileId]);
     if (!membership[0]) throw new Error('PTO email provenance membership is not active on this profile');
-    const ambiguous = await queryRows(db, `SELECT 1 FROM public.pto_profile_emails email
-      JOIN public.pto_profile_centers center ON center.profile_id = email.profile_id
-        AND center.franchiseid = email.franchiseid AND center.active
-      WHERE email.franchiseid = $1 AND email.email = $2 AND email.active AND email.profile_id <> $3 LIMIT 1`,
-      [membership[0].franchiseid, input.email, input.profileId]);
+    const ambiguous = await queryRows(db, `
+      SELECT 1 FROM public.pto_profile_emails email
+      WHERE email.email = $2 AND email.active
+        AND email.franchiseid IN (
+          SELECT center.franchiseid FROM public.pto_profile_centers center
+          WHERE public.pto_canonical_profile_id(center.profile_id) = $1 AND center.active
+        )
+        AND public.pto_canonical_profile_id(email.profile_id) <> $1
+        AND EXISTS (
+          SELECT 1 FROM public.pto_profile_centers email_center
+          WHERE email_center.franchiseid = email.franchiseid
+            AND public.pto_canonical_profile_id(email_center.profile_id)
+              = public.pto_canonical_profile_id(email.profile_id)
+            AND email_center.active
+        )
+      LIMIT 1
+    `, [canonicalProfileId, input.email]);
     if (ambiguous[0]) throw new Error('PTO email would be ambiguous in this center');
+    const previous = await queryRows(db, `SELECT id, profile_id, franchiseid, email, active, source,
+        source_membership_id FROM public.pto_profile_emails
+      WHERE profile_id = $1 AND franchiseid = $2 AND email = $3 AND source = 'manual'`,
+    [membership[0].profile_id, membership[0].franchiseid, input.email]);
     const rows = await queryRows(db, `INSERT INTO public.pto_profile_emails
       (profile_id, franchiseid, email, active, source, source_membership_id)
       VALUES ($1, $2, $3, TRUE, 'manual', $4)
-      ON CONFLICT (profile_id, franchiseid, email) DO UPDATE SET active = TRUE, source = 'manual',
+      ON CONFLICT (profile_id, franchiseid, email, source) DO UPDATE SET active = TRUE,
         source_membership_id = EXCLUDED.source_membership_id, updated_at = NOW()
-      RETURNING id, email, active, source, source_membership_id`,
-      [input.profileId, membership[0].franchiseid, input.email, input.membershipId]);
+      RETURNING id, profile_id, franchiseid, email, active, source, source_membership_id`,
+      [membership[0].profile_id, membership[0].franchiseid, input.email, input.membershipId]);
     await db.query(`INSERT INTO public.pto_audit_events
-      (profile_id, franchiseid, actor_id, event_type, after_state, idempotency_key)
-      VALUES ($1, $2, $3, 'email_added', $4, $5)`,
-      [input.profileId, membership[0].franchiseid, input.actorId, rows[0], `email-add:${rows[0].id}:${randomUUID()}`]);
+      (profile_id, franchiseid, actor_id, event_type, before_state, after_state, idempotency_key)
+      VALUES ($1, $2, $3, 'email_added', $4, $5, $6)`,
+      [canonicalProfileId, membership[0].franchiseid, input.actorId,
+        previous[0] ?? { exists: false }, rows[0], `email-add:${rows[0].id}:${randomUUID()}`]);
     return { id: String(rows[0].id), email: String(rows[0].email), active: true, source: 'manual',
       sourceMembershipId: String(rows[0].source_membership_id) };
   },
 
   removeEmail: async (input: RemovePtoEmailInput): Promise<PtoEmail> => {
     await db.query('SELECT public.pto_assert_profile_admin($1, $2)', [input.profileId, input.actorFranchiseId]);
+    const previous = await queryRows(db, `SELECT id, profile_id, franchiseid, email, active, source,
+        source_membership_id FROM public.pto_profile_emails
+      WHERE id = $1 AND public.pto_canonical_profile_id(profile_id)
+        = public.pto_canonical_profile_id($2) AND source = 'manual'`, [input.emailId, input.profileId]);
+    if (!previous[0]) throw new Error('Only an existing manual PTO email can be removed');
     const rows = await queryRows(db, `UPDATE public.pto_profile_emails SET active = FALSE, updated_at = NOW()
-      WHERE id = $1 AND profile_id = $2 AND source = 'manual'
-      RETURNING id, email, active, source, source_membership_id, franchiseid`, [input.emailId, input.profileId]);
-    if (!rows[0]) throw new Error('Only an existing manual PTO email can be removed');
+      WHERE id = $1 RETURNING id, profile_id, email, active, source, source_membership_id, franchiseid`,
+    [input.emailId]);
     await db.query(`INSERT INTO public.pto_audit_events
       (profile_id, franchiseid, actor_id, event_type, before_state, after_state, idempotency_key)
       VALUES ($1, $2, $3, 'email_removed', $4, $5, $6)`,
-      [input.profileId, rows[0].franchiseid, input.actorId, { ...rows[0], active: true }, rows[0],
+      [input.profileId, rows[0].franchiseid, input.actorId, previous[0], rows[0],
         `email-remove:${input.emailId}:${randomUUID()}`]);
     return { id: String(rows[0].id), email: String(rows[0].email), active: false, source: 'manual',
       sourceMembershipId: rows[0].source_membership_id == null ? null : String(rows[0].source_membership_id) };
@@ -409,23 +482,30 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
 
   adjustBalance: async (input: AdjustPtoBalanceInput) => {
     await db.query('SELECT public.pto_assert_profile_admin($1, $2)', [input.profileId, input.actorFranchiseId]);
+    const canonical = await queryRows(db,
+      'SELECT public.pto_canonical_profile_id($1) AS id', [input.profileId]);
+    const canonicalProfileId = String(canonical[0].id);
+    const beforeBalance = await queryRows(db,
+      'SELECT * FROM public.pto_profile_balance($1, $2::DATE)', [canonicalProfileId, input.cycleStart]);
     let cycles = await queryRows(db, `SELECT id FROM public.pto_entitlement_cycles
-      WHERE profile_id = $1 AND starts_on = $2::DATE`, [input.profileId, input.cycleStart]);
+      WHERE profile_id = $1 AND starts_on = $2::DATE`, [canonicalProfileId, input.cycleStart]);
     if (!cycles[0]) cycles = await queryRows(db,
-      'SELECT public.pto_get_or_create_cycle($1, $2::DATE) AS id', [input.profileId, input.cycleStart]);
+      'SELECT public.pto_get_or_create_cycle($1, $2::DATE) AS id', [canonicalProfileId, input.cycleStart]);
     const entry = await queryRows(db, `INSERT INTO public.pto_ledger_entries
       (profile_id, cycle_id, event_type, balance_delta, idempotency_key, metadata)
       VALUES ($1, $2, 'adjustment', $3, $4,
         JSONB_BUILD_OBJECT('reason', $5::TEXT, 'actorId', $6::TEXT)) RETURNING id`,
-      [input.profileId, cycles[0].id, input.deltaDays, `adjustment:${randomUUID()}`, input.reason, input.actorId]);
+      [canonicalProfileId, cycles[0].id, input.deltaDays, `adjustment:${randomUUID()}`, input.reason, input.actorId]);
+    const balances = await queryRows(db,
+      'SELECT * FROM public.pto_profile_balance($1, $2::DATE)', [canonicalProfileId, input.cycleStart]);
     await db.query(`INSERT INTO public.pto_audit_events
       (profile_id, franchiseid, actor_id, event_type, before_state, after_state, idempotency_key)
-      VALUES ($1, $2, $3, 'balance_adjusted', NULL, $4, $5)`,
-      [input.profileId, input.actorFranchiseId, input.actorId,
-        { cycleStart: input.cycleStart, deltaDays: input.deltaDays, reason: input.reason, ledgerEntryId: entry[0].id },
+      VALUES ($1, $2, $3, 'balance_adjusted', $4, $5, $6)`,
+      [canonicalProfileId, input.actorFranchiseId, input.actorId,
+        { cycleStart: input.cycleStart, balance: beforeBalance[0] },
+        { cycleStart: input.cycleStart, balance: balances[0], deltaDays: input.deltaDays,
+          reason: input.reason, ledgerEntryId: entry[0].id },
         `balance-adjust:${entry[0].id}`]);
-    const balances = await queryRows(db,
-      'SELECT available_days FROM public.pto_profile_balance($1, $2::DATE)', [input.profileId, input.cycleStart]);
     return { ledgerEntryId: String(entry[0].id), availableDays: number(balances[0].available_days) };
   },
 
@@ -433,14 +513,20 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     const offset = (input.page - 1) * input.pageSize;
     const rows = await queryRows(db, `SELECT * FROM public.pto_audit_events audit
       WHERE (audit.franchiseid = $1 OR EXISTS (SELECT 1 FROM public.pto_profile_centers center
-        WHERE center.profile_id = audit.profile_id AND center.franchiseid = $1))
-        AND ($2::BIGINT IS NULL OR audit.profile_id = $2)
+        WHERE public.pto_canonical_profile_id(center.profile_id)
+          = public.pto_canonical_profile_id(audit.profile_id)
+          AND center.franchiseid = $1))
+        AND ($2::BIGINT IS NULL OR public.pto_canonical_profile_id(audit.profile_id)
+          = public.pto_canonical_profile_id($2))
       ORDER BY audit.created_at DESC, audit.id DESC LIMIT $3 OFFSET $4`,
       [input.franchiseId, input.profileId ?? null, input.pageSize, offset]);
     const totals = await queryRows(db, `SELECT COUNT(*) AS total FROM public.pto_audit_events audit
       WHERE (audit.franchiseid = $1 OR EXISTS (SELECT 1 FROM public.pto_profile_centers center
-        WHERE center.profile_id = audit.profile_id AND center.franchiseid = $1))
-        AND ($2::BIGINT IS NULL OR audit.profile_id = $2)`, [input.franchiseId, input.profileId ?? null]);
+        WHERE public.pto_canonical_profile_id(center.profile_id)
+          = public.pto_canonical_profile_id(audit.profile_id)
+          AND center.franchiseid = $1))
+        AND ($2::BIGINT IS NULL OR public.pto_canonical_profile_id(audit.profile_id)
+          = public.pto_canonical_profile_id($2))`, [input.franchiseId, input.profileId ?? null]);
     return { items: rows.map(auditRow), page: input.page, pageSize: input.pageSize, total: number(totals[0]?.total) };
   },
 
