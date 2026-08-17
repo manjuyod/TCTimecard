@@ -9,7 +9,10 @@ CREATE TABLE IF NOT EXISTS public.pto_policies (
 );
 
 INSERT INTO public.pto_policies (effective_from)
-VALUES (DATE '1970-01-01')
+SELECT DATE '1970-01-01'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.pto_policies WHERE effective_from = DATE '1970-01-01'
+)
 ON CONFLICT (effective_from) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS public.pto_center_settings (
@@ -22,6 +25,12 @@ CREATE TABLE IF NOT EXISTS public.pto_center_settings (
 
 CREATE TABLE IF NOT EXISTS public.pto_profiles (
   id BIGSERIAL PRIMARY KEY,
+  first_name TEXT NOT NULL DEFAULT '',
+  last_name TEXT NOT NULL DEFAULT '',
+  normalized_first_name TEXT GENERATED ALWAYS AS (LOWER(BTRIM(first_name))) STORED,
+  normalized_last_name TEXT GENERATED ALWAYS AS (LOWER(BTRIM(last_name))) STORED,
+  identity_status TEXT NOT NULL DEFAULT 'pending' CHECK (identity_status IN ('pending', 'confirmed')),
+  active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -35,17 +44,35 @@ CREATE TABLE IF NOT EXISTS public.pto_profile_crm_ids (
 );
 
 CREATE TABLE IF NOT EXISTS public.pto_profile_emails (
+  id BIGSERIAL PRIMARY KEY,
   profile_id BIGINT NOT NULL REFERENCES public.pto_profiles(id),
-  email TEXT PRIMARY KEY CHECK (email = LOWER(BTRIM(email))),
+  franchiseid INTEGER NOT NULL,
+  email TEXT NOT NULL CHECK (email = LOWER(BTRIM(email))),
+  active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (profile_id, email)
+  UNIQUE (profile_id, franchiseid, email)
 );
+
+CREATE INDEX IF NOT EXISTS pto_profile_emails_center_email_idx
+  ON public.pto_profile_emails (franchiseid, email)
+  WHERE active;
 
 CREATE TABLE IF NOT EXISTS public.pto_profile_centers (
   profile_id BIGINT NOT NULL REFERENCES public.pto_profiles(id),
   franchiseid INTEGER NOT NULL,
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (profile_id, franchiseid)
+);
+
+CREATE TABLE IF NOT EXISTS public.pto_profile_match_candidates (
+  id BIGSERIAL PRIMARY KEY,
+  left_profile_id BIGINT NOT NULL REFERENCES public.pto_profiles(id),
+  right_profile_id BIGINT NOT NULL REFERENCES public.pto_profiles(id),
+  match_type TEXT NOT NULL DEFAULT 'exact_name' CHECK (match_type = 'exact_name'),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'rejected')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (left_profile_id, right_profile_id),
+  CHECK (left_profile_id < right_profile_id)
 );
 
 CREATE TABLE IF NOT EXISTS public.pto_entitlement_cycles (
@@ -71,7 +98,16 @@ CREATE TABLE IF NOT EXISTS public.pto_ledger_entries (
   reserved_delta NUMERIC(6, 2) NOT NULL DEFAULT 0,
   idempotency_key TEXT NOT NULL UNIQUE,
   metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT pto_ledger_adjustment_contract CHECK (
+    event_type <> 'adjustment'
+    OR (
+      balance_delta <> 0
+      AND reserved_delta = 0
+      AND MOD(ABS(balance_delta), 0.5) = 0
+      AND NULLIF(BTRIM(metadata ->> 'reason'), '') IS NOT NULL
+    )
+  )
 );
 
 CREATE INDEX IF NOT EXISTS pto_ledger_entries_profile_cycle_idx
@@ -134,6 +170,10 @@ DECLARE
   v_cycle_end DATE;
   v_cycle_id BIGINT;
 BEGIN
+  PERFORM PG_ADVISORY_XACT_LOCK(
+    HASHTEXTEXTENDED('pto-policy-version', 0)
+  );
+
   PERFORM 1
   FROM public.pto_profiles
   WHERE id = p_profile_id
@@ -240,8 +280,23 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  PERFORM PG_ADVISORY_XACT_LOCK(
+    HASHTEXTEXTENDED('pto-policy-version', 0)
+  );
+
   IF NEW.effective_from <= CURRENT_DATE THEN
     RAISE EXCEPTION 'PTO policy changes must be future-effective';
+  END IF;
+  IF EXTRACT(MONTH FROM NEW.effective_from)::INTEGER <> NEW.renewal_month
+    OR EXTRACT(DAY FROM NEW.effective_from)::INTEGER <> NEW.renewal_day THEN
+    RAISE EXCEPTION 'PTO policy effective date must begin on its renewal boundary';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM public.pto_entitlement_cycles
+    WHERE starts_on >= NEW.effective_from
+  ) THEN
+    RAISE EXCEPTION 'PTO policy cannot reinterpret materialized PTO cycles';
   END IF;
   RETURN NEW;
 END;
@@ -310,29 +365,62 @@ CREATE OR REPLACE FUNCTION public.pto_resolve_profile(
   p_franchiseid INTEGER,
   p_tutorid BIGINT,
   p_bridge_profile_id BIGINT,
-  p_email TEXT
+  p_email TEXT,
+  p_request_source TEXT,
+  p_first_name TEXT,
+  p_last_name TEXT
 )
 RETURNS BIGINT
 LANGUAGE plpgsql
 AS $$
 DECLARE
   v_email TEXT := NULLIF(LOWER(BTRIM(p_email)), '');
+  v_first_name TEXT := NULLIF(BTRIM(p_first_name), '');
+  v_last_name TEXT := NULLIF(BTRIM(p_last_name), '');
   v_bridge_profile BIGINT;
-  v_email_profile BIGINT;
   v_local_profile BIGINT;
   v_profile_id BIGINT;
   v_attached_profile BIGINT;
+  v_public_match_count INTEGER;
+  v_identity_status TEXT;
   v_local_provider TEXT := 'timecard-center:' || p_franchiseid;
 BEGIN
-  IF p_bridge_profile_id IS NULL AND p_tutorid IS NULL AND v_email IS NULL THEN
-    RAISE EXCEPTION 'PTO profile requires a CRM ID or email identity';
+  IF p_request_source = 'public' THEN
+    IF v_email IS NULL THEN
+      RAISE EXCEPTION 'Public PTO identity must resolve exactly one active profile';
+    END IF;
+
+    SELECT COUNT(DISTINCT email.profile_id), MIN(email.profile_id)
+    INTO v_public_match_count, v_profile_id
+    FROM public.pto_profile_emails AS email
+    JOIN public.pto_profiles AS profile ON profile.id = email.profile_id
+    JOIN public.pto_profile_centers AS center
+      ON center.profile_id = email.profile_id
+      AND center.franchiseid = email.franchiseid
+    WHERE email.franchiseid = p_franchiseid
+      AND email.email = v_email
+      AND email.active
+      AND profile.active;
+
+    IF v_public_match_count <> 1 THEN
+      RAISE EXCEPTION 'Public PTO identity must resolve exactly one active profile';
+    END IF;
+    RETURN v_profile_id;
+  ELSIF p_request_source <> 'authenticated' THEN
+    RAISE EXCEPTION 'Unsupported PTO request source %', p_request_source;
+  END IF;
+
+  IF p_bridge_profile_id IS NULL AND p_tutorid IS NULL THEN
+    RAISE EXCEPTION 'Authenticated PTO profile requires a CRM identity';
+  END IF;
+  IF v_first_name IS NULL OR v_last_name IS NULL THEN
+    RAISE EXCEPTION 'Authenticated PTO profile requires exact first and last names';
   END IF;
 
   PERFORM PG_ADVISORY_XACT_LOCK(
-    HASHTEXTENDED(
+    HASHTEXTEXTENDED(
       COALESCE(
         'bridge:' || p_bridge_profile_id,
-        'email:' || v_email,
         v_local_provider || ':' || p_tutorid
       ),
       0
@@ -345,27 +433,34 @@ BEGIN
     WHERE provider = 'bridge' AND crm_id = p_bridge_profile_id::TEXT;
   END IF;
 
-  IF v_email IS NOT NULL THEN
-    SELECT profile_id INTO v_email_profile
-    FROM public.pto_profile_emails
-    WHERE email = v_email;
-  END IF;
-
   IF p_tutorid IS NOT NULL THEN
     SELECT profile_id INTO v_local_profile
     FROM public.pto_profile_crm_ids
     WHERE provider = v_local_provider AND crm_id = p_tutorid::TEXT;
   END IF;
 
-  v_profile_id := COALESCE(v_bridge_profile, v_email_profile, v_local_profile);
+  v_profile_id := COALESCE(v_bridge_profile, v_local_profile);
   IF (v_bridge_profile IS NOT NULL AND v_bridge_profile IS DISTINCT FROM v_profile_id)
-    OR (v_email_profile IS NOT NULL AND v_email_profile IS DISTINCT FROM v_profile_id)
     OR (v_local_profile IS NOT NULL AND v_local_profile IS DISTINCT FROM v_profile_id) THEN
     RAISE EXCEPTION 'PTO identities belong to different profiles';
   END IF;
 
   IF v_profile_id IS NULL THEN
-    INSERT INTO public.pto_profiles DEFAULT VALUES RETURNING id INTO v_profile_id;
+    INSERT INTO public.pto_profiles (
+      first_name,
+      last_name,
+      identity_status
+    )
+    VALUES (
+      v_first_name,
+      v_last_name,
+      CASE WHEN p_bridge_profile_id IS NULL THEN 'pending' ELSE 'confirmed' END
+    )
+    RETURNING id INTO v_profile_id;
+  ELSIF p_bridge_profile_id IS NOT NULL THEN
+    UPDATE public.pto_profiles
+    SET identity_status = 'confirmed'
+    WHERE id = v_profile_id;
   END IF;
 
   IF p_bridge_profile_id IS NOT NULL THEN
@@ -381,15 +476,9 @@ BEGIN
   END IF;
 
   IF v_email IS NOT NULL THEN
-    INSERT INTO public.pto_profile_emails (profile_id, email)
-    VALUES (v_profile_id, v_email)
-    ON CONFLICT (email) DO NOTHING;
-    SELECT profile_id INTO v_attached_profile
-    FROM public.pto_profile_emails
-    WHERE email = v_email;
-    IF v_attached_profile IS DISTINCT FROM v_profile_id THEN
-      RAISE EXCEPTION 'PTO identities belong to different profiles';
-    END IF;
+    INSERT INTO public.pto_profile_emails (profile_id, franchiseid, email)
+    VALUES (v_profile_id, p_franchiseid, v_email)
+    ON CONFLICT (profile_id, franchiseid, email) DO UPDATE SET active = TRUE;
   END IF;
 
   IF p_tutorid IS NOT NULL THEN
@@ -408,6 +497,25 @@ BEGIN
   VALUES (v_profile_id, p_franchiseid)
   ON CONFLICT (profile_id, franchiseid) DO NOTHING;
 
+  SELECT identity_status INTO v_identity_status
+  FROM public.pto_profiles
+  WHERE id = v_profile_id;
+
+  INSERT INTO public.pto_profile_match_candidates (
+    left_profile_id,
+    right_profile_id
+  )
+  SELECT
+    LEAST(v_profile_id, candidate.id),
+    GREATEST(v_profile_id, candidate.id)
+  FROM public.pto_profiles AS candidate
+  WHERE candidate.id <> v_profile_id
+    AND candidate.active
+    AND (v_identity_status = 'pending' OR candidate.identity_status = 'pending')
+    AND candidate.normalized_first_name = LOWER(v_first_name)
+    AND candidate.normalized_last_name = LOWER(v_last_name)
+  ON CONFLICT (left_profile_id, right_profile_id) DO NOTHING;
+
   RETURN v_profile_id;
 END;
 $$;
@@ -418,6 +526,9 @@ CREATE OR REPLACE FUNCTION public.pto_reserve_request(
   p_tutorid BIGINT,
   p_bridge_profile_id BIGINT,
   p_email TEXT,
+  p_request_source TEXT,
+  p_first_name TEXT,
+  p_last_name TEXT,
   p_created_at TIMESTAMPTZ,
   p_start_date DATE,
   p_end_date DATE,
@@ -446,6 +557,15 @@ BEGIN
     RETURN;
   END IF;
 
+  PERFORM 1
+  FROM public.time_off_requests
+  WHERE id = p_request_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'PTO request % does not exist', p_request_id;
+  END IF;
+
   IF EXISTS (
     SELECT 1 FROM public.pto_request_allocations WHERE request_id = p_request_id
   ) THEN
@@ -456,7 +576,10 @@ BEGIN
     p_franchiseid,
     p_tutorid,
     p_bridge_profile_id,
-    p_email
+    p_email,
+    p_request_source,
+    p_first_name,
+    p_last_name
   );
 
   FOR v_day IN
@@ -641,6 +764,12 @@ BEGIN
       NEW.tutorid,
       NEW.bridge_profile_id,
       NEW.email,
+      CASE
+        WHEN NEW.public_metadata ->> 'source' = 'public_timeoff_form' THEN 'public'
+        ELSE 'authenticated'
+      END,
+      NEW.first_name,
+      NEW.last_name,
       NEW.created_at,
       v_start_date,
       v_end_date,

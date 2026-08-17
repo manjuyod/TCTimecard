@@ -130,3 +130,27 @@ test('PTO ledger entries are append-only', () => {
   assert.match(sql, /PTO ledger entries are append-only/i);
   assert.match(sql, /BEFORE UPDATE OR DELETE ON public\.pto_ledger_entries/i);
 });
+
+test('reviewed identity contract distinguishes confirmed, pending-name, and center-scoped public matches', () => {
+  const sql = loadMigration();
+
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.pto_profile_match_candidates/i);
+  assert.match(sql, /identity_status TEXT NOT NULL DEFAULT 'pending'/i);
+  assert.match(sql, /UNIQUE \(profile_id, franchiseid, email\)/i);
+  assert.match(sql, /p_request_source = 'public'/i);
+  assert.match(sql, /email\.franchiseid = p_franchiseid/i);
+  assert.match(sql, /v_public_match_count <> 1/i);
+  assert.match(sql, /match_type TEXT NOT NULL DEFAULT 'exact_name'/i);
+});
+
+test('reviewed concurrency, policy, adjustment, and rerun guards remain explicit', () => {
+  const sql = loadMigration();
+
+  assert.match(sql, /FROM public\.time_off_requests WHERE id = p_request_id FOR UPDATE/i);
+  assert.match(sql, /PTO policy effective date must begin on its renewal boundary/i);
+  assert.match(sql, /PTO policy cannot reinterpret materialized PTO cycles/i);
+  assert.match(sql, /CONSTRAINT pto_ledger_adjustment_contract CHECK/i);
+  assert.match(sql, /MOD\(ABS\(balance_delta\), 0\.5\) = 0/i);
+  assert.match(sql, /NULLIF\(BTRIM\(metadata ->> 'reason'\), ''\) IS NOT NULL/i);
+  assert.match(sql, /SELECT DATE '1970-01-01' WHERE NOT EXISTS/i);
+});
