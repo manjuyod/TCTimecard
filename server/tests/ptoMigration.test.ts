@@ -148,7 +148,9 @@ test('reviewed concurrency, policy, adjustment, and rerun guards remain explicit
 
   assert.match(sql, /FROM public\.time_off_requests WHERE id = p_request_id FOR UPDATE/i);
   assert.match(sql, /PTO policy effective date must begin on its renewal boundary/i);
-  assert.match(sql, /PTO policy cannot reinterpret materialized PTO cycles/i);
+  assert.match(sql, /overlap existing entitlement cycles or reinterpret materialized PTO cycles/i);
+  assert.match(sql, /Cannot update a materialized policy version/i);
+  assert.match(sql, /'pto-exact-name:' \|\| LOWER\(v_first_name\)/i);
   assert.match(sql, /CONSTRAINT pto_ledger_adjustment_contract CHECK/i);
   assert.match(sql, /MOD\(ABS\(balance_delta\), 0\.5\) = 0/i);
   assert.match(sql, /NULLIF\(BTRIM\(metadata ->> 'reason'\), ''\) IS NOT NULL/i);

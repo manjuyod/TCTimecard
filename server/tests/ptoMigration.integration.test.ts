@@ -190,6 +190,51 @@ test('a later confirmed exact-name profile leaves the earlier profile as a pendi
   assert.equal(match.rows[0].status, 'pending');
 });
 
+test('concurrent normalized exact-name creation produces one pending pair without merging profiles', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  await pool.query(migrationSql);
+  const first = await pool.connect();
+  const second = await pool.connect();
+  try {
+    await first.query('BEGIN');
+    await second.query('BEGIN');
+    const firstProfile = await first.query<{ id: string }>(`
+      SELECT public.pto_resolve_profile(
+        40, 4001, NULL, 'concurrent.name.one@example.com',
+        'authenticated', ' Concurrent ', 'Name'
+      ) AS id
+    `);
+    const secondPid = Number(
+      (await second.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    );
+    const secondCreation = second.query<{ id: string }>(`
+      SELECT public.pto_resolve_profile(
+        41, 4101, NULL, 'concurrent.name.two@example.com',
+        'authenticated', 'concurrent', ' name '
+      ) AS id
+    `);
+    await waitForBackendLock(pool, secondPid);
+    await first.query('COMMIT');
+    const secondProfile = await secondCreation;
+    await second.query('COMMIT');
+
+    assert.notEqual(firstProfile.rows[0].id, secondProfile.rows[0].id);
+    const candidates = await pool.query<{ pair_count: string }>(`
+      SELECT COUNT(*)::TEXT AS pair_count
+      FROM public.pto_profile_match_candidates
+      WHERE left_profile_id = LEAST($1::BIGINT, $2::BIGINT)
+        AND right_profile_id = GREATEST($1::BIGINT, $2::BIGINT)
+        AND status = 'pending'
+    `, [firstProfile.rows[0].id, secondProfile.rows[0].id]);
+    assert.equal(candidates.rows[0].pair_count, '1');
+  } finally {
+    await first.query('ROLLBACK').catch(() => undefined);
+    await second.query('ROLLBACK').catch(() => undefined);
+    first.release();
+    second.release();
+  }
+});
+
 test('concurrent duplicate reservation keeps allocation and ledger amounts idempotent', { skip: !enabled }, async () => {
   assert.ok(pool);
   await pool.query(migrationSql);
@@ -311,6 +356,65 @@ test('policy creation cannot reinterpret an already materialized entitlement cyc
       VALUES (MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER + 1, 1, 1), 7)
     `),
     /materialized PTO cycles/
+  );
+});
+
+test('a renewal-month change cannot overlap an existing entitlement-cycle interval', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  await pool.query(migrationSql);
+  const profile = await pool.query<{ id: string }>(`
+    INSERT INTO public.pto_profiles (first_name, last_name, identity_status)
+    VALUES ('Overlap', 'Tutor', 'confirmed')
+    RETURNING id
+  `);
+  await pool.query(`
+    SELECT public.pto_get_or_create_cycle(
+      $1,
+      MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER + 1, 2, 1)
+    )
+  `, [profile.rows[0].id]);
+
+  await assert.rejects(
+    pool.query(`
+      INSERT INTO public.pto_policies (
+        effective_from, entitlement_days, renewal_month, renewal_day
+      )
+      VALUES (
+        MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER + 1, 7, 1),
+        7,
+        7,
+        1
+      )
+    `),
+    /overlap existing entitlement cycles/
+  );
+});
+
+test('a materialized policy version cannot move its effective date beyond its existing cycle', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  await pool.query(migrationSql);
+  const policy = await pool.query<{ id: string; effective_from: string }>(`
+    INSERT INTO public.pto_policies (effective_from, entitlement_days)
+    VALUES (MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER + 1, 1, 1), 6)
+    RETURNING id, effective_from::TEXT
+  `);
+  const profile = await pool.query<{ id: string }>(`
+    INSERT INTO public.pto_profiles (first_name, last_name, identity_status)
+    VALUES ('Policy Update', 'Tutor', 'confirmed')
+    RETURNING id
+  `);
+  await pool.query(
+    'SELECT public.pto_get_or_create_cycle($1, $2::DATE + 31)',
+    [profile.rows[0].id, policy.rows[0].effective_from]
+  );
+
+  await assert.rejects(
+    pool.query(`
+      UPDATE public.pto_policies
+      SET effective_from = MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER + 2, 1, 1)
+      WHERE id = $1
+    `, [policy.rows[0].id]),
+    /materialized policy version/
   );
 });
 

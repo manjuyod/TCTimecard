@@ -284,6 +284,14 @@ BEGIN
     HASHTEXTEXTENDED('pto-policy-version', 0)
   );
 
+  IF TG_OP = 'UPDATE' AND EXISTS (
+    SELECT 1
+    FROM public.pto_entitlement_cycles
+    WHERE policy_id = OLD.id
+  ) THEN
+    RAISE EXCEPTION 'Cannot update a materialized policy version';
+  END IF;
+
   IF NEW.effective_from <= CURRENT_DATE THEN
     RAISE EXCEPTION 'PTO policy changes must be future-effective';
   END IF;
@@ -294,9 +302,9 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM public.pto_entitlement_cycles
-    WHERE starts_on >= NEW.effective_from
+    WHERE ends_on >= NEW.effective_from
   ) THEN
-    RAISE EXCEPTION 'PTO policy cannot reinterpret materialized PTO cycles';
+    RAISE EXCEPTION 'PTO policy effective interval cannot overlap existing entitlement cycles or reinterpret materialized PTO cycles';
   END IF;
   RETURN NEW;
 END;
@@ -416,6 +424,13 @@ BEGIN
   IF v_first_name IS NULL OR v_last_name IS NULL THEN
     RAISE EXCEPTION 'Authenticated PTO profile requires exact first and last names';
   END IF;
+
+  PERFORM PG_ADVISORY_XACT_LOCK(
+    HASHTEXTEXTENDED(
+      'pto-exact-name:' || LOWER(v_first_name) || ':' || LOWER(v_last_name),
+      0
+    )
+  );
 
   PERFORM PG_ADVISORY_XACT_LOCK(
     HASHTEXTEXTENDED(
