@@ -377,13 +377,39 @@ test('deleted and missing CRM tutors cannot resolve public PTO identity after sy
   const resolvePublic = () => db.query(`SELECT public.pto_resolve_profile(
     40, NULL, NULL, 'inactive@example.com', 'public', 'Inactive', 'Tutor'
   )`);
+  const resolveAuthenticated = () => db.query(`SELECT public.pto_resolve_profile(
+    40, 404, NULL, 'inactive@example.com', 'authenticated', 'Inactive', 'Tutor'
+  )`);
+  const membershipIsActive = async (): Promise<boolean> => Boolean((await db.query<{ active: boolean }>(`
+    SELECT active FROM public.pto_profile_centers WHERE franchiseid = 40 AND tutor_id = 404
+  `)).rows[0].active);
+
+  await resolveAuthenticated();
+  assert.equal(await membershipIsActive(), true);
 
   await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40',
     tutors: [{ ...tutor, isDeleted: true }] });
+  await assert.rejects(resolveAuthenticated, /active CRM membership/i);
+  assert.equal(await membershipIsActive(), false);
   await assert.rejects(resolvePublic, /exactly one active profile/);
 
   await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40', tutors: [tutor] });
   await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40', tutors: [] });
+  const request = await db.query<{ id: string; created_at: Date }>(`
+    INSERT INTO public.time_off_requests
+      (franchiseid, tutorid, first_name, last_name, email, start_at, end_at, type, status, partial_day, public_metadata)
+    VALUES (40, 404, 'Inactive', 'Tutor', 'inactive@example.com', NOW(), NOW(), 'pto', 'draft', FALSE, '{}')
+    RETURNING id, created_at
+  `);
+  await assert.rejects(db.query(`SELECT public.pto_reserve_request(
+    $1, 40, 404, NULL, 'inactive@example.com', 'authenticated', 'Inactive', 'Tutor', $2,
+    DATE '2026-08-17', DATE '2026-08-17', FALSE, 24
+  )`, [request.rows[0].id, request.rows[0].created_at]), /active CRM membership/i);
+  assert.equal(await membershipIsActive(), false);
+  const allocations = await db.query<{ count: string }>(`
+    SELECT COUNT(*)::TEXT AS count FROM public.pto_request_allocations WHERE request_id = $1
+  `, [request.rows[0].id]);
+  assert.equal(allocations.rows[0].count, '0');
   await assert.rejects(resolvePublic, /exactly one active profile/);
 });
 

@@ -466,6 +466,7 @@ DECLARE
   v_attached_profile BIGINT;
   v_membership_id BIGINT;
   v_membership_profile_id BIGINT;
+  v_membership_active BOOLEAN;
   v_public_match_count INTEGER;
   v_identity_status TEXT;
   v_local_provider TEXT := 'timecard-center:' || p_franchiseid;
@@ -535,18 +536,15 @@ BEGIN
     RAISE EXCEPTION 'PTO identities belong to different profiles';
   END IF;
 
-  IF v_profile_id IS NULL THEN
-    INSERT INTO public.pto_profiles (first_name, last_name, identity_status)
-    VALUES (v_first_name, v_last_name,
-      CASE WHEN p_bridge_profile_id IS NULL THEN 'pending' ELSE 'confirmed' END)
-    RETURNING id INTO v_profile_id;
-  ELSE
-    UPDATE public.pto_profiles
-    SET first_name = v_first_name,
-        last_name = v_last_name,
-        identity_status = CASE WHEN p_bridge_profile_id IS NULL THEN identity_status ELSE 'confirmed' END
-    WHERE id = v_profile_id;
+  IF v_profile_id IS NULL OR (p_tutorid IS NOT NULL AND v_local_profile IS NULL) THEN
+    RAISE EXCEPTION 'Authenticated PTO identity requires an active CRM membership';
   END IF;
+
+  UPDATE public.pto_profiles
+  SET first_name = v_first_name,
+      last_name = v_last_name,
+      identity_status = CASE WHEN p_bridge_profile_id IS NULL THEN identity_status ELSE 'confirmed' END
+  WHERE id = v_profile_id;
 
   IF p_bridge_profile_id IS NOT NULL THEN
     INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id)
@@ -561,9 +559,6 @@ BEGIN
   END IF;
 
   IF p_tutorid IS NOT NULL THEN
-    INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id)
-    VALUES (v_profile_id, v_local_provider, p_tutorid::TEXT)
-    ON CONFLICT (provider, crm_id) DO NOTHING;
     SELECT public.pto_canonical_profile_id(profile_id) INTO v_attached_profile
     FROM public.pto_profile_crm_ids
     WHERE provider = v_local_provider AND crm_id = p_tutorid::TEXT;
@@ -571,30 +566,27 @@ BEGIN
       RAISE EXCEPTION 'PTO identities belong to different profiles';
     END IF;
 
-    SELECT id, profile_id INTO v_membership_id, v_membership_profile_id
+    SELECT id, profile_id, active
+    INTO v_membership_id, v_membership_profile_id, v_membership_active
     FROM public.pto_profile_centers
     WHERE franchiseid = p_franchiseid AND tutor_id = p_tutorid
     FOR UPDATE;
   END IF;
 
-  IF v_membership_id IS NULL THEN
-    SELECT id, profile_id INTO v_membership_id, v_membership_profile_id
+  IF p_tutorid IS NULL THEN
+    SELECT id, profile_id, active
+    INTO v_membership_id, v_membership_profile_id, v_membership_active
     FROM public.pto_profile_centers
     WHERE franchiseid = p_franchiseid
       AND public.pto_canonical_profile_id(profile_id) = v_profile_id
     ORDER BY id LIMIT 1 FOR UPDATE;
   END IF;
 
-  IF v_membership_id IS NULL THEN
-    INSERT INTO public.pto_profile_centers (profile_id, franchiseid, tutor_id, active)
-    VALUES (v_profile_id, p_franchiseid, p_tutorid, TRUE)
-    RETURNING id, profile_id INTO v_membership_id, v_membership_profile_id;
-  ELSE
-    IF public.pto_canonical_profile_id(v_membership_profile_id) IS DISTINCT FROM v_profile_id THEN
-      RAISE EXCEPTION 'PTO membership belongs to a different profile';
-    END IF;
-    UPDATE public.pto_profile_centers SET active = TRUE, updated_at = NOW()
-    WHERE id = v_membership_id;
+  IF v_membership_id IS NULL OR NOT COALESCE(v_membership_active, FALSE) THEN
+    RAISE EXCEPTION 'Authenticated PTO identity requires an active CRM membership';
+  END IF;
+  IF public.pto_canonical_profile_id(v_membership_profile_id) IS DISTINCT FROM v_profile_id THEN
+    RAISE EXCEPTION 'PTO membership belongs to a different profile';
   END IF;
 
   IF v_email IS NOT NULL THEN
