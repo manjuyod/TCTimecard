@@ -10,6 +10,7 @@ import { AdminDashboardPage } from './pages/admin/Dashboard';
 import { ApprovalsPage } from './pages/admin/ApprovalsPage';
 import { PayPeriodSummaryPage } from './pages/admin/PayPeriodSummaryPage';
 import { SettingsPage } from './pages/admin/SettingsPage';
+import { PtoManagementPage } from './pages/admin/PtoManagementPage';
 import { EmailDecisionPage } from './pages/timeoff/EmailDecisionPage';
 import { AppShell, NavItem } from './components/layout/AppShell';
 import { WeeklyAttestationGate } from './components/tutor/WeeklyAttestationGate';
@@ -25,6 +26,7 @@ const adminNav: NavItem[] = [
   { label: 'Dashboard', path: '/admin/dashboard', icon: 'LayoutDashboard' },
   { label: 'Approvals', path: '/admin/approvals', icon: 'Inbox' },
   { label: 'Pay Period Summary', path: '/admin/pay-period-summary', icon: 'Table2' },
+  { label: 'PTO Management', path: '/admin/pto', icon: 'Umbrella' },
   { label: 'Settings', path: '/admin/settings', icon: 'Settings' }
 ];
 
@@ -74,6 +76,7 @@ function App(): JSX.Element {
             <Route path="/admin/dashboard" element={<AdminDashboardPage />} />
             <Route path="/admin/approvals" element={<ApprovalsPage />} />
             <Route path="/admin/pay-period-summary" element={<PayPeriodSummaryPage />} />
+            <Route path="/admin/pto" element={<PtoManagementPage />} />
             <Route path="/admin/settings" element={<SettingsPage />} />
           </Route>
         </Route>

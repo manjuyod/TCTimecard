@@ -25,11 +25,13 @@ const installSettingsFetch = ({
   autoClockOutEnabled = false,
   clockInTimeSnapEnabled = false,
   timeOffNoticeRequired = true,
+  ptoEnabled = false,
   payPeriodType = 'biweekly'
 }: {
   autoClockOutEnabled?: boolean;
   clockInTimeSnapEnabled?: boolean;
   timeOffNoticeRequired?: boolean;
+  ptoEnabled?: boolean;
   payPeriodType?: 'weekly' | 'biweekly';
 } = {}) => {
   const calls: Array<{ path: string; init?: RequestInit }> = [];
@@ -38,7 +40,9 @@ const installSettingsFetch = ({
     calls.push({ path, init });
     if (path.startsWith('/api/admin/settings')) {
       return new Response(JSON.stringify({
-        settings: { franchiseId: 77, autoClockOutEnabled, clockInTimeSnapEnabled, timeOffNoticeRequired }
+        settings: { franchiseId: 77, autoClockOutEnabled, clockInTimeSnapEnabled, timeOffNoticeRequired,
+          ptoEnabled, ptoFirstActivatedAt: ptoEnabled ? '2026-01-01T00:00:00Z' : null,
+          ptoLastSuccessfulSyncAt: ptoEnabled ? '2026-08-20T12:00:00Z' : null }
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (path.startsWith('/api/pay-period/settings')) {
@@ -264,5 +268,21 @@ describe('admin settings page', () => {
     render(<MemoryRouter initialEntries={['/admin/settings']}><App /></MemoryRouter>);
     expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /settings/i })).toHaveAttribute('href', '/admin/settings');
+  });
+
+  it('exposes a dedicated PTO management route inside the admin shell', async () => {
+    installSettingsFetch();
+    render(<MemoryRouter initialEntries={['/admin/pto']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('heading', { name: 'PTO Management' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /pto management/i })).toHaveAttribute('href', '/admin/pto');
+  });
+
+  it('shows shared PTO status and links settings to PTO management', async () => {
+    installSettingsFetch({ ptoEnabled: true });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    expect(await screen.findByText('Shared PTO is active')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Manage PTO' })).toHaveAttribute('href', '/admin/pto');
   });
 });

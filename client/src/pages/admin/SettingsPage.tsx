@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
@@ -43,6 +44,9 @@ export function SettingsPage(): JSX.Element {
   const [autoClockOutEnabled, setAutoClockOutEnabled] = useState(false);
   const [clockInTimeSnapEnabled, setClockInTimeSnapEnabled] = useState(false);
   const [timeOffNoticeRequired, setTimeOffNoticeRequired] = useState(true);
+  const [ptoEnabled, setPtoEnabled] = useState(false);
+  const [ptoFirstActivatedAt, setPtoFirstActivatedAt] = useState<string | null>(null);
+  const [ptoLastSuccessfulSyncAt, setPtoLastSuccessfulSyncAt] = useState<string | null>(null);
   const [payrollSettings, setPayrollSettings] = useState<PayrollSettings | null>(null);
   const [payrollForm, setPayrollForm] = useState<PayrollSettingsFormState>(EMPTY_PAYROLL_SETTINGS_FORM);
   const [autoLoading, setAutoLoading] = useState(false);
@@ -91,6 +95,9 @@ export function SettingsPage(): JSX.Element {
         setAutoClockOutEnabled(general.autoClockOutEnabled);
         setClockInTimeSnapEnabled(general.clockInTimeSnapEnabled);
         setTimeOffNoticeRequired(general.timeOffNoticeRequired);
+        setPtoEnabled(general.ptoEnabled);
+        setPtoFirstActivatedAt(general.ptoFirstActivatedAt);
+        setPtoLastSuccessfulSyncAt(general.ptoLastSuccessfulSyncAt);
         setGeneralAppliedFranchiseId(franchiseId);
       })
       .catch((err: unknown) => {
@@ -283,6 +290,25 @@ export function SettingsPage(): JSX.Element {
           <div className="flex justify-end">
             <Button onClick={() => void saveAutomaticTimekeeping()} disabled={autoLoading || autoSaving || !generalSettingsScopeApplied}>{autoSaving ? 'Saving...' : 'Save automatic timekeeping'}</Button>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div><CardTitle>Shared PTO</CardTitle>
+              <CardDescription>One auditable balance follows confirmed tutors across participating centers.</CardDescription></div>
+            <Badge variant={ptoEnabled ? 'success' : 'muted'}>
+              {ptoEnabled ? 'Shared PTO is active' : 'Shared PTO is disabled'}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="flex flex-wrap items-center justify-between gap-4">
+          <div className="text-sm text-muted-foreground">
+            <p>First activated: {ptoFirstActivatedAt ? new Date(ptoFirstActivatedAt).toLocaleString() : 'Never'}</p>
+            <p>Last successful sync: {ptoLastSuccessfulSyncAt ? new Date(ptoLastSuccessfulSyncAt).toLocaleString() : 'Never'}</p>
+          </div>
+          <Button asChild disabled={!generalSettingsScopeApplied}><Link to="/admin/pto">Manage PTO</Link></Button>
         </CardContent>
       </Card>
 
