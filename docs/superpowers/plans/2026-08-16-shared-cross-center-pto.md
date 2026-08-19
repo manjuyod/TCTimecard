@@ -1,5 +1,7 @@
 # Shared Cross-Center PTO Implementation Plan
 
+> **Follow-up:** Persistent default-off cross-center account discovery and remembered per-center link controls are specified in `docs/superpowers/specs/2026-08-19-persistent-cross-center-pto-profile-linking-design.md` and planned in `docs/superpowers/plans/2026-08-19-persistent-cross-center-pto-profile-linking.md`. The completed tasks below remain the baseline implementation history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add one auditable PTO balance per verified person across every linked, PTO-enabled center.
