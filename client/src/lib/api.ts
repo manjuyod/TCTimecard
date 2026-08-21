@@ -190,7 +190,14 @@ export interface PtoProgramPolicy {
   carryoverDays: number;
 }
 
-export interface PtoCenterStatus {
+export interface PtoSyncHealth {
+  lastSuccessfulRosterSyncAt: string | null;
+  lastRosterSyncError: string | null;
+  lastSuccessfulDiscoveryAt: string | null;
+  lastDiscoveryError: string | null;
+}
+
+export interface PtoCenterStatus extends PtoSyncHealth {
   franchiseId: number;
   enabled: boolean;
   firstActivatedAt: string | null;
@@ -203,17 +210,34 @@ export interface PtoActivationPreview {
   newMembershipCount: number;
   newProfileCount: number;
   pendingExactNameCandidateCount: number;
+  discoveredAccountCount: number;
+  linkedAccountCount: number;
+  excludedAccountCount: number;
+  pendingReviewCount: number;
+  lastSuccessfulSyncAt: string | null;
+  lastSyncError: string | null;
+  lastSuccessfulRosterSyncAt: string | null;
+  lastRosterSyncError: string | null;
+  lastSuccessfulDiscoveryAt: string | null;
+  lastDiscoveryError: string | null;
+  candidateGroups: Array<{ profileId: string; profileName: string; account: PtoDiscoveredAccount }>;
   warnings: string[];
   policy: PtoProgramPolicy;
 }
 
-export interface PtoRosterSyncSummary {
+export interface PtoRosterSyncSummary extends PtoSyncHealth {
   activeTutorCount: number;
   activatedMembershipCount: number;
   deactivatedMembershipCount: number;
   createdProfileCount: number;
   pendingCandidateCount: number;
+  discoveredAccountCount: number;
+  linkedAccountCount: number;
+  excludedAccountCount: number;
+  pendingReviewCount: number;
   lastSuccessfulSyncAt: string;
+  lastSyncError: string | null;
+  warnings: string[];
 }
 
 export interface PtoProfileBalance {
@@ -234,9 +258,79 @@ export interface PtoProfileSummary {
 
 export type PtoRawRecord = Record<string, unknown>;
 
+export type PtoAccountLinkStatus = 'pending' | 'linked' | 'excluded';
+
+export interface PtoDiscoveredAccount {
+  id: string;
+  provider: string;
+  crmId: string;
+  franchiseId: number;
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  displayEmail: string | null;
+  crmActive: boolean;
+  centerEnabled: boolean;
+  membershipId: string | null;
+  status: PtoAccountLinkStatus;
+  version: number;
+  lastSeenAt: string;
+  warnings: string[];
+}
+
+export interface PtoMembership {
+  id: string;
+  profileId: string;
+  franchiseId: number;
+  tutorId: number | null;
+  active: boolean;
+  crmSnapshot: Record<string, unknown>;
+  firstSeenAt: string;
+  updatedAt: string;
+}
+
+export interface PtoProfileEmail extends PtoEmail {
+  profileId: string;
+  franchiseId: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PtoAccountLinkPreview {
+  mode: 'link' | 'unlink';
+  profileId: string;
+  account: PtoDiscoveredAccount;
+  version: number;
+  beforeBalances: Array<{ profileId: string; availableDays: number }>;
+  afterBalances: Array<{ profileId: string; availableDays: number }>;
+  affectedRequestIds: string[];
+  ambiguousAdjustmentIds: string[];
+  warnings: string[];
+}
+
+export interface PtoAccountMutationArgs {
+  franchiseId: number;
+  profileId: string;
+  accountId: string;
+  expectedVersion: number;
+  idempotencyKey: string;
+}
+
+export interface PtoAccountMutationResult {
+  canonicalProfileId: string;
+  detachedProfileId: string | null;
+  decisionVersion: number;
+}
+
+export interface PtoAccountMutationResponse {
+  result: PtoAccountMutationResult;
+  profile: PtoAdminProfileDetail;
+}
+
 export interface PtoAdminProfileDetail extends PtoProfileSummary {
-  memberships: PtoRawRecord[];
-  emails: PtoRawRecord[];
+  memberships: PtoMembership[];
+  emails: PtoProfileEmail[];
+  accounts: PtoDiscoveredAccount[];
   candidates: PtoRawRecord[];
   ledger: PtoRawRecord[];
   requests: PtoRawRecord[];
@@ -882,6 +976,61 @@ export const fetchAdminPtoProfile = async (
   return result.profile;
 };
 
+const accountPreviewBody = (args: Omit<PtoAccountMutationArgs, 'idempotencyKey'>) => ({
+  franchiseId: args.franchiseId,
+  expectedVersion: args.expectedVersion
+});
+
+const accountMutationBody = (args: PtoAccountMutationArgs) => ({
+  ...accountPreviewBody(args),
+  idempotencyKey: args.idempotencyKey
+});
+
+export const previewPtoAccountLink = async (
+  args: Omit<PtoAccountMutationArgs, 'idempotencyKey'>
+): Promise<PtoAccountLinkPreview> => {
+  const result = await apiFetch<{ preview: PtoAccountLinkPreview }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/accounts/${encodeURIComponent(args.accountId)}/link-preview`,
+    { method: 'POST', body: JSON.stringify(accountPreviewBody(args)) }
+  );
+  return result.preview;
+};
+
+export const linkPtoAccount = (args: PtoAccountMutationArgs): Promise<PtoAccountMutationResponse> => apiFetch(
+  `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/accounts/${encodeURIComponent(args.accountId)}/link`,
+  { method: 'PUT', body: JSON.stringify(accountMutationBody(args)) }
+);
+
+export const previewPtoAccountUnlink = async (
+  args: Omit<PtoAccountMutationArgs, 'idempotencyKey'>
+): Promise<PtoAccountLinkPreview> => {
+  const result = await apiFetch<{ preview: PtoAccountLinkPreview }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/accounts/${encodeURIComponent(args.accountId)}/unlink-preview`,
+    { method: 'POST', body: JSON.stringify(accountPreviewBody(args)) }
+  );
+  return result.preview;
+};
+
+export const unlinkPtoAccount = (args: PtoAccountMutationArgs): Promise<PtoAccountMutationResponse> => apiFetch(
+  `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/accounts/${encodeURIComponent(args.accountId)}/link`,
+  { method: 'DELETE', body: JSON.stringify(accountMutationBody(args)) }
+);
+
+export const assignPtoAdjustmentProvenance = async (args: {
+  franchiseId: number;
+  profileId: string;
+  ledgerEntryId: string;
+  membershipId: string;
+  idempotencyKey: string;
+}): Promise<{ ledgerEntryId: string; membershipId: string }> => {
+  const result = await apiFetch<{ result: { ledgerEntryId: string; membershipId: string } }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/adjustments/${encodeURIComponent(args.ledgerEntryId)}/provenance`,
+    { method: 'PUT', body: JSON.stringify({ franchiseId: args.franchiseId,
+      membershipId: args.membershipId, idempotencyKey: args.idempotencyKey }) }
+  );
+  return result.result;
+};
+
 export const decidePtoAlias = async (args: {
   franchiseId: number;
   candidateId: string;
@@ -930,13 +1079,15 @@ export const removeAdminPtoEmail = async (args: {
 export const adjustAdminPtoBalance = async (args: {
   franchiseId: number;
   profileId: string;
+  membershipId: string;
   cycleStart: string;
   deltaDays: number;
   reason: string;
 }) => ptoAdminMutation<{ ledgerEntryId: string; availableDays: number }>(
   `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/adjustments`,
   args.franchiseId,
-  { cycleStart: args.cycleStart, deltaDays: args.deltaDays, reason: args.reason }
+  { membershipId: args.membershipId, cycleStart: args.cycleStart,
+    deltaDays: args.deltaDays, reason: args.reason }
 );
 
 export const fetchAdminPtoAudit = async (args: {

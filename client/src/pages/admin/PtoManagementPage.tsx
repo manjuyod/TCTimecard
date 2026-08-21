@@ -3,9 +3,8 @@ import {
   activatePtoCenter,
   addAdminPtoEmail,
   adjustAdminPtoBalance,
-  decidePtoAlias,
+  assignPtoAdjustmentProvenance,
   deactivatePtoCenter,
-  detachPtoMembership,
   fetchAdminPtoAudit,
   fetchAdminPtoProfile,
   fetchAdminPtoProfiles,
@@ -13,14 +12,21 @@ import {
   fetchPtoActivationPreview,
   FranchiseSettings,
   PtoActivationPreview,
+  PtoAccountLinkPreview,
   PtoAdminProfileDetail,
   PtoAuditEvent,
   PtoPagedResult,
+  PtoProfileEmail,
   PtoProfileSummary,
   PtoRawRecord,
+  linkPtoAccount,
+  previewPtoAccountLink,
+  previewPtoAccountUnlink,
   removeAdminPtoEmail,
-  syncPtoCenter
+  syncPtoCenter,
+  unlinkPtoAccount
 } from '../../lib/api';
+import { ApiError } from '../../lib/errors';
 import { getSessionFranchiseId, isSelectorAllowed } from '../../lib/franchise';
 import { useAuth } from '../../providers/AuthProvider';
 import { Badge } from '../../components/ui/badge';
@@ -36,6 +42,8 @@ import { Skeleton } from '../../components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
 import { toast } from '../../components/ui/toast';
+import { PtoAccountLinksPanel, PtoAccountLinkIntent } from './pto/PtoAccountLinksPanel';
+import { PtoLinkPreviewDialog } from './pto/PtoLinkPreviewDialog';
 
 export function PtoManagementPage(): JSX.Element {
   const { session } = useAuth();
@@ -64,10 +72,16 @@ export function PtoManagementPage(): JSX.Element {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [newEmail, setNewEmail] = useState('');
   const [emailMembershipId, setEmailMembershipId] = useState('');
+  const [adjustmentMembershipId, setAdjustmentMembershipId] = useState('');
   const [cycleStart, setCycleStart] = useState('');
   const [adjustmentDays, setAdjustmentDays] = useState('');
   const [adjustmentReason, setAdjustmentReason] = useState('');
-  const [detachTarget, setDetachTarget] = useState<PtoRawRecord | null>(null);
+  const [accountPreview, setAccountPreview] = useState<PtoAccountLinkPreview | null>(null);
+  const [accountContextProfile, setAccountContextProfile] = useState<PtoAdminProfileDetail | null>(null);
+  const [accountPreviewSource, setAccountPreviewSource] = useState<'profile' | 'activation'>('profile');
+  const [accountPreviewing, setAccountPreviewing] = useState(false);
+  const [accountConfirming, setAccountConfirming] = useState(false);
+  const [provenanceSaving, setProvenanceSaving] = useState(false);
   const [deactivateOpen, setDeactivateOpen] = useState(false);
   const [deactivating, setDeactivating] = useState(false);
 
@@ -179,7 +193,8 @@ export function PtoManagementPage(): JSX.Element {
     try {
       const detail = await fetchAdminPtoProfile(appliedFranchiseId, profileId);
       setSelectedProfile(detail);
-      setEmailMembershipId(detail.memberships[0] ? recordId(detail.memberships[0]) : '');
+      setEmailMembershipId(detail.memberships[0]?.id ?? '');
+      setAdjustmentMembershipId(detail.memberships[0]?.id ?? '');
       setProfileError(null);
       setProfileOpen(true);
     } catch (cause) {
@@ -195,7 +210,8 @@ export function PtoManagementPage(): JSX.Element {
     if (appliedFranchiseId === null) return;
     const detail = await fetchAdminPtoProfile(appliedFranchiseId, profileId);
     setSelectedProfile(detail);
-    setEmailMembershipId((current) => current || (detail.memberships[0] ? recordId(detail.memberships[0]) : ''));
+    setEmailMembershipId((current) => current || detail.memberships[0]?.id || '');
+    setAdjustmentMembershipId((current) => current || detail.memberships[0]?.id || '');
   };
 
   const runProfileAction = async (key: string, action: () => Promise<unknown>, success: string) => {
@@ -233,14 +249,6 @@ export function PtoManagementPage(): JSX.Element {
     }
   };
 
-  const confirmAlias = (candidate: PtoRawRecord, decision: 'confirm' | 'reject') => {
-    if (appliedFranchiseId === null) return;
-    const candidateId = recordId(candidate);
-    void runProfileAction(`candidate-${candidateId}`, () => decidePtoAlias({
-      franchiseId: appliedFranchiseId, candidateId, decision
-    }), decision === 'confirm' ? 'Identity match confirmed' : 'Identity match rejected');
-  };
-
   const addEmail = () => {
     if (!selectedProfile || appliedFranchiseId === null) return;
     void runProfileAction('add-email', () => addAdminPtoEmail({
@@ -251,9 +259,9 @@ export function PtoManagementPage(): JSX.Element {
     }), 'Alternate email added').then(() => setNewEmail(''));
   };
 
-  const removeEmail = (record: PtoRawRecord) => {
+  const removeEmail = (record: PtoProfileEmail) => {
     if (!selectedProfile || appliedFranchiseId === null) return;
-    const emailId = recordId(record);
+    const emailId = record.id;
     void runProfileAction(`email-${emailId}`, () => removeAdminPtoEmail({
       franchiseId: appliedFranchiseId, profileId: selectedProfile.id, emailId
     }), 'Alternate email removed');
@@ -264,6 +272,7 @@ export function PtoManagementPage(): JSX.Element {
     void runProfileAction('adjustment', () => adjustAdminPtoBalance({
       franchiseId: appliedFranchiseId,
       profileId: selectedProfile.id,
+      membershipId: adjustmentMembershipId,
       cycleStart,
       deltaDays: Number(adjustmentDays),
       reason: adjustmentReason.trim()
@@ -273,12 +282,120 @@ export function PtoManagementPage(): JSX.Element {
     });
   };
 
-  const confirmDetach = () => {
-    if (!selectedProfile || !detachTarget || appliedFranchiseId === null) return;
-    const membershipId = recordId(detachTarget);
-    void runProfileAction(`membership-${membershipId}`, () => detachPtoMembership({
-      franchiseId: appliedFranchiseId, profileId: selectedProfile.id, membershipId
-    }), 'Center membership detached').then(() => setDetachTarget(null));
+  const openAccountLinkPreview = async (
+    profileId: string,
+    intent: PtoAccountLinkIntent,
+    source: 'profile' | 'activation'
+  ) => {
+    if (appliedFranchiseId === null) return;
+    setAccountPreviewing(true);
+    setProfileError(null);
+    try {
+      const args = {
+        franchiseId: appliedFranchiseId,
+        profileId,
+        accountId: intent.account.id,
+        expectedVersion: intent.account.version
+      };
+      const previewRequest = intent.mode === 'link' ? previewPtoAccountLink(args) : previewPtoAccountUnlink(args);
+      const profileRequest = selectedProfile?.id === profileId
+        ? Promise.resolve(selectedProfile)
+        : fetchAdminPtoProfile(appliedFranchiseId, profileId);
+      const [nextPreview, contextProfile] = await Promise.all([previewRequest, profileRequest]);
+      setAccountPreview(nextPreview);
+      setAccountContextProfile(contextProfile);
+      setAccountPreviewSource(source);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Unable to preview PTO account change';
+      if (source === 'profile') setProfileError(message);
+      else setError(message);
+      toast.error(message);
+    } finally {
+      setAccountPreviewing(false);
+    }
+  };
+
+  const refreshStaleAccountContext = async (previewValue: PtoAccountLinkPreview) => {
+    if (appliedFranchiseId === null) return;
+    if (accountPreviewSource === 'profile') {
+      const detail = await fetchAdminPtoProfile(appliedFranchiseId, previewValue.profileId);
+      setSelectedProfile(detail);
+      setAccountContextProfile(detail);
+      setEmailMembershipId(detail.memberships[0]?.id ?? '');
+      setAdjustmentMembershipId(detail.memberships[0]?.id ?? '');
+      setProfileError('This account link changed. The profile was refreshed; review it and try again.');
+    } else {
+      setPreview(await fetchPtoActivationPreview(appliedFranchiseId));
+      setError('This account link changed. The activation preview was refreshed; review it and try again.');
+    }
+  };
+
+  const confirmAccountLink = async () => {
+    if (!accountPreview || appliedFranchiseId === null) return;
+    const currentPreview = accountPreview;
+    setAccountConfirming(true);
+    try {
+      const args = {
+        franchiseId: appliedFranchiseId,
+        profileId: currentPreview.profileId,
+        accountId: currentPreview.account.id,
+        expectedVersion: currentPreview.version,
+        idempotencyKey: crypto.randomUUID()
+      };
+      const response = currentPreview.mode === 'link' ? await linkPtoAccount(args) : await unlinkPtoAccount(args);
+      setAccountContextProfile(response.profile);
+      if (accountPreviewSource === 'profile') {
+        setSelectedProfile(response.profile);
+        setEmailMembershipId(response.profile.memberships[0]?.id ?? '');
+        setAdjustmentMembershipId(response.profile.memberships[0]?.id ?? '');
+      } else {
+        setPreview(await fetchPtoActivationPreview(appliedFranchiseId));
+      }
+      setAccountPreview(null);
+      toast.success(currentPreview.mode === 'link' ? 'PTO account linked' : 'PTO account unlinked');
+    } catch (cause) {
+      if (apiErrorCode(cause) === 'PTO_LINK_STALE') {
+        setAccountPreview(null);
+        await refreshStaleAccountContext(currentPreview);
+        toast.error('The account link changed and the page was refreshed.');
+      } else {
+        const message = cause instanceof Error ? cause.message : 'Unable to update PTO account link';
+        if (accountPreviewSource === 'profile') setProfileError(message);
+        else setError(message);
+        toast.error(message);
+      }
+    } finally {
+      setAccountConfirming(false);
+    }
+  };
+
+  const assignAdjustmentProvenance = async (ledgerEntryId: string, membershipId: string) => {
+    if (!accountPreview || appliedFranchiseId === null) return;
+    setProvenanceSaving(true);
+    try {
+      await assignPtoAdjustmentProvenance({
+        franchiseId: appliedFranchiseId,
+        profileId: accountPreview.profileId,
+        ledgerEntryId,
+        membershipId,
+        idempotencyKey: crypto.randomUUID()
+      });
+      const args = {
+        franchiseId: appliedFranchiseId,
+        profileId: accountPreview.profileId,
+        accountId: accountPreview.account.id,
+        expectedVersion: accountPreview.version
+      };
+      setAccountPreview(accountPreview.mode === 'link'
+        ? await previewPtoAccountLink(args)
+        : await previewPtoAccountUnlink(args));
+      toast.success('Adjustment provenance assigned');
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Unable to assign adjustment provenance';
+      toast.error(message);
+    } finally {
+      setProvenanceSaving(false);
+    }
   };
 
   const deactivate = async () => {
@@ -497,23 +614,29 @@ export function PtoManagementPage(): JSX.Element {
               </div>
               <InlineError message={profileError} />
 
-              <DetailSection title="Center memberships">
+              <DetailSection title="Accounts and centers">
+                <PtoAccountLinksPanel
+                  accounts={selectedProfile.accounts}
+                  disabled={profileAction !== null || accountPreviewing}
+                  onIntent={(intent) => void openAccountLinkPreview(selectedProfile.id, intent, 'profile')}
+                />
+              </DetailSection>
+
+              <DetailSection title="Active center memberships">
                 {selectedProfile.memberships.map((record) => (
-                  <div key={recordId(record)} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
-                    <p className="font-semibold">Tutor {recordText(record, 'tutor_id')} · Center {recordText(record, 'franchiseid')}</p>
-                    <Button variant="outline" size="sm" aria-label={`Detach membership ${recordId(record)}`}
-                      onClick={() => setDetachTarget(record)} disabled={profileAction !== null}>Detach</Button>
+                  <div key={record.id} className="rounded-lg border p-3 text-sm">
+                    <p className="font-semibold">Tutor {record.tutorId ?? '—'} · Center {record.franchiseId}</p>
                   </div>
                 ))}
               </DetailSection>
 
               <DetailSection title="Email addresses">
                 {selectedProfile.emails.map((record) => (
-                  <div key={recordId(record)} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
-                    <div><p className="font-semibold">{recordText(record, 'email')}</p>
-                      <p className="text-xs text-muted-foreground">{humanize(recordText(record, 'source'))} · Center {recordText(record, 'franchiseid')}</p></div>
-                    {recordText(record, 'source') === 'manual' ? (
-                      <Button variant="outline" size="sm" aria-label={`Remove ${recordText(record, 'email')}`}
+                  <div key={record.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
+                    <div><p className="font-semibold">{record.email}</p>
+                      <p className="text-xs text-muted-foreground">{humanize(record.source)} · Center {record.franchiseId}</p></div>
+                    {record.source === 'manual' ? (
+                      <Button variant="outline" size="sm" aria-label={`Remove ${record.email}`}
                         onClick={() => removeEmail(record)} disabled={profileAction !== null}>Remove</Button>
                     ) : null}
                   </div>
@@ -524,7 +647,7 @@ export function PtoManagementPage(): JSX.Element {
                   <div className="space-y-2"><Label htmlFor="adminPtoEmailMembership">Source membership</Label>
                     <select id="adminPtoEmailMembership" className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
                       value={emailMembershipId} onChange={(event) => setEmailMembershipId(event.target.value)}>
-                      {selectedProfile.memberships.map((record) => <option key={recordId(record)} value={recordId(record)}>Center {recordText(record, 'franchiseid')}</option>)}
+                      {selectedProfile.memberships.map((record) => <option key={record.id} value={record.id}>Center {record.franchiseId}</option>)}
                     </select></div>
                   <Button onClick={addEmail} disabled={profileAction !== null || !newEmail.trim() || !emailMembershipId}>Add alternate email</Button>
                 </div>
@@ -532,21 +655,20 @@ export function PtoManagementPage(): JSX.Element {
 
               <DetailSection title="Identity matches">
                 {selectedProfile.candidates.map((record) => (
-                  <div key={recordId(record)} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
+                  <div key={recordId(record)} className="rounded-lg border p-3 text-sm">
                     <div><p className="font-semibold">Profile {recordText(record, 'left_profile_id')} ↔ Profile {recordText(record, 'right_profile_id')}</p>
                       <p className="text-xs text-muted-foreground">{humanize(recordText(record, 'status'))}</p></div>
-                    {recordText(record, 'status') === 'pending' ? <div className="flex gap-2">
-                      <Button size="sm" aria-label={`Confirm match ${recordId(record)}`} onClick={() => confirmAlias(record, 'confirm')}
-                        disabled={profileAction !== null}>Confirm</Button>
-                      <Button size="sm" variant="outline" aria-label={`Reject match ${recordId(record)}`} onClick={() => confirmAlias(record, 'reject')}
-                        disabled={profileAction !== null}>Reject</Button>
-                    </div> : null}
                   </div>
                 ))}
               </DetailSection>
 
               <DetailSection title="Balance adjustment">
-                <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-3">
+                <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-4">
+                  <div className="space-y-2"><Label htmlFor="ptoAdjustmentMembership">Source membership</Label>
+                    <select id="ptoAdjustmentMembership" className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      value={adjustmentMembershipId} onChange={(event) => setAdjustmentMembershipId(event.target.value)}>
+                      {selectedProfile.memberships.map((record) => <option key={record.id} value={record.id}>Center {record.franchiseId}</option>)}
+                    </select></div>
                   <div className="space-y-2"><Label htmlFor="ptoCycleStart">Cycle start</Label>
                     <Input id="ptoCycleStart" type="date" value={cycleStart} onChange={(event) => setCycleStart(event.target.value)} /></div>
                   <div className="space-y-2"><Label htmlFor="ptoAdjustmentDays">Adjustment days</Label>
@@ -555,7 +677,8 @@ export function PtoManagementPage(): JSX.Element {
                   <div className="space-y-2"><Label htmlFor="ptoAdjustmentReason">Adjustment reason</Label>
                     <Input id="ptoAdjustmentReason" value={adjustmentReason} onChange={(event) => setAdjustmentReason(event.target.value)} /></div>
                 </div>
-                <Button onClick={applyAdjustment} disabled={profileAction !== null || !validAdjustment(cycleStart, adjustmentDays, adjustmentReason)}>
+                <Button onClick={applyAdjustment} disabled={profileAction !== null || !adjustmentMembershipId
+                  || !validAdjustment(cycleStart, adjustmentDays, adjustmentReason)}>
                   Apply balance adjustment
                 </Button>
               </DetailSection>
@@ -577,17 +700,6 @@ export function PtoManagementPage(): JSX.Element {
               </DetailSection>
             </>
           ) : <Skeleton className="h-64 w-full" />}
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={detachTarget !== null} onOpenChange={(open) => { if (!open && profileAction === null) setDetachTarget(null); }}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Detach center membership?</DialogTitle>
-            <DialogDescription>This splits the selected center membership and its request allocations into a separate PTO profile.</DialogDescription></DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDetachTarget(null)} disabled={profileAction !== null}>Cancel</Button>
-            <Button onClick={confirmDetach} disabled={profileAction !== null}>Confirm detachment</Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -625,6 +737,16 @@ export function PtoManagementPage(): JSX.Element {
               {preview.warnings.map((warning) => (
                 <p key={warning} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{warning}</p>
               ))}
+              {activationCandidateGroups(preview).map((group) => (
+                <section key={group.profileId} className="space-y-2 rounded-lg border p-3">
+                  <p className="text-sm font-semibold">Proposed profile: {group.profileName}</p>
+                  <PtoAccountLinksPanel
+                    accounts={group.accounts}
+                    disabled={accountPreviewing}
+                    onIntent={(intent) => void openAccountLinkPreview(group.profileId, intent, 'activation')}
+                  />
+                </section>
+              ))}
             </div>
           ) : null}
           <DialogFooter>
@@ -635,6 +757,26 @@ export function PtoManagementPage(): JSX.Element {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {accountPreview ? (
+        <PtoLinkPreviewDialog
+          key={`${accountPreview.mode}-${accountPreview.account.id}-${accountPreview.version}-${accountPreview.ambiguousAdjustmentIds.join('-')}`}
+          open
+          preview={accountPreview}
+          actorFranchiseId={appliedFranchiseId ?? 0}
+          confirming={accountConfirming}
+          memberships={accountContextProfile?.memberships ?? []}
+          reconciling={provenanceSaving}
+          onAssignProvenance={(ledgerEntryId, membershipId) => void assignAdjustmentProvenance(ledgerEntryId, membershipId)}
+          onConfirm={() => void confirmAccountLink()}
+          onOpenChange={(open) => {
+            if (!open) {
+              setAccountPreview(null);
+              setAccountContextProfile(null);
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -671,4 +813,28 @@ const validAdjustment = (cycle: string, delta: string, reason: string): boolean 
   const value = Number(delta);
   return /^\d{4}-\d{2}-\d{2}$/.test(cycle) && Number.isFinite(value) && value !== 0
     && Math.abs(value * 2 - Math.round(value * 2)) < Number.EPSILON && reason.trim().length > 0;
+};
+
+const apiErrorCode = (cause: unknown): string | null => {
+  if (!(cause instanceof ApiError) || !cause.data || typeof cause.data !== 'object') return null;
+  const code = (cause.data as Record<string, unknown>).code;
+  return typeof code === 'string' ? code : null;
+};
+
+const activationCandidateGroups = (preview: PtoActivationPreview): Array<{
+  profileId: string;
+  profileName: string;
+  accounts: PtoActivationPreview['candidateGroups'][number]['account'][];
+}> => {
+  const grouped = new Map<string, {
+    profileId: string;
+    profileName: string;
+    accounts: PtoActivationPreview['candidateGroups'][number]['account'][];
+  }>();
+  for (const row of preview.candidateGroups ?? []) {
+    const group = grouped.get(row.profileId) ?? { profileId: row.profileId, profileName: row.profileName, accounts: [] };
+    group.accounts.push(row.account);
+    grouped.set(row.profileId, group);
+  }
+  return [...grouped.values()];
 };

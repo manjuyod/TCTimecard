@@ -35,6 +35,7 @@ describe('PTO management activation', () => {
         return json({ preview: {
           activeCrmTutorCount: 12, newMembershipCount: 12, newProfileCount: 10,
           pendingExactNameCandidateCount: 2, warnings: ['Two exact-name matches require review'],
+          candidateGroups: [{ profileId: '10', profileName: 'Ada Lovelace', account: discoveredAccount('pending', 1) }],
           policy: { id: '1', effectiveFrom: '2026-01-01', entitlementDays: 5,
             renewalMonth: 1, renewalDay: 1, carryoverDays: 0 }
         } });
@@ -60,6 +61,7 @@ describe('PTO management activation', () => {
     expect(screen.getByText('12 active tutors')).toBeInTheDocument();
     expect(screen.getByText('2 identity matches')).toBeInTheDocument();
     expect(screen.getByText(/Two exact-name matches require review/i)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Pending review account Center 2 tutor 202' })).not.toBeChecked();
 
     fireEvent.click(screen.getByRole('button', { name: /activate and sync/i }));
 
@@ -117,11 +119,12 @@ describe('PTO management activation', () => {
       if (path.startsWith('/api/pto/admin/audit?')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
       if (path === '/api/pto/admin/profiles/10?franchiseId=1') return json({ profile: {
         ...profileSummary('10', 'Ada', 'Lovelace', 3),
-        memberships: [{ id: '20', franchiseid: 1, tutor_id: 123, active: true }],
+        memberships: [membership()],
         emails: [
-          { id: '30', franchiseid: 1, email: 'ada@example.com', active: true, source: 'crm', source_membership_id: '20' },
-          { id: '31', franchiseid: 1, email: 'ada+pto@example.com', active: true, source: 'manual', source_membership_id: '20' }
+          profileEmail('30', 'ada@example.com', 'crm'),
+          profileEmail('31', 'ada+pto@example.com', 'manual')
         ],
+        accounts: [],
         candidates: [{ id: '40', left_profile_id: '10', right_profile_id: '11', status: 'pending', created_at: '2026-08-20T12:00:00Z' }],
         ledger: [{ id: '50', event_type: 'grant', balance_delta: '5', created_at: '2026-01-01T00:00:00Z' }],
         requests: [{ id: '60', start_at: '2026-09-01T07:00:00Z', end_at: '2026-09-02T07:00:00Z', charged_days: '1', state: 'reserved' }],
@@ -142,6 +145,51 @@ describe('PTO management activation', () => {
     expect(screen.getByText('Request 60 · 1 day · Reserved')).toBeInTheDocument();
   });
 
+  it('previews an account link before confirmation and replaces the profile from the mutation response', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    globalThis.fetch = async (input, init) => {
+      const path = String(input);
+      calls.push({ path, init });
+      if (path.startsWith('/api/admin/settings')) return enabledSettings();
+      if (path.startsWith('/api/pto/admin/profiles?')) return json({
+        items: [profileSummary('10', 'Ada', 'Lovelace', 3)], page: 1, pageSize: 25, total: 1
+      });
+      if (path.startsWith('/api/pto/admin/audit?')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
+      if (path === '/api/pto/admin/profiles/10?franchiseId=1') return json({ profile: accountProfile('pending', 3) });
+      if (path === '/api/pto/admin/profiles/10/accounts/99/link-preview') return json({ preview: {
+        mode: 'link', profileId: '10', account: accountProfile('pending', 3).accounts[0], version: 1,
+        beforeBalances: [{ profileId: '10', availableDays: 3 }],
+        afterBalances: [{ profileId: '10', availableDays: 2 }], affectedRequestIds: ['60'],
+        ambiguousAdjustmentIds: [], warnings: []
+      } });
+      if (path === '/api/pto/admin/profiles/10/accounts/99/link') return json({
+        result: { canonicalProfileId: '10', detachedProfileId: null, decisionVersion: 2 },
+        profile: accountProfile('linked', 2)
+      });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+
+    render(<MemoryRouter><PtoManagementPage /></MemoryRouter>);
+    await screen.findByText('Ada Lovelace');
+    fireEvent.click(screen.getByRole('button', { name: 'View Ada Lovelace' }));
+    const toggle = await screen.findByRole('switch', { name: 'Pending review account Center 2 tutor 202' });
+    fireEvent.click(toggle);
+
+    expect(await screen.findByRole('heading', { name: 'Link PTO account?' })).toBeInTheDocument();
+    expect(calls.some((call) => call.path.endsWith('/accounts/99/link') && call.init?.method === 'PUT')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm link' }));
+
+    await waitFor(() => expect(calls.some((call) => call.path.endsWith('/accounts/99/link')
+      && call.init?.method === 'PUT')).toBe(true));
+    const mutation = calls.find((call) => call.path.endsWith('/accounts/99/link') && call.init?.method === 'PUT');
+    const body = JSON.parse(String(mutation?.init?.body));
+    expect(body.franchiseId).toBe(1);
+    expect(body.expectedVersion).toBe(1);
+    expect(body.idempotencyKey).toMatch(/^[0-9a-f-]{20,}$/i);
+    expect(await screen.findByRole('switch', { name: 'Linked account Center 2 tutor 202' })).toBeChecked();
+    expect(screen.getByText('2 days')).toBeInTheDocument();
+  });
+
   it('keeps the center active and surfaces a roster sync failure', async () => {
     globalThis.fetch = async (input) => {
       const path = String(input);
@@ -160,7 +208,7 @@ describe('PTO management activation', () => {
     expect(screen.getByText('PTO is active')).toBeInTheDocument();
   });
 
-  it('executes reviewed profile actions against the applied center scope', async () => {
+  it('executes balance and email actions against the applied center scope', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     globalThis.fetch = async (input, init) => {
       const path = String(input);
@@ -171,7 +219,6 @@ describe('PTO management activation', () => {
       });
       if (path.startsWith('/api/pto/admin/audit?')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
       if (path === '/api/pto/admin/profiles/10?franchiseId=1') return json({ profile: actionProfile() });
-      if (path === '/api/pto/admin/aliases/40/decide') return json({ profileId: '10', decision: 'confirm' });
       if (path === '/api/pto/admin/profiles/10/adjustments') return json({ ledgerEntryId: '80', availableDays: 2.5 });
       if (path === '/api/pto/admin/profiles/10/emails') return json({
         email: { id: '32', email: 'ada+new@example.com', source: 'manual', active: true, sourceMembershipId: '20' }
@@ -179,7 +226,6 @@ describe('PTO management activation', () => {
       if (path === '/api/pto/admin/profiles/10/emails/31?franchiseId=1') return json({
         email: { id: '31', email: 'ada+pto@example.com', source: 'manual', active: false, sourceMembershipId: '20' }
       });
-      if (path === '/api/pto/admin/profiles/10/memberships/20/detach') return json({ sourceProfileId: '10', detachedProfileId: '12' });
       throw new Error(`Unexpected request: ${path}`);
     };
 
@@ -188,11 +234,7 @@ describe('PTO management activation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View Ada Lovelace' }));
     await screen.findByRole('heading', { name: 'Ada Lovelace' });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm match 40' }));
-    await waitFor(() => expect(calls.some((call) => call.path === '/api/pto/admin/aliases/40/decide')).toBe(true));
-    expect(JSON.parse(String(calls.find((call) => call.path.endsWith('/aliases/40/decide'))?.init?.body))).toEqual({
-      decision: 'confirm', franchiseId: 1
-    });
+    expect(screen.queryByRole('button', { name: 'Confirm match 40' })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('Cycle start'), { target: { value: '2026-01-01' } });
     fireEvent.change(screen.getByLabelText('Adjustment days'), { target: { value: '-0.5' } });
@@ -200,7 +242,8 @@ describe('PTO management activation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply balance adjustment' }));
     await waitFor(() => expect(calls.some((call) => call.path.endsWith('/adjustments'))).toBe(true));
     expect(JSON.parse(String(calls.find((call) => call.path.endsWith('/adjustments'))?.init?.body))).toEqual({
-      cycleStart: '2026-01-01', deltaDays: -0.5, reason: 'Correct imported balance', franchiseId: 1
+      membershipId: '20', cycleStart: '2026-01-01', deltaDays: -0.5,
+      reason: 'Correct imported balance', franchiseId: 1
     });
 
     fireEvent.change(screen.getByLabelText('Alternate email'), { target: { value: 'ada+new@example.com' } });
@@ -210,9 +253,42 @@ describe('PTO management activation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove ada+pto@example.com' }));
     await waitFor(() => expect(calls.some((call) => call.path.endsWith('/emails/31?franchiseId=1'))).toBe(true));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Detach membership 20' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Confirm detachment' }));
-    await waitFor(() => expect(calls.some((call) => call.path.endsWith('/memberships/20/detach'))).toBe(true));
+  });
+
+  it('refreshes the authoritative profile when account confirmation is stale', async () => {
+    let profileLoads = 0;
+    globalThis.fetch = async (input, init) => {
+      const path = String(input);
+      if (path.startsWith('/api/admin/settings')) return enabledSettings();
+      if (path.startsWith('/api/pto/admin/profiles?')) return json({
+        items: [profileSummary('10', 'Ada', 'Lovelace', 3)], page: 1, pageSize: 25, total: 1
+      });
+      if (path.startsWith('/api/pto/admin/audit?')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
+      if (path === '/api/pto/admin/profiles/10?franchiseId=1') {
+        profileLoads += 1;
+        return json({ profile: accountProfile(profileLoads === 1 ? 'pending' : 'excluded', 3) });
+      }
+      if (path === '/api/pto/admin/profiles/10/accounts/99/link-preview') return json({ preview: {
+        mode: 'link', profileId: '10', account: accountProfile('pending', 3).accounts[0], version: 1,
+        beforeBalances: [{ profileId: '10', availableDays: 3 }],
+        afterBalances: [{ profileId: '10', availableDays: 3 }], affectedRequestIds: [],
+        ambiguousAdjustmentIds: [], warnings: []
+      } });
+      if (path === '/api/pto/admin/profiles/10/accounts/99/link' && init?.method === 'PUT') {
+        return json({ error: 'This PTO account link changed; refresh and try again', code: 'PTO_LINK_STALE' }, 409);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    };
+
+    render(<MemoryRouter><PtoManagementPage /></MemoryRouter>);
+    await screen.findByText('Ada Lovelace');
+    fireEvent.click(screen.getByRole('button', { name: 'View Ada Lovelace' }));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Pending review account Center 2 tutor 202' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm link' }));
+
+    expect(await screen.findByText(/profile was refreshed; review it and try again/i)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Excluded account Center 2 tutor 202' })).not.toBeChecked();
+    expect(profileLoads).toBe(2);
   });
 
   it('requires confirmation before disabling PTO for the applied center', async () => {
@@ -277,11 +353,37 @@ const enabledSettings = () => json({ settings: {
 
 const actionProfile = () => ({
   ...profileSummary('10', 'Ada', 'Lovelace', 3),
-  memberships: [{ id: '20', franchiseid: 1, tutor_id: 123, active: true }],
+  memberships: [membership()],
   emails: [
-    { id: '30', franchiseid: 1, email: 'ada@example.com', active: true, source: 'crm', source_membership_id: '20' },
-    { id: '31', franchiseid: 1, email: 'ada+pto@example.com', active: true, source: 'manual', source_membership_id: '20' }
+    profileEmail('30', 'ada@example.com', 'crm'),
+    profileEmail('31', 'ada+pto@example.com', 'manual')
   ],
+  accounts: [],
   candidates: [{ id: '40', left_profile_id: '10', right_profile_id: '11', status: 'pending' }],
   ledger: [], requests: [], audit: []
+});
+
+const accountProfile = (status: 'pending' | 'linked' | 'excluded', availableDays: number) => ({
+  ...profileSummary('10', 'Ada', 'Lovelace', availableDays),
+  memberships: [membership()],
+  emails: [],
+  accounts: [discoveredAccount(status, status === 'linked' ? 2 : 1)],
+  candidates: [], ledger: [], requests: [], audit: []
+});
+
+const membership = () => ({
+  id: '20', profileId: '10', franchiseId: 1, tutorId: 123, active: true,
+  crmSnapshot: {}, firstSeenAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z'
+});
+
+const profileEmail = (id: string, email: string, source: 'crm' | 'manual') => ({
+  id, profileId: '10', franchiseId: 1, email, active: true, source,
+  sourceMembershipId: '20', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z'
+});
+
+const discoveredAccount = (status: 'pending' | 'linked' | 'excluded', version: number) => ({
+  id: '99', provider: 'timecard-center:2', crmId: '202', franchiseId: 2, tutorId: 202,
+  firstName: 'Ada', lastName: 'Lovelace', displayEmail: 'a***@example.com', crmActive: true,
+  centerEnabled: status === 'linked', membershipId: status === 'linked' ? '21' : null,
+  status, version, lastSeenAt: '2026-08-20T12:00:00Z', warnings: []
 });
