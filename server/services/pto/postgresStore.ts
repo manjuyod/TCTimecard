@@ -12,7 +12,10 @@ import type {
   PtoAuditEvent,
   PtoBalance,
   PtoCenterStatus,
+  PtoDiscoveredAccount,
   PtoEmail,
+  PtoMembership,
+  PtoProfileEmail,
   PtoProfileSummary,
   PtoProgramPolicy,
   PtoRosterSyncStoreInput,
@@ -48,6 +51,53 @@ const profile = (row: Record<string, unknown>): PtoProfileSummary => ({
   active: Boolean(row.active),
   balance: balance(row)
 });
+
+const membership = (row: Record<string, unknown>): PtoMembership => ({
+  id: String(row.id),
+  profileId: String(row.profile_id),
+  franchiseId: number(row.franchiseid),
+  tutorId: row.tutor_id == null ? null : number(row.tutor_id),
+  active: Boolean(row.active),
+  crmSnapshot: (row.crm_snapshot ?? {}) as Record<string, unknown>,
+  firstSeenAt: iso(row.first_seen_at) ?? '',
+  updatedAt: iso(row.updated_at) ?? ''
+});
+
+const profileEmail = (row: Record<string, unknown>): PtoProfileEmail => ({
+  id: String(row.id),
+  profileId: String(row.profile_id),
+  franchiseId: number(row.franchiseid),
+  email: String(row.email),
+  active: Boolean(row.active),
+  source: row.source === 'manual' ? 'manual' : 'crm',
+  sourceMembershipId: row.source_membership_id == null ? null : String(row.source_membership_id),
+  createdAt: iso(row.created_at) ?? '',
+  updatedAt: iso(row.updated_at) ?? ''
+});
+
+const discoveredAccount = (row: Record<string, unknown>): PtoDiscoveredAccount => {
+  const warnings: string[] = [];
+  if (!row.crm_active) warnings.push('CRM inactive');
+  if (!row.center_enabled) warnings.push('Center PTO disabled');
+  if (row.center_account_conflict) warnings.push('PTO_CENTER_ACCOUNT_CONFLICT');
+  return {
+    id: String(row.id),
+    provider: String(row.provider),
+    crmId: String(row.crm_id),
+    franchiseId: number(row.franchiseid),
+    tutorId: number(row.tutor_id),
+    firstName: String(row.first_name ?? ''),
+    lastName: String(row.last_name ?? ''),
+    displayEmail: row.display_email == null ? null : String(row.display_email),
+    crmActive: Boolean(row.crm_active),
+    centerEnabled: Boolean(row.center_enabled),
+    membershipId: row.membership_id == null ? null : String(row.membership_id),
+    status: row.status === 'linked' ? 'linked' : row.status === 'excluded' ? 'excluded' : 'pending',
+    version: number(row.version),
+    lastSeenAt: iso(row.last_seen_at) ?? '',
+    warnings
+  };
+};
 
 const profileSelect = `
   SELECT profile.id, profile.first_name, profile.last_name, profile.identity_status, profile.active,
@@ -192,6 +242,36 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     const warnings = tutors.some((tutor) => !tutor.firstName.trim() || !tutor.lastName.trim())
       ? ['Some active CRM tutors have incomplete names'] : [];
     if (discovery.error) warnings.push(`Discovery failed: ${discovery.error}`);
+    const candidateGroupRows = await queryRows(db, `
+      SELECT public.pto_canonical_profile_id(decision.profile_id) AS profile_id,
+        profile.first_name || ' ' || profile.last_name AS profile_name,
+        account.id, account.provider, account.crm_id, account.franchiseid, account.tutor_id,
+        COALESCE(account.crm_snapshot ->> 'firstName', account.normalized_first_name) AS first_name,
+        COALESCE(account.crm_snapshot ->> 'lastName', account.normalized_last_name) AS last_name,
+        NULLIF(LOWER(BTRIM(account.crm_snapshot ->> 'email')), '') AS display_email,
+        account.crm_active, account.last_seen_at,
+        COALESCE(settings.enabled, FALSE) AS center_enabled,
+        center.id AS membership_id, decision.status, decision.version,
+        EXISTS (
+          SELECT 1
+          FROM public.pto_profile_link_decisions linked
+          JOIN public.pto_discovered_tutor_accounts linked_account ON linked_account.id = linked.account_id
+          WHERE linked.status = 'linked'
+            AND linked.account_id <> account.id
+            AND linked_account.franchiseid = account.franchiseid
+            AND public.pto_canonical_profile_id(linked.profile_id)
+              = public.pto_canonical_profile_id(decision.profile_id)
+        ) AS center_account_conflict
+      FROM public.pto_profile_link_decisions decision
+      JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+      JOIN public.pto_profiles profile
+        ON profile.id = public.pto_canonical_profile_id(decision.profile_id)
+      LEFT JOIN public.pto_center_settings settings ON settings.franchiseid = account.franchiseid
+      LEFT JOIN public.pto_profile_centers center
+        ON center.franchiseid = account.franchiseid AND center.tutor_id = account.tutor_id AND center.active
+      WHERE account.franchiseid = $1 AND profile.active
+      ORDER BY profile.last_name, profile.first_name, profile.id, account.tutor_id
+    `, [franchiseId]);
     return {
       activeCrmTutorCount: activeIds.length,
       newMembershipCount: number(counts[0]?.new_memberships),
@@ -207,6 +287,11 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       lastRosterSyncError: health?.last_roster_sync_error == null ? null : String(health.last_roster_sync_error),
       lastSuccessfulDiscoveryAt: iso(health?.last_successful_discovery_at),
       lastDiscoveryError: health?.last_discovery_error == null ? null : String(health.last_discovery_error),
+      candidateGroups: candidateGroupRows.map((row) => ({
+        profileId: String(row.profile_id),
+        profileName: String(row.profile_name).trim(),
+        account: discoveredAccount(row)
+      })),
       warnings
     };
   },
@@ -620,37 +705,83 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
   },
 
   getAdminProfile: async ({ franchiseId, profileId }): Promise<PtoAdminProfileDetail | null> => {
+    const canonical = await queryRows(db, 'SELECT public.pto_canonical_profile_id($1) AS id', [profileId]);
+    if (!canonical[0]) return null;
+    const canonicalProfileId = String(canonical[0].id);
     const allowed = await queryRows(db, `
-      SELECT 1 FROM public.pto_profile_centers center
-      WHERE public.pto_canonical_profile_id(center.profile_id) = $1
-        AND center.franchiseid = $2 LIMIT 1
-    `, [profileId, franchiseId]);
+      SELECT 1
+      WHERE EXISTS (
+        SELECT 1 FROM public.pto_profile_centers center
+        WHERE public.pto_canonical_profile_id(center.profile_id) = $1
+          AND center.franchiseid = $2 AND center.active
+      ) OR EXISTS (
+        SELECT 1
+        FROM public.pto_profile_link_decisions decision
+        JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+        WHERE public.pto_canonical_profile_id(decision.profile_id) = $1
+          AND account.franchiseid = $2
+      )
+    `, [canonicalProfileId, franchiseId]);
     if (!allowed[0]) return null;
-    const rows = await queryRows(db, `${profileSelect} WHERE profile.id = $1`, [profileId]);
+    const rows = await queryRows(db, `${profileSelect} WHERE profile.id = $1`, [canonicalProfileId]);
     if (!rows[0]) return null;
-    const [memberships, emails, candidates, ledger, requests, audit] = await Promise.all([
+    const [memberships, emails, accounts, candidates, ledger, requests, audit] = await Promise.all([
       queryRows(db, `SELECT center.* FROM public.pto_profile_centers center
-        WHERE public.pto_canonical_profile_id(center.profile_id) = $1 ORDER BY center.franchiseid`, [profileId]),
+        WHERE public.pto_canonical_profile_id(center.profile_id) = $1 ORDER BY center.franchiseid`, [canonicalProfileId]),
       queryRows(db, `SELECT email.* FROM public.pto_profile_emails email
-        WHERE public.pto_canonical_profile_id(email.profile_id) = $1 ORDER BY email.email`, [profileId]),
+        WHERE public.pto_canonical_profile_id(email.profile_id) = $1 ORDER BY email.email`, [canonicalProfileId]),
+      queryRows(db, `
+        SELECT account.id, account.provider, account.crm_id, account.franchiseid, account.tutor_id,
+          COALESCE(account.crm_snapshot ->> 'firstName', account.normalized_first_name) AS first_name,
+          COALESCE(account.crm_snapshot ->> 'lastName', account.normalized_last_name) AS last_name,
+          CASE
+            WHEN NULLIF(LOWER(BTRIM(account.crm_snapshot ->> 'email')), '') IS NULL THEN NULL
+            WHEN account.franchiseid = $2 OR decision.status = 'linked'
+              THEN LOWER(BTRIM(account.crm_snapshot ->> 'email'))
+            WHEN POSITION('@' IN account.crm_snapshot ->> 'email') > 1
+              THEN LEFT(LOWER(BTRIM(account.crm_snapshot ->> 'email')), 1) || '***@'
+                || SPLIT_PART(LOWER(BTRIM(account.crm_snapshot ->> 'email')), '@', 2)
+            ELSE '***'
+          END AS display_email,
+          account.crm_active, account.last_seen_at,
+          COALESCE(settings.enabled, FALSE) AS center_enabled,
+          center.id AS membership_id, decision.status, decision.version,
+          EXISTS (
+            SELECT 1
+            FROM public.pto_profile_link_decisions linked
+            JOIN public.pto_discovered_tutor_accounts linked_account ON linked_account.id = linked.account_id
+            WHERE linked.status = 'linked' AND linked.account_id <> account.id
+              AND linked_account.franchiseid = account.franchiseid
+              AND public.pto_canonical_profile_id(linked.profile_id) = $1
+          ) AS center_account_conflict
+        FROM public.pto_profile_link_decisions decision
+        JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+        LEFT JOIN public.pto_center_settings settings ON settings.franchiseid = account.franchiseid
+        LEFT JOIN public.pto_profile_centers center
+          ON center.franchiseid = account.franchiseid AND center.tutor_id = account.tutor_id AND center.active
+        WHERE public.pto_canonical_profile_id(decision.profile_id) = $1
+        ORDER BY CASE decision.status WHEN 'linked' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+          account.crm_active DESC, account.franchiseid, account.tutor_id
+      `, [canonicalProfileId, franchiseId]),
       queryRows(db, `SELECT * FROM public.pto_profile_match_candidates
         WHERE public.pto_canonical_profile_id(left_profile_id) = $1
           OR public.pto_canonical_profile_id(right_profile_id) = $1
-        ORDER BY created_at DESC`, [profileId]),
+        ORDER BY created_at DESC`, [canonicalProfileId]),
       queryRows(db, `SELECT * FROM public.pto_ledger_entries
         WHERE public.pto_canonical_profile_id(profile_id) = $1
-        ORDER BY created_at DESC, id DESC LIMIT 200`, [profileId]),
+        ORDER BY created_at DESC, id DESC LIMIT 200`, [canonicalProfileId]),
       queryRows(db, `SELECT request.*, allocation.charged_days, allocation.state
         FROM public.pto_request_allocations allocation
         JOIN public.pto_entitlement_cycles cycle ON cycle.id = allocation.cycle_id
         JOIN public.time_off_requests request ON request.id = allocation.request_id
         WHERE public.pto_canonical_profile_id(cycle.profile_id) = $1
-        ORDER BY request.created_at DESC LIMIT 200`, [profileId]),
+        ORDER BY request.created_at DESC LIMIT 200`, [canonicalProfileId]),
       queryRows(db, `SELECT * FROM public.pto_audit_events
         WHERE public.pto_canonical_profile_id(profile_id) = $1
-        ORDER BY created_at DESC, id DESC LIMIT 200`, [profileId])
+        ORDER BY created_at DESC, id DESC LIMIT 200`, [canonicalProfileId])
     ]);
-    return { ...profile(rows[0]), memberships, emails, candidates, ledger, requests, audit };
+    return { ...profile(rows[0]), memberships: memberships.map(membership), emails: emails.map(profileEmail),
+      accounts: accounts.map(discoveredAccount), candidates, ledger, requests, audit };
   },
 
   decideAlias: async (input: PtoAliasDecisionInput) => {

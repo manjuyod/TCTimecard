@@ -8,11 +8,23 @@ const byCode: Record<string, PtoHttpError> = {
   PTO_CENTER_DISABLED: { status: 409, error: 'PTO is disabled for this center', code: 'PTO_CENTER_DISABLED' },
   PTO_IDENTITY_UNRESOLVED: { status: 422, error: 'PTO identity is unresolved', code: 'PTO_IDENTITY_UNRESOLVED' },
   PTO_NO_BALANCE: { status: 409, error: 'No PTO balance is available', code: 'PTO_NO_BALANCE' },
-  PTO_INSUFFICIENT_BALANCE: { status: 409, error: 'Insufficient PTO balance', code: 'PTO_INSUFFICIENT_BALANCE' }
+  PTO_INSUFFICIENT_BALANCE: { status: 409, error: 'Insufficient PTO balance', code: 'PTO_INSUFFICIENT_BALANCE' },
+  PTO_LINK_STALE: { status: 409, error: 'This PTO account link changed; refresh and try again', code: 'PTO_LINK_STALE' },
+  PTO_ACCOUNT_ALREADY_LINKED: { status: 409, error: 'This CRM account belongs to another PTO profile', code: 'PTO_ACCOUNT_ALREADY_LINKED' },
+  PTO_CENTER_ACCOUNT_CONFLICT: { status: 409, error: 'This PTO profile already has an account for that center', code: 'PTO_CENTER_ACCOUNT_CONFLICT' },
+  PTO_LINK_FORBIDDEN: { status: 403, error: 'Not authorized to manage this PTO account group', code: 'PTO_LINK_FORBIDDEN' },
+  PTO_SPLIT_RECONCILIATION_REQUIRED: { status: 409, error: 'Adjustment reconciliation is required before unlinking', code: 'PTO_SPLIT_RECONCILIATION_REQUIRED' },
+  PTO_DISCOVERY_STALE: { status: 409, error: 'The discovered CRM account is stale; refresh discovery first', code: 'PTO_DISCOVERY_STALE' }
 };
 
 const patterns: Array<[RegExp, PtoHttpError]> = [
   [/PTO_CENTER_DISABLED/i, byCode.PTO_CENTER_DISABLED],
+  [/PTO_LINK_STALE/i, byCode.PTO_LINK_STALE],
+  [/PTO_ACCOUNT_ALREADY_LINKED/i, byCode.PTO_ACCOUNT_ALREADY_LINKED],
+  [/PTO_CENTER_ACCOUNT_CONFLICT/i, byCode.PTO_CENTER_ACCOUNT_CONFLICT],
+  [/PTO_LINK_FORBIDDEN/i, byCode.PTO_LINK_FORBIDDEN],
+  [/PTO_SPLIT_RECONCILIATION_REQUIRED/i, byCode.PTO_SPLIT_RECONCILIATION_REQUIRED],
+  [/PTO_DISCOVERY_STALE/i, byCode.PTO_DISCOVERY_STALE],
   [/Insufficient shared PTO balance|PTO insufficient balance/i, byCode.PTO_INSUFFICIENT_BALANCE],
   [/Actor center is not authorized for PTO/i,
     { status: 403, error: 'Not authorized for this PTO profile', code: 'PTO_FORBIDDEN' }],

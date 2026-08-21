@@ -4,6 +4,7 @@ import { afterEach, test } from 'node:test';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createPtoRouter, type PtoRouteDeps } from '../routes/pto';
+import { mapPtoHttpError } from '../services/pto/errors';
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -13,10 +14,15 @@ afterEach(async () => {
 const profile = {
   profile: { id: '10', firstName: 'Ada', lastName: 'Lovelace', identityStatus: 'confirmed' as const, active: true,
     balance: { grantedDays: 5, balanceDays: 4, reservedDays: 1, availableDays: 3 } },
-  memberships: [{ id: '20', franchiseid: 6, tutorId: 123, active: true }],
+  memberships: [{ id: '20', profileId: '10', franchiseId: 6, tutorId: 123, active: true,
+    crmSnapshot: {}, firstSeenAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }],
   emails: [
-    { id: '30', email: 'ada@example.com', active: true, source: 'crm', sourceMembershipId: '20' },
-    { id: '31', email: 'manual@example.com', active: true, source: 'manual', sourceMembershipId: '20' }
+    { id: '30', profileId: '10', franchiseId: 6, email: 'ada@example.com', active: true,
+      source: 'crm' as const, sourceMembershipId: '20', createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z' },
+    { id: '31', profileId: '10', franchiseId: 6, email: 'manual@example.com', active: true,
+      source: 'manual' as const, sourceMembershipId: '20', createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z' }
   ],
   balance: { grantedDays: 5, balanceDays: 4, reservedDays: 1, availableDays: 3 },
   unresolvedReason: null
@@ -26,6 +32,7 @@ const adminProfile = {
   ...profile.profile,
   memberships: profile.memberships,
   emails: profile.emails,
+  accounts: [],
   candidates: [],
   ledger: [],
   requests: [],
@@ -67,7 +74,7 @@ const baseDeps = (): PtoRouteDeps => ({
   getCenterStatus: async (franchiseId) => ({ franchiseId, enabled: true,
     firstActivatedAt: '2026-01-01T00:00:00.000Z', ...syncHealth }),
   previewActivation: async () => ({ activeCrmTutorCount: 1, newMembershipCount: 0, newProfileCount: 0,
-    ...accountCounts, pendingExactNameCandidateCount: 0, ...syncHealth, warnings: [],
+    ...accountCounts, pendingExactNameCandidateCount: 0, ...syncHealth, candidateGroups: [], warnings: [],
     policy: { id: '1', effectiveFrom: '1970-01-01', entitlementDays: 5,
       renewalMonth: 1, renewalDay: 1, carryoverDays: 0 } }),
   syncRoster: async () => ({ activeTutorCount: 1, activatedMembershipCount: 1,
@@ -87,6 +94,14 @@ const baseDeps = (): PtoRouteDeps => ({
   addEmail: async (input) => ({ id: '32', email: input.email, active: true, source: 'manual', sourceMembershipId: input.membershipId }),
   removeEmail: async (input) => ({ id: input.emailId, email: 'manual@example.com', active: false, source: 'manual', sourceMembershipId: '20' }),
   adjustBalance: async () => ({ ledgerEntryId: '40', availableDays: 3.5 }),
+  previewAccountLink: async () => ({ mode: 'link', profileId: '10', account: {} as never, version: 1,
+    beforeBalances: [], afterBalances: [], affectedRequestIds: [], ambiguousAdjustmentIds: [], warnings: [] }),
+  linkAccount: async () => ({ canonicalProfileId: '10', detachedProfileId: null, decisionVersion: 2 }),
+  previewAccountUnlink: async () => ({ mode: 'unlink', profileId: '10', account: {} as never, version: 2,
+    beforeBalances: [], afterBalances: [], affectedRequestIds: [], ambiguousAdjustmentIds: [], warnings: [] }),
+  unlinkAccount: async () => ({ canonicalProfileId: '10', detachedProfileId: '11', decisionVersion: 3 }),
+  assignAdjustmentProvenance: async (input) => ({ ledgerEntryId: input.ledgerEntryId,
+    membershipId: input.membershipId }),
   listAudit: async () => ({ items: [], page: 1, pageSize: 25, total: 0 })
 });
 
@@ -274,6 +289,114 @@ test('admin PTO routes enforce selected center scope and expose every lifecycle 
     assert.equal(response.status >= 200 && response.status < 300, true, `${method} ${path} returned ${response.status}`);
   }
   assert.equal(calls.every((call) => call.value === 77), true);
+});
+
+test('admin account link routes validate and forward scoped preview and mutation payloads', async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const deps = baseDeps();
+  const result = { canonicalProfileId: '10', detachedProfileId: null, decisionVersion: 4 };
+  Object.assign(deps, {
+    previewAccountLink: async (input: unknown) => {
+      calls.push({ name: 'link-preview', input });
+      return { mode: 'link', profileId: '10', account: {}, version: 3,
+        beforeBalances: [], afterBalances: [], affectedRequestIds: [], ambiguousAdjustmentIds: [], warnings: [] };
+    },
+    linkAccount: async (input: unknown) => { calls.push({ name: 'link', input }); return result; },
+    previewAccountUnlink: async (input: unknown) => {
+      calls.push({ name: 'unlink-preview', input });
+      return { mode: 'unlink', profileId: '10', account: {}, version: 3,
+        beforeBalances: [], afterBalances: [], affectedRequestIds: [], ambiguousAdjustmentIds: [], warnings: [] };
+    },
+    unlinkAccount: async (input: unknown) => { calls.push({ name: 'unlink', input }); return result; },
+    assignAdjustmentProvenance: async (input: unknown) => {
+      calls.push({ name: 'provenance', input });
+      return { ledgerEntryId: '55', membershipId: '20' };
+    }
+  });
+  const base = await startApp(deps, { accountType: 'ADMIN', accountId: 900, franchiseId: 1 });
+  const idempotencyKey = '00000000-0000-4000-8000-000000000030';
+  const requests: Array<[string, string, Record<string, unknown>]> = [
+    ['POST', '/api/pto/admin/profiles/10/accounts/99/link-preview',
+      { franchiseId: 77, expectedVersion: 3 }],
+    ['PUT', '/api/pto/admin/profiles/10/accounts/99/link',
+      { franchiseId: 77, expectedVersion: 3, idempotencyKey }],
+    ['POST', '/api/pto/admin/profiles/10/accounts/99/unlink-preview',
+      { franchiseId: 77, expectedVersion: 3 }],
+    ['DELETE', '/api/pto/admin/profiles/10/accounts/99/link',
+      { franchiseId: 77, expectedVersion: 3, idempotencyKey }],
+    ['PUT', '/api/pto/admin/profiles/10/adjustments/55/provenance',
+      { franchiseId: 77, membershipId: 20, idempotencyKey }]
+  ];
+  for (const [method, route, body] of requests) {
+    const response = await fetch(`${base}${route}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    assert.equal(response.status, 200, `${method} ${route} returned ${response.status}`);
+  }
+  assert.deepEqual(calls, [
+    { name: 'link-preview', input: { profileId: '10', accountId: '99', actorId: '900',
+      actorFranchiseId: 77, expectedVersion: 3 } },
+    { name: 'link', input: { profileId: '10', accountId: '99', actorId: '900',
+      actorFranchiseId: 77, expectedVersion: 3, idempotencyKey } },
+    { name: 'unlink-preview', input: { profileId: '10', accountId: '99', actorId: '900',
+      actorFranchiseId: 77, expectedVersion: 3 } },
+    { name: 'unlink', input: { profileId: '10', accountId: '99', actorId: '900',
+      actorFranchiseId: 77, expectedVersion: 3, idempotencyKey } },
+    { name: 'provenance', input: { profileId: '10', ledgerEntryId: '55', membershipId: '20',
+      actorId: '900', actorFranchiseId: 77, idempotencyKey } }
+  ]);
+});
+
+test('admin account link routes reject invalid ids versions and idempotency keys before service calls', async () => {
+  let calls = 0;
+  const deps = baseDeps();
+  Object.assign(deps, {
+    previewAccountLink: async () => { calls += 1; throw new Error('unexpected'); },
+    linkAccount: async () => { calls += 1; throw new Error('unexpected'); },
+    assignAdjustmentProvenance: async () => { calls += 1; throw new Error('unexpected'); }
+  });
+  const base = await startApp(deps, { accountType: 'ADMIN', accountId: 900, franchiseId: 9 });
+  const invalid = await Promise.all([
+    fetch(`${base}/api/pto/admin/profiles/10/accounts/nope/link-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: 1 })
+    }),
+    fetch(`${base}/api/pto/admin/profiles/10/accounts/99/link-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: 0 })
+    }),
+    fetch(`${base}/api/pto/admin/profiles/10/accounts/99/link`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: 1, idempotencyKey: '' })
+    }),
+    fetch(`${base}/api/pto/admin/profiles/10/adjustments/55/provenance`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ membershipId: 0, idempotencyKey: 'key' })
+    })
+  ]);
+  assert.deepEqual(invalid.map((response) => response.status), [400, 400, 400, 400]);
+  assert.equal(calls, 0);
+});
+
+test('stable PTO account-link errors map to explicit safe responses', () => {
+  const expected = [
+    ['PTO_LINK_STALE', 409],
+    ['PTO_ACCOUNT_ALREADY_LINKED', 409],
+    ['PTO_CENTER_ACCOUNT_CONFLICT', 409],
+    ['PTO_LINK_FORBIDDEN', 403],
+    ['PTO_SPLIT_RECONCILIATION_REQUIRED', 409],
+    ['PTO_DISCOVERY_STALE', 409]
+  ] as const;
+  for (const [code, status] of expected) {
+    const mapped = mapPtoHttpError(Object.assign(new Error('database detail'), { code }), true);
+    assert.equal(mapped?.status, status);
+    assert.equal(mapped?.code, code);
+    assert.doesNotMatch(mapped?.error ?? '', /database detail/i);
+    const databaseMapped = mapPtoHttpError(new Error(`${code}: raw PostgreSQL detail`), true);
+    assert.equal(databaseMapped?.status, status);
+    assert.equal(databaseMapped?.code, code);
+    assert.doesNotMatch(databaseMapped?.error ?? '', /PostgreSQL detail/i);
+  }
 });
 
 test('fixed-center admin cannot override the session franchise and invalid ids are rejected before services', async () => {

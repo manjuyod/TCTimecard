@@ -368,6 +368,46 @@ test('discovery sync creates pending decisions without overwriting excluded or l
   assert.deepEqual(remoteMaterialization.rows[0], { memberships: '0', cycles: '0' });
 });
 
+test('candidate-owning center reads typed masked accounts and only its activation groups', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  const store = createPostgresPtoStore(pool);
+  const local = { id: 5101, franchiseId: 51, firstName: 'Candidate', lastName: 'Owner',
+    email: 'local@center51.example', isDeleted: false };
+  const remote = { id: 5202, franchiseId: 52, firstName: 'Candidate', lastName: 'Owner',
+    email: 'remote@center52.example', isDeleted: false,
+    provider: 'timecard-center:52', crmId: '5202' };
+  await store.syncRoster({ franchiseId: 51, activate: true, actorId: 'admin-51',
+    tutors: [local], discovery: discovery([remote]) });
+  const profile = await pool.query<{ profile_id: string }>(`
+    SELECT profile_id FROM public.pto_profile_centers WHERE franchiseid = 51 AND tutor_id = 5101
+  `);
+  const groupAdmin = await store.getAdminProfile({ franchiseId: 51, profileId: profile.rows[0].profile_id });
+  const candidateAdmin = await store.getAdminProfile({ franchiseId: 52, profileId: profile.rows[0].profile_id });
+  const unrelated = await store.getAdminProfile({ franchiseId: 99, profileId: profile.rows[0].profile_id });
+  const groupAccounts = (groupAdmin as unknown as { accounts?: Array<Record<string, unknown>> })?.accounts;
+  const candidateAccounts = (candidateAdmin as unknown as { accounts?: Array<Record<string, unknown>> })?.accounts;
+
+  assert.equal(unrelated, null);
+  assert.equal(groupAccounts?.length, 2);
+  assert.equal(candidateAccounts?.length, 2);
+  assert.equal(groupAccounts?.find((item) => item.franchiseId === 52)?.displayEmail, 'r***@center52.example');
+  assert.equal(candidateAccounts?.find((item) => item.franchiseId === 52)?.displayEmail, 'remote@center52.example');
+  assert.equal(candidateAccounts?.find((item) => item.franchiseId === 52)?.status, 'pending');
+
+  const preview = await store.previewActivation(52, [{
+    id: 5202, franchiseId: 52, firstName: 'Candidate', lastName: 'Owner',
+    email: 'remote@center52.example', isDeleted: false
+  }], discovery());
+  const candidateGroups = (preview as unknown as {
+    candidateGroups?: Array<{ profileId: string; account: { franchiseId: number; tutorId: number } }>;
+  }).candidateGroups;
+  assert.deepEqual(candidateGroups, [{
+    profileId: profile.rows[0].profile_id,
+    profileName: 'Candidate Owner',
+    account: (candidateAccounts ?? []).find((item) => item.franchiseId === 52)
+  }]);
+});
+
 test('dormant account link is authorized, idempotent, versioned, and reused by later activation', { skip: !enabled }, async () => {
   assert.ok(pool);
   const store = createPostgresPtoStore(pool);

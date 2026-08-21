@@ -4,9 +4,11 @@ import { enforceFranchiseScope } from '../middleware/franchiseScope';
 import { getFranchisePayrollSettings } from '../payroll/payPeriodResolution';
 import { getFranchiseSettings } from '../services/franchiseSettings';
 import {
-  addPtoEmail, adjustPtoBalance, decidePtoAlias, detachPtoMembership, getAdminPtoProfile,
+  addPtoEmail, adjustPtoBalance, assignPtoAdjustmentProvenance, decidePtoAlias,
+  detachPtoMembership, getAdminPtoProfile, linkPtoAccount,
   getPtoCenterStatus, getPtoProgramPolicy, getTutorPtoProfile, listAdminPtoProfiles,
-  listPtoAudit, previewPtoActivation, removePtoEmail, syncPtoRoster
+  listPtoAudit, previewPtoAccountLink, previewPtoAccountUnlink, previewPtoActivation,
+  removePtoEmail, syncPtoRoster, unlinkPtoAccount
 } from '../services/pto';
 import {
   authorizePublicPtoCenter, deactivatePtoCenter, getPtoBalanceSummary, quoteAuthenticatedPto, quotePublicPto,
@@ -40,6 +42,11 @@ export interface PtoRouteDeps {
   addEmail: typeof addPtoEmail;
   removeEmail: typeof removePtoEmail;
   adjustBalance: typeof adjustPtoBalance;
+  previewAccountLink: typeof previewPtoAccountLink;
+  linkAccount: typeof linkPtoAccount;
+  previewAccountUnlink: typeof previewPtoAccountUnlink;
+  unlinkAccount: typeof unlinkPtoAccount;
+  assignAdjustmentProvenance: typeof assignPtoAdjustmentProvenance;
   listAudit: typeof listPtoAudit;
 }
 
@@ -64,6 +71,11 @@ const defaultDeps: PtoRouteDeps = {
   addEmail: addPtoEmail,
   removeEmail: removePtoEmail,
   adjustBalance: adjustPtoBalance,
+  previewAccountLink: previewPtoAccountLink,
+  linkAccount: linkPtoAccount,
+  previewAccountUnlink: previewPtoAccountUnlink,
+  unlinkAccount: unlinkPtoAccount,
+  assignAdjustmentProvenance: assignPtoAdjustmentProvenance,
   listAudit: listPtoAudit
 };
 
@@ -198,6 +210,72 @@ export function createPtoRouter(overrides: Partial<PtoRouteDeps> = {}) {
     return res.json(await deps.adjustBalance({ profileId, membershipId, cycleStart, deltaDays, reason,
       actorId: actor(req), actorFranchiseId: franchiseId }));
   }));
+  router.post('/pto/admin/profiles/:profileId/accounts/:accountId/link-preview', requireAdmin,
+    admin(async (req, res, franchiseId) => {
+      const profileId = requiredId(res, req.params.profileId, 'profile');
+      const accountId = requiredId(res, req.params.accountId, 'account');
+      const expectedVersion = positiveInteger(req.body?.expectedVersion);
+      if (!profileId || !accountId) return;
+      if (!expectedVersion) return res.status(400).json({ error: 'expectedVersion must be a positive integer' });
+      const preview = await deps.previewAccountLink({ profileId, accountId, actorId: actor(req),
+        actorFranchiseId: franchiseId, expectedVersion });
+      return res.json({ preview });
+    }));
+  router.put('/pto/admin/profiles/:profileId/accounts/:accountId/link', requireAdmin,
+    admin(async (req, res, franchiseId) => {
+      const profileId = requiredId(res, req.params.profileId, 'profile');
+      const accountId = requiredId(res, req.params.accountId, 'account');
+      const expectedVersion = positiveInteger(req.body?.expectedVersion);
+      const mutationKey = mutationIdempotencyKey(req.body?.idempotencyKey);
+      if (!profileId || !accountId) return;
+      if (!expectedVersion || !mutationKey) {
+        return res.status(400).json({ error: 'expectedVersion and idempotencyKey are required' });
+      }
+      const result = await deps.linkAccount({ profileId, accountId, actorId: actor(req),
+        actorFranchiseId: franchiseId, expectedVersion, idempotencyKey: mutationKey });
+      const profile = await deps.getAdminProfile({ franchiseId, profileId: result.canonicalProfileId });
+      if (!profile) throw new Error(`PTO profile ${result.canonicalProfileId} does not exist`);
+      return res.json({ result, profile });
+    }));
+  router.post('/pto/admin/profiles/:profileId/accounts/:accountId/unlink-preview', requireAdmin,
+    admin(async (req, res, franchiseId) => {
+      const profileId = requiredId(res, req.params.profileId, 'profile');
+      const accountId = requiredId(res, req.params.accountId, 'account');
+      const expectedVersion = positiveInteger(req.body?.expectedVersion);
+      if (!profileId || !accountId) return;
+      if (!expectedVersion) return res.status(400).json({ error: 'expectedVersion must be a positive integer' });
+      const preview = await deps.previewAccountUnlink({ profileId, accountId, actorId: actor(req),
+        actorFranchiseId: franchiseId, expectedVersion });
+      return res.json({ preview });
+    }));
+  router.delete('/pto/admin/profiles/:profileId/accounts/:accountId/link', requireAdmin,
+    admin(async (req, res, franchiseId) => {
+      const profileId = requiredId(res, req.params.profileId, 'profile');
+      const accountId = requiredId(res, req.params.accountId, 'account');
+      const expectedVersion = positiveInteger(req.body?.expectedVersion);
+      const mutationKey = mutationIdempotencyKey(req.body?.idempotencyKey);
+      if (!profileId || !accountId) return;
+      if (!expectedVersion || !mutationKey) {
+        return res.status(400).json({ error: 'expectedVersion and idempotencyKey are required' });
+      }
+      const result = await deps.unlinkAccount({ profileId, accountId, actorId: actor(req),
+        actorFranchiseId: franchiseId, expectedVersion, idempotencyKey: mutationKey });
+      const profile = await deps.getAdminProfile({ franchiseId, profileId: result.canonicalProfileId });
+      if (!profile) throw new Error(`PTO profile ${result.canonicalProfileId} does not exist`);
+      return res.json({ result, profile });
+    }));
+  router.put('/pto/admin/profiles/:profileId/adjustments/:ledgerEntryId/provenance', requireAdmin,
+    admin(async (req, res, franchiseId) => {
+      const profileId = requiredId(res, req.params.profileId, 'profile');
+      const ledgerEntryId = requiredId(res, req.params.ledgerEntryId, 'ledger entry');
+      const membershipId = requiredId(res, req.body?.membershipId, 'membership');
+      const mutationKey = mutationIdempotencyKey(req.body?.idempotencyKey);
+      if (!profileId || !ledgerEntryId || !membershipId) return;
+      if (!mutationKey) return res.status(400).json({ error: 'idempotencyKey is required' });
+      const result = await deps.assignAdjustmentProvenance({ profileId, ledgerEntryId, membershipId,
+        actorId: actor(req), actorFranchiseId: franchiseId, idempotencyKey: mutationKey });
+      return res.json({ result });
+    }));
   router.get('/pto/admin/audit', requireAdmin, admin(async (req, res, franchiseId) => {
     const profileId = req.query.profileId == null ? undefined : id(req.query.profileId);
     if (req.query.profileId != null && !profileId) return res.status(400).json({ error: 'Invalid profile id' });
@@ -247,6 +325,10 @@ function tutorContext(req: Request) {
 function actor(req: Request) { return String(req.session.auth!.accountId); }
 function id(value: unknown) { const parsed = Number(value); return Number.isSafeInteger(parsed) && parsed > 0 ? String(parsed) : null; }
 function text(value: unknown) { return typeof value === 'string' ? value.trim() : ''; }
+function mutationIdempotencyKey(value: unknown) {
+  const key = text(value);
+  return key.length >= 8 && key.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(key) ? key : null;
+}
 function positiveInteger(value: unknown) {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
   if (typeof value === 'string' && !value.trim()) return null;

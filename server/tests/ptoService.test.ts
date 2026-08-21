@@ -104,6 +104,7 @@ test('activation preview reads a fresh active CRM roster without opening a write
         ...emptyAccountCounts,
         pendingExactNameCandidateCount: 2,
         ...emptyHealth,
+        candidateGroups: [],
         warnings: []
       };
     }
@@ -135,6 +136,7 @@ test('activation preview discovers related accounts from active local tutors', a
         ...emptyAccountCounts,
         pendingExactNameCandidateCount: 0,
         ...emptyHealth,
+        candidateGroups: [],
         warnings: []
       })
     }),

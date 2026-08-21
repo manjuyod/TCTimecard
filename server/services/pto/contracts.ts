@@ -106,7 +106,14 @@ export interface PtoActivationPreviewBase extends PtoSyncHealth {
   pendingExactNameCandidateCount: number;
   lastSuccessfulSyncAt: string | null;
   lastSyncError: string | null;
+  candidateGroups: PtoActivationCandidateGroup[];
   warnings: string[];
+}
+
+export interface PtoActivationCandidateGroup {
+  profileId: Id;
+  profileName: string;
+  account: PtoDiscoveredAccount;
 }
 
 export interface PtoActivationPreview extends PtoActivationPreviewBase {
@@ -185,8 +192,9 @@ export interface NormalizedListAdminPtoProfilesInput {
 }
 
 export interface PtoAdminProfileDetail extends PtoProfileSummary {
-  memberships: Record<string, unknown>[];
-  emails: Record<string, unknown>[];
+  memberships: PtoMembership[];
+  emails: PtoProfileEmail[];
+  accounts: PtoDiscoveredAccount[];
   candidates: Record<string, unknown>[];
   ledger: Record<string, unknown>[];
   requests: Record<string, unknown>[];
@@ -224,6 +232,24 @@ export interface PtoEmail {
   active: boolean;
   source: 'crm' | 'manual';
   sourceMembershipId: Id | null;
+}
+
+export interface PtoProfileEmail extends PtoEmail {
+  profileId: Id;
+  franchiseId: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PtoMembership {
+  id: Id;
+  profileId: Id;
+  franchiseId: number;
+  tutorId: number | null;
+  active: boolean;
+  crmSnapshot: Record<string, unknown>;
+  firstSeenAt: string;
+  updatedAt: string;
 }
 
 export interface AdjustPtoBalanceInput {
