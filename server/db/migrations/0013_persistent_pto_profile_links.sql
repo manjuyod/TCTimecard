@@ -49,6 +49,207 @@ CREATE UNIQUE INDEX IF NOT EXISTS pto_profile_link_decisions_linked_account_idx
   ON public.pto_profile_link_decisions (account_id)
   WHERE status = 'linked';
 
+-- Backfill the persistent discovery registry from stable legacy CRM identities.
+-- Invalid provider/CRM pairs are deliberately ignored, and reruns never overwrite
+-- fresher snapshots written by normal discovery syncs.
+WITH legacy_identity AS (
+  SELECT crm.profile_id, crm.provider, crm.crm_id,
+    identity.franchiseid, identity.tutor_id,
+    profile.first_name, profile.last_name, profile.active AS profile_active,
+    center.id AS membership_id, center.crm_snapshot, center.active AS membership_active,
+    center.first_seen_at, center.updated_at,
+    email.email
+  FROM public.pto_profile_crm_ids crm
+  JOIN public.pto_profiles profile ON profile.id = crm.profile_id
+  CROSS JOIN LATERAL (
+    SELECT
+      SUBSTRING(crm.provider FROM '^timecard-center:([0-9]+)$')::INTEGER AS franchiseid,
+      crm.crm_id::BIGINT AS tutor_id
+  ) identity
+  LEFT JOIN LATERAL (
+    SELECT membership.*
+    FROM public.pto_profile_centers membership
+    WHERE membership.profile_id = crm.profile_id
+      AND membership.franchiseid = identity.franchiseid
+      AND membership.tutor_id = identity.tutor_id
+    ORDER BY membership.active DESC, membership.updated_at DESC, membership.id
+    LIMIT 1
+  ) center ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT profile_email.email
+    FROM public.pto_profile_emails profile_email
+    WHERE profile_email.profile_id = crm.profile_id
+      AND profile_email.franchiseid = identity.franchiseid
+      AND profile_email.active
+    ORDER BY (profile_email.source = 'crm') DESC, profile_email.id
+    LIMIT 1
+  ) email ON TRUE
+  WHERE crm.provider ~ '^timecard-center:[0-9]+$'
+    AND crm.crm_id ~ '^[0-9]+$'
+)
+INSERT INTO public.pto_discovered_tutor_accounts (
+  provider, crm_id, franchiseid, tutor_id,
+  normalized_first_name, normalized_last_name,
+  crm_snapshot, crm_active, first_seen_at, last_seen_at
+)
+SELECT provider, crm_id, franchiseid, tutor_id,
+  LOWER(BTRIM(first_name)), LOWER(BTRIM(last_name)),
+  COALESCE(crm_snapshot, '{}'::JSONB) || JSONB_STRIP_NULLS(JSONB_BUILD_OBJECT(
+    'firstName', first_name,
+    'lastName', last_name,
+    'email', email,
+    'isDeleted', NOT COALESCE(membership_active, profile_active)
+  )),
+  COALESCE(membership_active, profile_active),
+  COALESCE(first_seen_at, NOW()),
+  COALESCE(updated_at, NOW())
+FROM legacy_identity
+ON CONFLICT (provider, crm_id) DO NOTHING;
+
+-- Existing active assignments are authoritative remembered links. Canonicalize
+-- alias sources so all of their center memberships point at one decision group.
+INSERT INTO public.pto_profile_link_decisions (
+  profile_id, account_id, status, decided_by, decision_franchiseid, decided_at
+)
+SELECT DISTINCT public.pto_canonical_profile_id(crm.profile_id), account.id,
+  'linked', 'migration:0013', account.franchiseid, NOW()
+FROM public.pto_discovered_tutor_accounts account
+JOIN public.pto_profile_crm_ids crm
+  ON crm.provider = account.provider AND crm.crm_id = account.crm_id
+JOIN public.pto_profile_centers center
+  ON center.profile_id = crm.profile_id
+  AND center.franchiseid = account.franchiseid
+  AND center.tutor_id = account.tutor_id
+  AND center.active
+ON CONFLICT DO NOTHING;
+
+-- A confirmed legacy candidate may remain meaningful even if its membership is
+-- currently dormant. Only seed it when both sides resolve to the same canonical
+-- profile through the legacy alias chain.
+INSERT INTO public.pto_profile_link_decisions (
+  profile_id, account_id, status, decided_by, decision_franchiseid, decided_at
+)
+SELECT DISTINCT public.pto_canonical_profile_id(candidate.left_profile_id), account.id,
+  'linked', 'migration:0013', account.franchiseid, NOW()
+FROM public.pto_profile_match_candidates candidate
+JOIN public.pto_profile_crm_ids crm
+  ON crm.profile_id IN (candidate.left_profile_id, candidate.right_profile_id)
+JOIN public.pto_discovered_tutor_accounts account
+  ON account.provider = crm.provider AND account.crm_id = crm.crm_id
+WHERE candidate.status = 'confirmed'
+  AND public.pto_canonical_profile_id(candidate.left_profile_id)
+    = public.pto_canonical_profile_id(candidate.right_profile_id)
+ON CONFLICT DO NOTHING;
+
+-- Rejected name matches become explicit cross-profile exclusions only when each
+-- side identifies exactly one stable account. Ambiguous candidates stay in the
+-- legacy review table without a guessed persistent decision.
+WITH rejected_candidate_accounts AS (
+  SELECT candidate.id, candidate.left_profile_id, candidate.right_profile_id,
+    COUNT(DISTINCT account.id) FILTER (WHERE crm.profile_id = candidate.left_profile_id) AS left_account_count,
+    COUNT(DISTINCT account.id) FILTER (WHERE crm.profile_id = candidate.right_profile_id) AS right_account_count,
+    MIN(account.id) FILTER (WHERE crm.profile_id = candidate.left_profile_id) AS left_account_id,
+    MIN(account.id) FILTER (WHERE crm.profile_id = candidate.right_profile_id) AS right_account_id
+  FROM public.pto_profile_match_candidates candidate
+  LEFT JOIN public.pto_profile_crm_ids crm
+    ON crm.profile_id IN (candidate.left_profile_id, candidate.right_profile_id)
+  LEFT JOIN public.pto_discovered_tutor_accounts account
+    ON account.provider = crm.provider AND account.crm_id = crm.crm_id
+  WHERE candidate.status = 'rejected'
+  GROUP BY candidate.id, candidate.left_profile_id, candidate.right_profile_id
+), exclusions AS (
+  SELECT public.pto_canonical_profile_id(left_profile_id) AS profile_id,
+    right_account_id AS account_id
+  FROM rejected_candidate_accounts
+  WHERE left_account_count = 1 AND right_account_count = 1
+  UNION ALL
+  SELECT public.pto_canonical_profile_id(right_profile_id), left_account_id
+  FROM rejected_candidate_accounts
+  WHERE left_account_count = 1 AND right_account_count = 1
+)
+INSERT INTO public.pto_profile_link_decisions (
+  profile_id, account_id, status, decided_by, decided_at
+)
+SELECT profile_id, account_id, 'excluded', 'migration:0013', NOW()
+FROM exclusions
+ON CONFLICT (profile_id, account_id) DO NOTHING;
+
+WITH rejected_candidate_accounts AS (
+  SELECT candidate.id,
+    COUNT(DISTINCT account.id) FILTER (WHERE crm.profile_id = candidate.left_profile_id) AS left_account_count,
+    COUNT(DISTINCT account.id) FILTER (WHERE crm.profile_id = candidate.right_profile_id) AS right_account_count
+  FROM public.pto_profile_match_candidates candidate
+  LEFT JOIN public.pto_profile_crm_ids crm
+    ON crm.profile_id IN (candidate.left_profile_id, candidate.right_profile_id)
+  LEFT JOIN public.pto_discovered_tutor_accounts account
+    ON account.provider = crm.provider AND account.crm_id = crm.crm_id
+  WHERE candidate.status = 'rejected'
+  GROUP BY candidate.id
+)
+INSERT INTO public.pto_audit_events (
+  profile_id, franchiseid, actor_id, event_type,
+  before_state, after_state, idempotency_key
+)
+SELECT NULL, NULL, 'migration:0013', 'persistent_link_backfill_completed', NULL,
+  JSONB_BUILD_OBJECT(
+    'discoveredAccountCount', (SELECT COUNT(*) FROM public.pto_discovered_tutor_accounts),
+    'linkedDecisionCount', (SELECT COUNT(*) FROM public.pto_profile_link_decisions WHERE status = 'linked'),
+    'excludedDecisionCount', (SELECT COUNT(*) FROM public.pto_profile_link_decisions WHERE status = 'excluded'),
+    'ambiguousRejectedCandidateCount', COUNT(*) FILTER (
+      WHERE left_account_count <> 1 OR right_account_count <> 1
+    )
+  ),
+  'migration:0013:persistent-link-backfill'
+FROM rejected_candidate_accounts
+ON CONFLICT (idempotency_key) DO NOTHING;
+
+-- Legacy membership detachment predates persistent account decisions. When it
+-- moves a stable CRM identity to a new profile, carry the linked decision with
+-- that assignment unless the destination already owns an explicit decision.
+CREATE OR REPLACE FUNCTION public.pto_follow_crm_assignment_decision()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_account_id BIGINT;
+  v_new_profile_id BIGINT;
+BEGIN
+  IF NEW.profile_id = OLD.profile_id THEN
+    RETURN NEW;
+  END IF;
+  SELECT account.id INTO v_account_id
+  FROM public.pto_discovered_tutor_accounts account
+  WHERE account.provider = NEW.provider AND account.crm_id = NEW.crm_id;
+  IF v_account_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  v_new_profile_id := public.pto_canonical_profile_id(NEW.profile_id);
+  IF EXISTS (
+    SELECT 1 FROM public.pto_profile_link_decisions decision
+    WHERE decision.account_id = v_account_id
+      AND public.pto_canonical_profile_id(decision.profile_id) = v_new_profile_id
+  ) THEN
+    RETURN NEW;
+  END IF;
+  UPDATE public.pto_profile_link_decisions decision
+  SET profile_id = v_new_profile_id,
+    updated_at = NOW()
+  WHERE decision.account_id = v_account_id
+    AND decision.status = 'linked'
+    AND public.pto_canonical_profile_id(decision.profile_id)
+      = public.pto_canonical_profile_id(OLD.profile_id);
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS pto_crm_assignment_decision_follow
+  ON public.pto_profile_crm_ids;
+CREATE TRIGGER pto_crm_assignment_decision_follow
+AFTER UPDATE OF profile_id ON public.pto_profile_crm_ids
+FOR EACH ROW
+WHEN (NEW.profile_id IS DISTINCT FROM OLD.profile_id)
+EXECUTE FUNCTION public.pto_follow_crm_assignment_decision();
+
 ALTER TABLE public.pto_ledger_entries
   ADD COLUMN IF NOT EXISTS source_membership_id BIGINT;
 

@@ -58,6 +58,7 @@ test('disabled-center guard and deactivation preserve existing PTO lifecycle', {
     RETURNING id
   `);
   await db.query(migration('0012_pto_routes.sql'));
+  await db.query(migration('0013_persistent_pto_profile_links.sql'));
   assert.equal((await db.query('SELECT COUNT(*)::INTEGER AS count FROM public.time_off_requests WHERE id = $1', [legacy.rows[0].id])).rows[0].count, 1);
 
   const insertDisabled = (source: 'authenticated_timecard_app' | 'public_timeoff_form') => db.query(`

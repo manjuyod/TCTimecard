@@ -27,6 +27,21 @@ test('persistent PTO link migration separates discovered accounts from explicit 
   assert.match(sql, /last_discovery_error TEXT/i);
 });
 
+test('persistent PTO link migration backfills only stable identities and records ambiguous legacy reviews', () => {
+  const sql = loadLinkMigration();
+
+  assert.match(sql, /provider ~ '\^timecard-center:\[0-9\]\+\$'/i);
+  assert.match(sql, /crm_id ~ '\^\[0-9\]\+\$'/i);
+  assert.match(sql, /INSERT INTO public\.pto_discovered_tutor_accounts/i);
+  assert.match(sql, /ON CONFLICT \(provider, crm_id\) DO NOTHING/i);
+  assert.match(sql, /public\.pto_canonical_profile_id\(crm\.profile_id\)/i);
+  assert.match(sql, /candidate\.status = 'confirmed'/i);
+  assert.match(sql, /candidate\.status = 'rejected'/i);
+  assert.match(sql, /left_account_count = 1 AND right_account_count = 1/i);
+  assert.match(sql, /persistent_link_backfill_completed/i);
+  assert.match(sql, /ambiguousRejectedCandidateCount/i);
+});
+
 test('shared PTO migration creates normalized policy, identity, cycle, ledger, and allocation tables', () => {
   const sql = loadMigration();
   const tables = [

@@ -1195,6 +1195,148 @@ test('contradictory alias retries are rejected while same-decision retries repor
     actorId: 'admin-100', actorFranchiseId: 100 }), /already rejected/i);
 });
 
+test('three-center acceptance preserves remembered links activation deductions and opt-out', { skip: !enabled }, async () => {
+  const db = pool;
+  assert.ok(db);
+  const store = createPostgresPtoStore(db);
+  const tutors = [
+    { id: 101, franchiseId: 1, firstName: 'Shared', lastName: 'Person',
+      email: 'shared.center1@example.com', isDeleted: false },
+    { id: 202, franchiseId: 2, firstName: 'Shared', lastName: 'Person',
+      email: 'shared.center2@example.com', isDeleted: false },
+    { id: 303, franchiseId: 3, firstName: 'Shared', lastName: 'Person',
+      email: 'shared.center3@example.com', isDeleted: false }
+  ];
+  const discovered = tutors.map((tutor) => ({ ...tutor,
+    provider: `timecard-center:${tutor.franchiseId}`, crmId: String(tutor.id) }));
+  const sync = (franchiseId: number, activate: boolean) => store.runInTransaction((tx) => tx.syncRoster({
+    franchiseId,
+    activate,
+    actorId: `admin-${franchiseId}`,
+    tutors: tutors.filter((tutor) => tutor.franchiseId === franchiseId),
+    discovery: discovery(discovered)
+  }));
+
+  const firstSync = await sync(1, true);
+  assert.deepEqual({ discovered: firstSync.discoveredAccountCount, pending: firstSync.pendingReviewCount },
+    { discovered: 3, pending: 2 });
+  const profiles = await store.listAdminProfiles({ franchiseId: 1, search: '', page: 1, pageSize: 25 });
+  assert.equal(profiles.items.length, 1);
+  const canonicalProfileId = profiles.items[0].id;
+  let detail = await store.getAdminProfile({ franchiseId: 1, profileId: canonicalProfileId });
+  assert.ok(detail);
+  const dormant = detail.accounts.filter((account) => [2, 3].includes(account.franchiseId));
+  assert.deepEqual(dormant.map((account) => ({ center: account.franchiseId, status: account.status,
+    enabled: account.centerEnabled })), [
+    { center: 2, status: 'pending', enabled: false },
+    { center: 3, status: 'pending', enabled: false }
+  ]);
+  for (const [index, account] of dormant.entries()) {
+    await store.runInTransaction((tx) => tx.linkAccount({
+      profileId: canonicalProfileId,
+      accountId: account.id,
+      actorId: 'admin-1',
+      actorFranchiseId: 1,
+      expectedVersion: account.version,
+      idempotencyKey: `00000000-0000-4000-8000-00000000002${index}`
+    }));
+  }
+
+  await sync(2, true);
+  await sync(3, true);
+  const sharedMemberships = await db.query<{ id: string; franchiseid: number }>(`
+    SELECT id, franchiseid FROM public.pto_profile_centers
+    WHERE public.pto_canonical_profile_id(profile_id) = $1 AND active ORDER BY franchiseid
+  `, [canonicalProfileId]);
+  assert.deepEqual(sharedMemberships.rows.map((row) => row.franchiseid), [1, 2, 3]);
+  const grantCount = await db.query<{ count: string }>(`
+    SELECT COUNT(*)::TEXT AS count FROM public.pto_ledger_entries
+    WHERE event_type = 'grant' AND public.pto_canonical_profile_id(profile_id) = $1
+  `, [canonicalProfileId]);
+  assert.equal(grantCount.rows[0].count, '1');
+  const leaveDate = (await db.query<{ value: string }>(`
+    SELECT (CURRENT_DATE + ((8 - EXTRACT(ISODOW FROM CURRENT_DATE)::INTEGER) % 7))::TEXT AS value
+  `)).rows[0].value;
+  const reserveAndConsume = async (input: {
+    franchiseId: number;
+    tutorId: number | null;
+    email: string;
+    source: 'authenticated' | 'public';
+  }) => {
+    const request = await db.query<{ id: string; created_at: Date }>(`
+      INSERT INTO public.time_off_requests
+        (franchiseid, tutorid, first_name, last_name, email, start_at, end_at,
+         type, status, partial_day, public_metadata)
+      VALUES ($1, $2, 'Shared', 'Person', $3, NOW(), NOW(), 'pto', 'draft', FALSE, '{}')
+      RETURNING id, created_at
+    `, [input.franchiseId, input.tutorId, input.email]);
+    await db.query(`SELECT public.pto_reserve_request(
+      $1, $2, $3, NULL, $4, $5, 'Shared', 'Person', $6, $7::DATE, $7::DATE, FALSE, 24
+    )`, [request.rows[0].id, input.franchiseId, input.tutorId, input.email,
+      input.source, request.rows[0].created_at, leaveDate]);
+    await db.query("SELECT public.pto_transition_request($1, 'approved')", [request.rows[0].id]);
+    return request.rows[0].id;
+  };
+  await reserveAndConsume({ franchiseId: 1, tutorId: 101,
+    email: 'shared.center1@example.com', source: 'authenticated' });
+  await reserveAndConsume({ franchiseId: 2, tutorId: null,
+    email: 'shared.center2@example.com', source: 'public' });
+  const sharedBalance = await db.query<{ available_days: string }>(
+    'SELECT available_days::TEXT FROM public.pto_profile_balance($1, CURRENT_DATE)', [canonicalProfileId]
+  );
+  assert.equal(sharedBalance.rows[0].available_days, '3.00');
+
+  const thirdMembership = sharedMemberships.rows.find((row) => row.franchiseid === 3);
+  assert.ok(thirdMembership);
+  await store.adjustBalance({ profileId: canonicalProfileId, membershipId: thirdMembership.id,
+    cycleStart: `${new Date().getUTCFullYear()}-01-01`, deltaDays: 0.5,
+    reason: 'Center 3 attributable correction', actorId: 'admin-3', actorFranchiseId: 3 });
+  detail = await store.getAdminProfile({ franchiseId: 2, profileId: canonicalProfileId });
+  assert.ok(detail);
+  const thirdAccount = detail.accounts.find((account) => account.franchiseId === 3 && account.status === 'linked');
+  assert.ok(thirdAccount);
+  const unlinkInput = {
+    profileId: canonicalProfileId,
+    accountId: thirdAccount.id,
+    actorId: 'admin-2',
+    actorFranchiseId: 2,
+    expectedVersion: thirdAccount.version,
+    idempotencyKey: '00000000-0000-4000-8000-000000000030'
+  };
+  const preview = await store.previewAccountUnlink(unlinkInput);
+  assert.deepEqual(preview.ambiguousAdjustmentIds, []);
+  const unlinked = await store.runInTransaction((tx) => tx.unlinkAccount(unlinkInput));
+  assert.ok(unlinked.detachedProfileId);
+  const centersAfter = await db.query<{ profile_id: string; franchiseid: number }>(`
+    SELECT public.pto_canonical_profile_id(profile_id)::TEXT AS profile_id, franchiseid
+    FROM public.pto_profile_centers WHERE active ORDER BY franchiseid
+  `);
+  assert.deepEqual(centersAfter.rows, [
+    { profile_id: canonicalProfileId, franchiseid: 1 },
+    { profile_id: canonicalProfileId, franchiseid: 2 },
+    { profile_id: unlinked.detachedProfileId, franchiseid: 3 }
+  ]);
+  const balances = await db.query<{ profile_id: string; available_days: string }>(`
+    SELECT requested.profile_id::TEXT,
+      balance.available_days::TEXT
+    FROM UNNEST($1::BIGINT[]) requested(profile_id)
+    CROSS JOIN LATERAL public.pto_profile_balance(requested.profile_id, CURRENT_DATE) balance
+    ORDER BY requested.profile_id
+  `, [[canonicalProfileId, unlinked.detachedProfileId]]);
+  assert.equal(balances.rows.find((row) => row.profile_id === canonicalProfileId)?.available_days, '3.00');
+  assert.equal(balances.rows.find((row) => row.profile_id === unlinked.detachedProfileId)?.available_days, '5.50');
+
+  await sync(1, false);
+  const remembered = await db.query<{ status: string }>(`
+    SELECT decision.status
+    FROM public.pto_profile_link_decisions decision
+    JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+    WHERE public.pto_canonical_profile_id(decision.profile_id) = $1
+      AND account.franchiseid = 3
+  `, [canonicalProfileId]);
+  assert.deepEqual(remembered.rows, [{ status: 'excluded' }]);
+});
+
 test('admin invariant migration reruns after its replacement functions are installed', { skip: !enabled }, async () => {
   assert.ok(pool);
   await pool.query(migrations[1]);

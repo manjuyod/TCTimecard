@@ -11,6 +11,14 @@ const migrationSql = readFileSync(
   path.resolve(__dirname, '../db/migrations/0010_shared_pto.sql'),
   'utf8'
 );
+const adminMigrationSql = readFileSync(
+  path.resolve(__dirname, '../db/migrations/0011_pto_admin_invariants.sql'),
+  'utf8'
+);
+const linkMigrationSql = readFileSync(
+  path.resolve(__dirname, '../db/migrations/0013_persistent_pto_profile_links.sql'),
+  'utf8'
+);
 let pool: Pool | undefined;
 
 const docker = (args: string[], timeout = 120_000): string =>
@@ -122,6 +130,166 @@ test('migration applies and reruns cleanly in disposable PostgreSQL', { skip: !e
   assert.ok(pool);
   await pool.query(migrationSql);
   await pool.query(migrationSql);
+});
+
+test('persistent link backfill preserves balances and translates only unambiguous legacy identity decisions', { skip: !enabled }, async () => {
+  const db = pool;
+  assert.ok(db);
+  await db.query(migrationSql);
+  await db.query(adminMigrationSql);
+  const profiles = await db.query<{ id: string }>(`
+    INSERT INTO public.pto_profiles (first_name, last_name, identity_status, active)
+    VALUES
+      ('Canonical', 'Person', 'confirmed', TRUE),
+      ('Canonical', 'Person', 'pending', FALSE),
+      ('Rejected', 'Pair', 'pending', TRUE),
+      ('Rejected', 'Pair', 'pending', TRUE),
+      ('Ambiguous', 'Pair', 'pending', TRUE),
+      ('Ambiguous', 'Pair', 'pending', TRUE)
+    RETURNING id
+  `);
+  const [canonical, aliasSource, rejectedLeft, rejectedRight, ambiguousLeft, ambiguousRight]
+    = profiles.rows.map((row) => row.id);
+  const memberships = await db.query<{ id: string; profile_id: string; franchiseid: number }>(`
+    INSERT INTO public.pto_profile_centers
+      (profile_id, franchiseid, tutor_id, active, crm_snapshot)
+    VALUES
+      ($1, 1, 101, TRUE, '{"firstName":"Canonical","lastName":"Person","email":"one@example.com"}'),
+      ($2, 2, 202, TRUE, '{"firstName":"Canonical","lastName":"Person","email":"two@example.com"}'),
+      ($3, 3, 303, TRUE, '{"firstName":"Rejected","lastName":"Pair"}'),
+      ($4, 4, 404, TRUE, '{"firstName":"Rejected","lastName":"Pair"}'),
+      ($5, 5, 505, TRUE, '{"firstName":"Ambiguous","lastName":"Pair"}'),
+      ($5, 6, 606, TRUE, '{"firstName":"Ambiguous","lastName":"Pair"}'),
+      ($6, 7, 707, TRUE, '{"firstName":"Ambiguous","lastName":"Pair"}')
+    RETURNING id, profile_id, franchiseid
+  `, [canonical, aliasSource, rejectedLeft, rejectedRight, ambiguousLeft, ambiguousRight]);
+  await db.query(`
+    INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id)
+    VALUES
+      ($1, 'timecard-center:1', '101'), ($2, 'timecard-center:2', '202'),
+      ($3, 'timecard-center:3', '303'), ($4, 'timecard-center:4', '404'),
+      ($5, 'timecard-center:5', '505'), ($5, 'timecard-center:6', '606'),
+      ($6, 'timecard-center:7', '707'),
+      ($1, 'bridge', '999'), ($1, 'timecard-center:not-a-center', '808'),
+      ($1, 'timecard-center:8', 'not-a-tutor')
+  `, [canonical, aliasSource, rejectedLeft, rejectedRight, ambiguousLeft, ambiguousRight]);
+  const candidates = await db.query<{ id: string; status: string }>(`
+    INSERT INTO public.pto_profile_match_candidates
+      (left_profile_id, right_profile_id, status, decided_by, decided_at)
+    VALUES
+      ($1, $2, 'confirmed', 'legacy-admin', NOW()),
+      ($3, $4, 'rejected', 'legacy-admin', NOW()),
+      ($5, $6, 'rejected', 'legacy-admin', NOW())
+    RETURNING id, status
+  `, [canonical, aliasSource, rejectedLeft, rejectedRight, ambiguousLeft, ambiguousRight]);
+  await db.query(`
+    INSERT INTO public.pto_profile_aliases (source_profile_id, target_profile_id, candidate_id)
+    VALUES ($1, $2, $3)
+  `, [aliasSource, canonical, candidates.rows[0].id]);
+  const canonicalMembership = memberships.rows.find((row) => row.franchiseid === 1);
+  assert.ok(canonicalMembership);
+  await db.query(`
+    INSERT INTO public.pto_profile_emails
+      (profile_id, franchiseid, email, source, source_membership_id)
+    VALUES ($1, 1, 'one@example.com', 'crm', $2)
+  `, [canonical, canonicalMembership.id]);
+  const cycle = await db.query<{ id: string }>(
+    'SELECT public.pto_get_or_create_cycle($1, CURRENT_DATE) AS id', [canonical]
+  );
+  const request = await db.query<{ id: string }>(`
+    INSERT INTO public.time_off_requests
+      (franchiseid, tutorid, first_name, last_name, email, start_at, end_at,
+       type, status, partial_day, public_metadata)
+    VALUES (1, 101, 'Canonical', 'Person', 'one@example.com', NOW(), NOW(),
+      'pto', 'draft', FALSE, '{}') RETURNING id
+  `);
+  const allocation = await db.query<{ id: string }>(`
+    INSERT INTO public.pto_request_allocations (request_id, cycle_id, charged_days, state)
+    VALUES ($1, $2, 0.5, 'reserved') RETURNING id
+  `, [request.rows[0].id, cycle.rows[0].id]);
+  await db.query(`
+    INSERT INTO public.pto_ledger_entries
+      (profile_id, cycle_id, request_id, allocation_id, event_type, balance_delta,
+       reserved_delta, idempotency_key, metadata)
+    VALUES
+      ($1, $2, $3, $4, 'reserve', 0, 0.5, 'legacy:reserve', '{}'),
+      ($1, $2, NULL, NULL, 'adjustment', -0.5, 0, 'legacy:adjustment',
+       '{"reason":"legacy correction"}')
+  `, [canonical, cycle.rows[0].id, request.rows[0].id, allocation.rows[0].id]);
+  const beforeBalance = (await db.query<{ value: object }>(
+    'SELECT TO_JSONB(balance) AS value FROM public.pto_profile_balance($1, CURRENT_DATE) balance', [canonical]
+  )).rows[0].value;
+
+  await db.query(linkMigrationSql);
+
+  const discovered = await db.query<{ provider: string; crm_id: string }>(`
+    SELECT provider, crm_id FROM public.pto_discovered_tutor_accounts ORDER BY provider, crm_id
+  `);
+  assert.equal(discovered.rows.length, 7);
+  assert.equal(discovered.rows.every((row) => /^timecard-center:\d+$/.test(row.provider) && /^\d+$/.test(row.crm_id)), true);
+  const linked = await db.query<{ profile_id: string; franchiseid: number }>(`
+    SELECT decision.profile_id::TEXT, account.franchiseid
+    FROM public.pto_profile_link_decisions decision
+    JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+    WHERE decision.status = 'linked' ORDER BY account.franchiseid
+  `);
+  assert.equal(linked.rows.length, 7);
+  assert.deepEqual(linked.rows.filter((row) => [1, 2].includes(row.franchiseid))
+    .map((row) => row.profile_id), [canonical, canonical]);
+  const rejectedCrossDecisions = await db.query<{ count: string }>(`
+    WITH account_owner AS (
+      SELECT account.id, crm.profile_id
+      FROM public.pto_discovered_tutor_accounts account
+      JOIN public.pto_profile_crm_ids crm
+        ON crm.provider = account.provider AND crm.crm_id = account.crm_id
+    )
+    SELECT COUNT(*)::TEXT AS count
+    FROM public.pto_profile_link_decisions decision
+    JOIN account_owner owner ON owner.id = decision.account_id
+    WHERE decision.status = 'excluded'
+      AND ((decision.profile_id = $1 AND owner.profile_id = $2)
+        OR (decision.profile_id = $2 AND owner.profile_id = $1))
+  `, [rejectedLeft, rejectedRight]);
+  assert.equal(rejectedCrossDecisions.rows[0].count, '2');
+  const ambiguousCrossDecisions = await db.query<{ count: string }>(`
+    WITH account_owner AS (
+      SELECT account.id, crm.profile_id
+      FROM public.pto_discovered_tutor_accounts account
+      JOIN public.pto_profile_crm_ids crm
+        ON crm.provider = account.provider AND crm.crm_id = account.crm_id
+    )
+    SELECT COUNT(*)::TEXT AS count
+    FROM public.pto_profile_link_decisions decision
+    JOIN account_owner owner ON owner.id = decision.account_id
+    WHERE decision.status = 'excluded'
+      AND ((decision.profile_id = $1 AND owner.profile_id = $2)
+        OR (decision.profile_id = $2 AND owner.profile_id = $1))
+  `, [ambiguousLeft, ambiguousRight]);
+  assert.equal(ambiguousCrossDecisions.rows[0].count, '0');
+  const legacyRejected = await db.query<{ count: string }>(`
+    SELECT COUNT(*)::TEXT AS count FROM public.pto_profile_match_candidates WHERE status = 'rejected'
+  `);
+  assert.equal(legacyRejected.rows[0].count, '2');
+  const afterBalance = (await db.query<{ value: object }>(
+    'SELECT TO_JSONB(balance) AS value FROM public.pto_profile_balance($1, CURRENT_DATE) balance', [canonical]
+  )).rows[0].value;
+  assert.deepEqual(afterBalance, beforeBalance);
+  const audit = await db.query<{ ambiguous_count: string; count: string }>(`
+    SELECT MIN(after_state ->> 'ambiguousRejectedCandidateCount') AS ambiguous_count,
+      COUNT(*)::TEXT AS count
+    FROM public.pto_audit_events WHERE event_type = 'persistent_link_backfill_completed'
+  `);
+  assert.deepEqual(audit.rows[0], { ambiguous_count: '1', count: '1' });
+
+  await db.query(linkMigrationSql);
+  const rerunCounts = await db.query<{ accounts: string; decisions: string; audits: string }>(`
+    SELECT
+      (SELECT COUNT(*)::TEXT FROM public.pto_discovered_tutor_accounts) AS accounts,
+      (SELECT COUNT(*)::TEXT FROM public.pto_profile_link_decisions) AS decisions,
+      (SELECT COUNT(*)::TEXT FROM public.pto_audit_events
+       WHERE event_type = 'persistent_link_backfill_completed') AS audits
+  `);
+  assert.deepEqual(rerunCounts.rows[0], { accounts: '7', decisions: '9', audits: '1' });
 });
 
 test('identity resolution shares only confirmed people and scopes public email matching by center', { skip: !enabled }, async () => {
