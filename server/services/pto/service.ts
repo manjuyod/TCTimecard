@@ -6,6 +6,8 @@ import type {
   ListAdminPtoProfilesInput,
   ListPtoAuditInput,
   PtoAliasDecisionInput,
+  PtoAccountLinkBaseInput,
+  PtoAccountLinkMutationInput,
   PtoDiscoveryResult,
   PtoServiceStore,
   PtoTutorRosterSource,
@@ -82,6 +84,9 @@ export const createPtoService = (dependencies: {
     })),
     removePtoEmail: (input: RemovePtoEmailInput) =>
       store.runInTransaction((tx) => tx.removeEmail(input)),
+    previewPtoAccountLink: (input: PtoAccountLinkBaseInput) => store.previewAccountLink(input),
+    linkPtoAccount: (input: PtoAccountLinkMutationInput) =>
+      store.runInTransaction((tx) => tx.linkAccount(input)),
     adjustPtoBalance: async (input: AdjustPtoBalanceInput) => {
       if (!Number.isFinite(input.deltaDays) || input.deltaDays === 0) {
         throw new RangeError('PTO adjustment must be nonzero');

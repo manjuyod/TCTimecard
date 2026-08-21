@@ -368,6 +368,180 @@ test('discovery sync creates pending decisions without overwriting excluded or l
   assert.deepEqual(remoteMaterialization.rows[0], { memberships: '0', cycles: '0' });
 });
 
+test('dormant account link is authorized, idempotent, versioned, and reused by later activation', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  const store = createPostgresPtoStore(pool);
+  const localTutor = { id: 101, franchiseId: 1, firstName: 'Dormant', lastName: 'Tutor',
+    email: 'one@example.com', isDeleted: false };
+  const remoteAccount = { id: 202, franchiseId: 2, firstName: 'Dormant', lastName: 'Tutor',
+    email: 'two@example.com', isDeleted: false, provider: 'timecard-center:2', crmId: '202' };
+  await store.runInTransaction((tx) => tx.syncRoster({
+    franchiseId: 1, activate: true, actorId: 'admin-1', tutors: [localTutor],
+    discovery: discovery([remoteAccount])
+  }));
+  const rows = await pool.query<{ profile_id: string; account_id: string; version: number }>(`
+    SELECT center.profile_id, account.id AS account_id, decision.version
+    FROM public.pto_profile_centers center
+    JOIN public.pto_profiles profile ON profile.id = center.profile_id
+    JOIN public.pto_profile_link_decisions decision ON decision.profile_id = profile.id
+    JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+    WHERE center.franchiseid = 1 AND center.tutor_id = 101
+      AND account.provider = 'timecard-center:2' AND account.crm_id = '202'
+  `);
+  const input = {
+    profileId: rows.rows[0].profile_id,
+    accountId: rows.rows[0].account_id,
+    actorId: 'admin-1',
+    actorFranchiseId: 1,
+    expectedVersion: rows.rows[0].version,
+    idempotencyKey: '00000000-0000-4000-8000-000000000001'
+  };
+
+  await assert.rejects(
+    (store as never as { previewAccountLink(value: typeof input): Promise<unknown> })
+      .previewAccountLink({ ...input, actorFranchiseId: 99 }),
+    /not authorized|PTO_LINK_FORBIDDEN/i
+  );
+  const preview = await (store as never as {
+    previewAccountLink(value: typeof input): Promise<{ mode: string; version: number; afterBalances: Array<{ availableDays: number }> }>;
+  }).previewAccountLink(input);
+  assert.equal(preview.mode, 'link');
+  assert.equal(preview.version, 1);
+  assert.equal(preview.afterBalances[0].availableDays, 5);
+
+  const linked = await store.runInTransaction((tx) =>
+    (tx as never as { linkAccount(value: typeof input): Promise<{ canonicalProfileId: string; decisionVersion: number }> })
+      .linkAccount(input)
+  );
+  const repeated = await store.runInTransaction((tx) =>
+    (tx as never as { linkAccount(value: typeof input): Promise<{ canonicalProfileId: string; decisionVersion: number }> })
+      .linkAccount(input)
+  );
+  assert.deepEqual(repeated, linked);
+  assert.equal(linked.canonicalProfileId, rows.rows[0].profile_id);
+  assert.equal(linked.decisionVersion, 2);
+  await assert.rejects(
+    store.runInTransaction((tx) =>
+      (tx as never as { linkAccount(value: typeof input): Promise<unknown> }).linkAccount({
+        ...input, actorId: 'outsider', actorFranchiseId: 99
+      })
+    ),
+    /PTO_LINK_FORBIDDEN|not authorized|idempotency/i
+  );
+  await assert.rejects(
+    store.runInTransaction((tx) =>
+      (tx as never as { linkAccount(value: typeof input): Promise<unknown> }).linkAccount({
+        ...input, idempotencyKey: '00000000-0000-4000-8000-000000000002'
+      })
+    ),
+    /PTO_LINK_STALE|stale/i
+  );
+
+  const dormant = await pool.query<{ profile_id: string; memberships: string; emails: string }>(`
+    SELECT crm.profile_id,
+      (SELECT COUNT(*)::TEXT FROM public.pto_profile_centers WHERE franchiseid = 2 AND tutor_id = 202) AS memberships,
+      (SELECT COUNT(*)::TEXT FROM public.pto_profile_emails WHERE franchiseid = 2) AS emails
+    FROM public.pto_profile_crm_ids crm
+    WHERE crm.provider = 'timecard-center:2' AND crm.crm_id = '202'
+  `);
+  assert.deepEqual(dormant.rows[0], { profile_id: rows.rows[0].profile_id, memberships: '0', emails: '0' });
+
+  const duplicateRemote = { ...remoteAccount, id: 203, crmId: '203', email: 'duplicate@example.com' };
+  await store.syncRoster({ franchiseId: 1, activate: false, actorId: 'admin-1', tutors: [localTutor],
+    discovery: discovery([remoteAccount, duplicateRemote]) });
+  const duplicateDecision = await pool.query<{ account_id: string; version: number }>(`
+    SELECT decision.account_id, decision.version
+    FROM public.pto_profile_link_decisions decision
+    JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+    WHERE decision.profile_id = $1 AND account.franchiseid = 2 AND account.tutor_id = 203
+  `, [rows.rows[0].profile_id]);
+  await assert.rejects(
+    store.runInTransaction((tx) =>
+      (tx as never as { linkAccount(value: typeof input): Promise<unknown> }).linkAccount({
+        ...input,
+        accountId: duplicateDecision.rows[0].account_id,
+        expectedVersion: duplicateDecision.rows[0].version,
+        idempotencyKey: '00000000-0000-4000-8000-000000000004'
+      })
+    ),
+    /PTO_CENTER_ACCOUNT_CONFLICT|center.*linked account/i
+  );
+
+  await store.runInTransaction((tx) => tx.syncRoster({
+    franchiseId: 2, activate: true, actorId: 'admin-2', tutors: [{
+      id: 202, franchiseId: 2, firstName: 'Dormant', lastName: 'Tutor',
+      email: 'two@example.com', isDeleted: false
+    }], discovery: discovery()
+  }));
+  const activated = await pool.query<{ canonical_profile_id: string; grants: string }>(`
+    SELECT public.pto_canonical_profile_id(center.profile_id) AS canonical_profile_id,
+      (SELECT COUNT(*)::TEXT FROM public.pto_ledger_entries ledger
+       WHERE public.pto_canonical_profile_id(ledger.profile_id) = public.pto_canonical_profile_id(center.profile_id)
+         AND ledger.event_type = 'grant') AS grants
+    FROM public.pto_profile_centers center WHERE center.franchiseid = 2 AND center.tutor_id = 202
+  `);
+  assert.deepEqual(activated.rows[0], { canonical_profile_id: rows.rows[0].profile_id, grants: '1' });
+});
+
+test('linking active profiles retains one grant and previews a negative merged balance', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  const store = createPostgresPtoStore(pool);
+  const first = { id: 1001, franchiseId: 10, firstName: 'Active', lastName: 'Merge',
+    email: 'first@example.com', isDeleted: false };
+  const second = { id: 2002, franchiseId: 20, firstName: 'Active', lastName: 'Merge',
+    email: 'second@example.com', isDeleted: false };
+  await store.syncRoster({ franchiseId: 10, activate: true, actorId: 'admin-10',
+    tutors: [first], discovery: discovery() });
+  await store.syncRoster({ franchiseId: 20, activate: true, actorId: 'admin-20',
+    tutors: [second], discovery: discovery() });
+  const profiles = await pool.query<{ profile_id: string; franchiseid: number }>(`
+    SELECT profile_id, franchiseid FROM public.pto_profile_centers
+    WHERE franchiseid IN (10, 20) ORDER BY franchiseid
+  `);
+  await store.adjustBalance({
+    profileId: profiles.rows[1].profile_id,
+    cycleStart: `${new Date().getUTCFullYear()}-01-01`,
+    deltaDays: -6,
+    reason: 'Imported usage',
+    actorId: 'admin-20',
+    actorFranchiseId: 20
+  });
+  const remote = { ...second, provider: 'timecard-center:20', crmId: '2002' };
+  await store.syncRoster({ franchiseId: 10, activate: false, actorId: 'admin-10',
+    tutors: [first], discovery: discovery([remote]) });
+  const decision = await pool.query<{ account_id: string; version: number }>(`
+    SELECT decision.account_id, decision.version
+    FROM public.pto_profile_link_decisions decision
+    JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+    WHERE decision.profile_id = $1 AND account.franchiseid = 20 AND account.tutor_id = 2002
+  `, [profiles.rows[0].profile_id]);
+  const input = {
+    profileId: profiles.rows[0].profile_id,
+    accountId: decision.rows[0].account_id,
+    actorId: 'admin-20',
+    actorFranchiseId: 20,
+    expectedVersion: decision.rows[0].version,
+    idempotencyKey: '00000000-0000-4000-8000-000000000003'
+  };
+  const preview = await (store as never as {
+    previewAccountLink(value: typeof input): Promise<{ afterBalances: Array<{ availableDays: number }>; warnings: string[] }>;
+  }).previewAccountLink(input);
+  assert.equal(preview.afterBalances[0].availableDays, -1);
+  assert.ok(preview.warnings.some((warning) => /negative/i.test(warning)));
+  const result = await store.runInTransaction((tx) =>
+    (tx as never as { linkAccount(value: typeof input): Promise<{ canonicalProfileId: string }> }).linkAccount(input)
+  );
+  const merged = await pool.query<{ centers: number[]; available_days: string; grant_count: string }>(`
+    SELECT ARRAY_AGG(center.franchiseid ORDER BY center.franchiseid) AS centers,
+      balance.available_days::TEXT, balance.grant_count::TEXT
+    FROM public.pto_profile_centers center
+    CROSS JOIN LATERAL public.pto_profile_balance($1, CURRENT_DATE) balance
+    WHERE public.pto_canonical_profile_id(center.profile_id) = $1
+    GROUP BY balance.available_days, balance.grant_count
+  `, [result.canonicalProfileId]);
+  assert.deepEqual(merged.rows[0], { centers: [10, 20], available_days: '-1.00', grant_count: '1' });
+});
+
 test('PostgreSQL store rejects center email ambiguity and audits authorized negative adjustments', { skip: !enabled }, async () => {
   assert.ok(pool);
   const store = createPostgresPtoStore(pool);

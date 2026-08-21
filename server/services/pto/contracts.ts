@@ -38,6 +38,56 @@ export interface PtoDiscoveredRosterAccount extends PtoRosterTutor {
   crmId: string;
 }
 
+export type PtoAccountLinkStatus = 'pending' | 'linked' | 'excluded';
+
+export interface PtoDiscoveredAccount {
+  id: Id;
+  provider: string;
+  crmId: string;
+  franchiseId: number;
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  displayEmail: string | null;
+  crmActive: boolean;
+  centerEnabled: boolean;
+  membershipId: Id | null;
+  status: PtoAccountLinkStatus;
+  version: number;
+  lastSeenAt: string;
+  warnings: string[];
+}
+
+export interface PtoAccountLinkBaseInput {
+  profileId: Id;
+  accountId: Id;
+  actorId: Id;
+  actorFranchiseId: number;
+  expectedVersion: number;
+}
+
+export interface PtoAccountLinkMutationInput extends PtoAccountLinkBaseInput {
+  idempotencyKey: string;
+}
+
+export interface PtoAccountLinkPreview {
+  mode: 'link' | 'unlink';
+  profileId: Id;
+  account: PtoDiscoveredAccount;
+  version: number;
+  beforeBalances: Array<{ profileId: Id; availableDays: number }>;
+  afterBalances: Array<{ profileId: Id; availableDays: number }>;
+  affectedRequestIds: Id[];
+  ambiguousAdjustmentIds: Id[];
+  warnings: string[];
+}
+
+export interface PtoAccountLinkMutationResult {
+  canonicalProfileId: Id;
+  detachedProfileId: Id | null;
+  decisionVersion: number;
+}
+
 export interface PtoDiscoveryResult {
   accounts: PtoDiscoveredRosterAccount[];
   attemptedAt: string;
@@ -237,6 +287,8 @@ export interface PtoServiceStore {
   addEmail(input: AddPtoEmailInput): Promise<PtoEmail>;
   removeEmail(input: RemovePtoEmailInput): Promise<PtoEmail>;
   adjustBalance(input: AdjustPtoBalanceInput): Promise<PtoBalanceAdjustmentResult>;
+  previewAccountLink(input: PtoAccountLinkBaseInput): Promise<PtoAccountLinkPreview>;
+  linkAccount(input: PtoAccountLinkMutationInput): Promise<PtoAccountLinkMutationResult>;
   listAudit(input: NormalizedListPtoAuditInput): Promise<PagedResult<PtoAuditEvent>>;
   runInTransaction<T>(work: (store: PtoServiceStore) => Promise<T>): Promise<T>;
 }

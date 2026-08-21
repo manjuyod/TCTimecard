@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Pool, PoolClient, QueryResultRow } from 'pg';
+import type { Pool, QueryResultRow } from 'pg';
 import type {
   AddPtoEmailInput,
   AdjustPtoBalanceInput,
@@ -22,8 +22,10 @@ import type {
   PtoRosterTutor,
   RemovePtoEmailInput
 } from './contracts';
+import { createPostgresPtoLinkStore } from './postgresLinkStore';
+import type { PtoQueryable } from './postgresTypes';
 
-type Queryable = Pick<Pool | PoolClient, 'query'>;
+type Queryable = PtoQueryable;
 
 const number = (value: unknown): number => Number(value ?? 0);
 const iso = (value: unknown): string | null => value == null ? null : new Date(value as string | Date).toISOString();
@@ -75,6 +77,7 @@ const auditRow = (row: Record<string, unknown>): PtoAuditEvent => ({
 });
 
 const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => ({
+  ...createPostgresPtoLinkStore(db),
   getProgramPolicy: async (): Promise<PtoProgramPolicy> => {
     const rows = await queryRows(db, `
       SELECT id, effective_from, entitlement_days, renewal_month, renewal_day, carryover_days

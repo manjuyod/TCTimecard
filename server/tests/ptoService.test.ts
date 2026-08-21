@@ -62,6 +62,8 @@ const createStore = (overrides: Partial<PtoServiceStore> = {}): PtoServiceStore 
     addEmail: unsupported,
     removeEmail: unsupported,
     adjustBalance: unsupported,
+    previewAccountLink: unsupported,
+    linkAccount: unsupported,
     listAudit: unsupported,
     runInTransaction: async (work) => work(store),
     ...overrides
@@ -342,4 +344,63 @@ test('alias decisions return the stored outcome instead of echoing a contradicto
   });
 
   assert.deepEqual(result, { profileId: '4', decision: 'reject' });
+});
+
+test('account link preview stays read-only', async () => {
+  let transactions = 0;
+  const expected = {
+    mode: 'link' as const,
+    profileId: '4',
+    account: { id: '9', provider: 'timecard-center:2', crmId: '200', franchiseId: 2, tutorId: 200,
+      firstName: 'Ada', lastName: 'Lovelace', displayEmail: null, crmActive: true, centerEnabled: false,
+      membershipId: null, status: 'pending' as const, version: 1,
+      lastSeenAt: '2026-08-19T20:00:00.000Z', warnings: [] },
+    version: 1,
+    beforeBalances: [{ profileId: '4', availableDays: 5 }],
+    afterBalances: [{ profileId: '4', availableDays: 5 }],
+    affectedRequestIds: [],
+    ambiguousAdjustmentIds: [],
+    warnings: []
+  };
+  const service = createPtoService({
+    store: createStore({
+      previewAccountLink: async () => expected,
+      runInTransaction: async () => {
+        transactions += 1;
+        throw new Error('preview must not transact');
+      }
+    }),
+    rosterSource: roster(async () => [])
+  });
+
+  const result = await service.previewPtoAccountLink({
+    profileId: '4', accountId: '9', actorId: 'admin-1', actorFranchiseId: 1, expectedVersion: 1
+  });
+
+  assert.equal(transactions, 0);
+  assert.deepEqual(result, expected);
+});
+
+test('account link confirmation runs exactly one transaction', async () => {
+  let transactions = 0;
+  const transactional = createStore({
+    linkAccount: async () => ({ canonicalProfileId: '4', detachedProfileId: null, decisionVersion: 2 })
+  });
+  const service = createPtoService({
+    store: createStore({
+      runInTransaction: async (work) => {
+        transactions += 1;
+        return work(transactional);
+      }
+    }),
+    rosterSource: roster(async () => [])
+  });
+
+  const result = await service.linkPtoAccount({
+    profileId: '4', accountId: '9', actorId: 'admin-1', actorFranchiseId: 1,
+    expectedVersion: 1, idempotencyKey: '00000000-0000-4000-8000-000000000001'
+  });
+
+  assert.equal(transactions, 1);
+  assert.deepEqual(result, { canonicalProfileId: '4', detachedProfileId: null, decisionVersion: 2 });
 });

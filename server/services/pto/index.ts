@@ -3,6 +3,8 @@ export * from './service';
 export * from './rosterSource';
 export * from './discoverySource';
 export * from './postgresStore';
+export * from './postgresLinkStore';
+export * from './postgresTypes';
 
 import { getMssqlPool } from '../../db/mssql';
 import { getPostgresPool } from '../../db/postgres';
