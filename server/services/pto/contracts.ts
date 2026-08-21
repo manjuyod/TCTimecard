@@ -164,8 +164,8 @@ export interface PtoProfileSummary {
 
 export interface PtoTutorProfileResult {
   profile: PtoProfileSummary | null;
-  memberships: Record<string, unknown>[];
-  emails: Record<string, unknown>[];
+  memberships: PtoMembership[];
+  emails: PtoProfileEmail[];
   balance: PtoBalance | null;
   unresolvedReason: 'center_disabled' | 'membership_missing' | 'profile_inactive' | null;
 }

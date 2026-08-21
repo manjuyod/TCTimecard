@@ -642,33 +642,40 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
   },
 
   getTutorProfile: async ({ franchiseId, tutorId }): Promise<PtoTutorProfileResult> => {
-    const membership = await queryRows(db, `
+    const tutorMembershipRows = await queryRows(db, `
       SELECT public.pto_canonical_profile_id(center.profile_id) AS profile_id
       FROM public.pto_profile_centers center
       WHERE center.franchiseid = $1 AND center.tutor_id = $2 AND center.active
     `, [franchiseId, tutorId]);
-    if (!membership[0]) {
+    if (!tutorMembershipRows[0]) {
       const status = await queryRows(db, 'SELECT enabled FROM public.pto_center_settings WHERE franchiseid = $1', [franchiseId]);
       return { profile: null, memberships: [], emails: [], balance: null,
         unresolvedReason: status[0]?.enabled ? 'membership_missing' : 'center_disabled' };
     }
-    const rows = await queryRows(db, `${profileSelect} WHERE profile.id = $1`, [membership[0].profile_id]);
+    const rows = await queryRows(db, `${profileSelect} WHERE profile.id = $1`, [tutorMembershipRows[0].profile_id]);
     const summary = rows[0] ? profile(rows[0]) : null;
     const memberships = await queryRows(db, `
-      SELECT center.id, center.franchiseid, center.tutor_id, center.active,
-        center.crm_snapshot, center.updated_at
+      SELECT center.id, public.pto_canonical_profile_id(center.profile_id) AS profile_id,
+        center.franchiseid, center.tutor_id, center.active,
+        center.crm_snapshot, center.first_seen_at, center.updated_at
       FROM public.pto_profile_centers center
       WHERE public.pto_canonical_profile_id(center.profile_id) = $1 AND center.active
       ORDER BY center.franchiseid
-    `, [membership[0].profile_id]);
+    `, [tutorMembershipRows[0].profile_id]);
     const emails = await queryRows(db, `
-      SELECT email.id, email.franchiseid, email.email, email.active,
-        email.source, email.source_membership_id
+      SELECT email.id, public.pto_canonical_profile_id(email.profile_id) AS profile_id,
+        email.franchiseid, email.email, email.active, email.source, email.source_membership_id,
+        email.created_at, email.updated_at
       FROM public.pto_profile_emails email
-      WHERE public.pto_canonical_profile_id(email.profile_id) = $1 AND email.active
-      ORDER BY email.email
-    `, [membership[0].profile_id]);
-    return { profile: summary, memberships, emails, balance: summary?.balance ?? null,
+      JOIN public.pto_profile_centers source_center
+        ON source_center.id = email.source_membership_id AND source_center.active
+      WHERE public.pto_canonical_profile_id(email.profile_id) = $1
+        AND public.pto_canonical_profile_id(source_center.profile_id) = $1
+        AND email.active
+      ORDER BY email.franchiseid, email.email
+    `, [tutorMembershipRows[0].profile_id]);
+    return { profile: summary, memberships: memberships.map(membership), emails: emails.map(profileEmail),
+      balance: summary?.balance ?? null,
       unresolvedReason: summary?.active ? null : 'profile_inactive' };
   },
 

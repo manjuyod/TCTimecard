@@ -264,20 +264,36 @@ export function TutorTimeOffPage(): JSX.Element {
           <div className="space-y-4">
           {ptoProfile?.profile ? (
             <Card>
-              <CardHeader><CardTitle>PTO contact emails</CardTitle>
-                <CardDescription>Alternate addresses can identify you on this center’s public time-off form.</CardDescription></CardHeader>
+              <CardHeader><CardTitle>Linked PTO centers</CardTitle>
+                <CardDescription>These active center accounts share the balance shown above.</CardDescription></CardHeader>
               <CardContent className="space-y-3">
-                {ptoProfile.emails.map((record) => {
-                  const email = rawText(record, 'email');
-                  const id = rawText(record, 'id');
-                  const source = rawText(record, 'source');
-                  return <div key={id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
-                    <div><p className="font-semibold text-foreground">{email}</p><p className="text-xs text-muted-foreground">{source === 'crm' ? 'CRM email' : 'Manual alternate email'}</p></div>
-                    {source === 'manual' ? <Button variant="outline" size="sm" aria-label={`Remove ${email}`}
-                      onClick={() => void removeAlternateEmail(id)} disabled={emailAction !== null}>
-                      {emailAction === id ? 'Removing...' : 'Remove'}
-                    </Button> : null}
-                  </div>;
+                <div className="rounded-lg bg-muted p-3 text-sm">
+                  <p className="font-semibold text-foreground">PTO policy</p>
+                  <p className="text-muted-foreground">
+                    {ptoProfile.policy.entitlementDays} days per cycle · Renews {ptoProfile.policy.renewalMonth}/{ptoProfile.policy.renewalDay}
+                    {' '}· {ptoProfile.policy.carryoverDays} carryover days
+                  </p>
+                </div>
+                {ptoProfile.memberships.map((membership) => {
+                  const aliases = ptoProfile.emails.filter((email) => email.sourceMembershipId === membership.id);
+                  return (
+                    <section key={membership.id} className="space-y-2 rounded-lg border p-3">
+                      <div>
+                        <h3 className="font-semibold text-foreground">Center {membership.franchiseId}</h3>
+                        <p className="text-xs text-muted-foreground">Tutor account {membership.tutorId ?? 'unassigned'}</p>
+                      </div>
+                      {aliases.map((email) => (
+                        <div key={email.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-muted/50 p-3 text-sm">
+                          <div><p className="font-semibold text-foreground">{email.email}</p>
+                            <p className="text-xs text-muted-foreground">{email.source === 'crm' ? 'CRM email' : 'Manual alternate email'}</p></div>
+                          {email.source === 'manual' ? <Button variant="outline" size="sm" aria-label={`Remove ${email.email}`}
+                            onClick={() => void removeAlternateEmail(email.id)} disabled={emailAction !== null}>
+                            {emailAction === email.id ? 'Removing...' : 'Remove'}
+                          </Button> : null}
+                        </div>
+                      ))}
+                    </section>
+                  );
                 })}
                 <div className="flex flex-wrap items-end gap-3 rounded-lg border border-dashed p-3">
                   <div className="min-w-64 flex-1 space-y-2"><Label htmlFor="alternatePtoEmail">New alternate email</Label>
@@ -489,8 +505,6 @@ export function TutorTimeOffPage(): JSX.Element {
 function BalanceValue({ label, value }: { label: string; value: number }): JSX.Element {
   return <div><p className="text-xs font-semibold text-muted-foreground">{label}</p><p className="text-lg font-semibold text-foreground">{value} days</p></div>;
 }
-
-const rawText = (record: Record<string, unknown>, key: string): string => String(record[key] ?? '');
 
 const ptoQuoteMessage = (reason: PtoQuote['reason']): string => {
   if (reason === 'insufficient_balance' || reason === 'no_balance') return 'There is not enough shared PTO for these dates.';

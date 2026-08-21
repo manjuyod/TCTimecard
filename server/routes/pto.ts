@@ -305,8 +305,8 @@ async function normalizedCharge(req: Request, res: Response, deps: PtoRouteDeps,
 
 async function tutorIdentity(deps: PtoRouteDeps, context: { franchiseId: number; tutorId: number }) {
   const result = await deps.getTutorProfile(context);
-  const membership = result.memberships.find((item) => Number(item.franchiseid ?? item.franchiseId) === context.franchiseId
-    && Number(item.tutor_id ?? item.tutorId) === context.tutorId && item.active !== false);
+  const membership = result.memberships.find((item) => item.franchiseId === context.franchiseId
+    && item.tutorId === context.tutorId && item.active);
   return result.profile && membership ? { profileId: result.profile.id, membershipId: String(membership.id) } : null;
 }
 

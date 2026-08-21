@@ -111,7 +111,12 @@ test('admin reads and enables auto clock-out for the scoped franchise', async ()
         timeOffNoticeRequired: true,
         ptoEnabled: false,
         ptoFirstActivatedAt: null,
-        ptoLastSuccessfulSyncAt: null
+        ptoLastSuccessfulSyncAt: null,
+        ptoLastSyncError: null,
+        ptoLastSuccessfulRosterSyncAt: null,
+        ptoLastRosterSyncError: null,
+        ptoLastSuccessfulDiscoveryAt: null,
+        ptoLastDiscoveryError: null
       }
     });
     const patch = await fetch(`${baseUrl}/api/admin/settings`, {
@@ -127,7 +132,12 @@ test('admin reads and enables auto clock-out for the scoped franchise', async ()
         timeOffNoticeRequired: true,
         ptoEnabled: false,
         ptoFirstActivatedAt: null,
-        ptoLastSuccessfulSyncAt: null
+        ptoLastSuccessfulSyncAt: null,
+        ptoLastSyncError: null,
+        ptoLastSuccessfulRosterSyncAt: null,
+        ptoLastRosterSyncError: null,
+        ptoLastSuccessfulDiscoveryAt: null,
+        ptoLastDiscoveryError: null
       }
     });
   });
@@ -156,7 +166,12 @@ test('admin enables Time Snap without changing auto clock-out', async () => {
         timeOffNoticeRequired: false,
         ptoEnabled: false,
         ptoFirstActivatedAt: null,
-        ptoLastSuccessfulSyncAt: null
+        ptoLastSuccessfulSyncAt: null,
+        ptoLastSyncError: null,
+        ptoLastSuccessfulRosterSyncAt: null,
+        ptoLastRosterSyncError: null,
+        ptoLastSuccessfulDiscoveryAt: null,
+        ptoLastDiscoveryError: null
       }
     });
   });
@@ -185,7 +200,12 @@ test('admin disables time-off notice without changing automatic timekeeping', as
         timeOffNoticeRequired: false,
         ptoEnabled: false,
         ptoFirstActivatedAt: null,
-        ptoLastSuccessfulSyncAt: null
+        ptoLastSuccessfulSyncAt: null,
+        ptoLastSyncError: null,
+        ptoLastSuccessfulRosterSyncAt: null,
+        ptoLastRosterSyncError: null,
+        ptoLastSuccessfulDiscoveryAt: null,
+        ptoLastDiscoveryError: null
       }
     });
   });

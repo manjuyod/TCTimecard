@@ -84,3 +84,52 @@ test('authenticated quote keeps true cross-January allocations in separate entit
     { cycleStart: '2026-01-01', days: 1 }, { cycleStart: '2027-01-01', days: 1 }
   ]);
 });
+
+test('two center identities resolve one canonical balance while dormant identities stay unresolved', async () => {
+  const balanceProfileIds: string[] = [];
+  const pool = { query: async (sql: string, params: unknown[] = []) => {
+    if (/FROM public\.pto_profile_centers center[\s\S]*pto_profile_crm_ids/i.test(sql)) {
+      const identity = `${params[0]}:${params[1]}`;
+      return ['1:101', '2:202'].includes(identity)
+        ? { rowCount: 1, rows: [{ profile_id: '10' }] }
+        : { rowCount: 0, rows: [] };
+    }
+    if (/FROM public\.pto_profile_emails email/i.test(sql)) {
+      const identity = `${params[0]}:${params[1]}`;
+      return ['1:ada.center1@example.com', '2:ada.center2@example.com'].includes(identity)
+        ? { rowCount: 1, rows: [{ profile_id: '10' }] }
+        : { rowCount: 0, rows: [] };
+    }
+    if (/JSONB_TO_RECORDSET/i.test(sql)) {
+      return { rowCount: 1, rows: [{ cycle_start: '2026-01-01', days: '1.00' }] };
+    }
+    if (/FROM public\.pto_center_settings/i.test(sql)) {
+      return { rowCount: 1, rows: [{ enabled: params[0] !== 3 }] };
+    }
+    if (/WITH policy AS/i.test(sql)) {
+      balanceProfileIds.push(String(params[0]));
+      return { rowCount: 1, rows: [balanceRow] };
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  } };
+  const store = createPtoRouteStore(pool as never);
+  const charge = { balanceDate: '2026-08-20', chargeDays: 1,
+    dayCharges: [{ date: '2026-08-21', days: 1 }] };
+
+  const authenticated = await Promise.all([
+    store.quoteAuthenticated({ franchiseId: 1, tutorId: 101, ...charge }),
+    store.quoteAuthenticated({ franchiseId: 2, tutorId: 202, ...charge })
+  ]);
+  const publicQuotes = await Promise.all([
+    store.quotePublic({ franchiseId: 1, email: 'ada.center1@example.com', ...charge }),
+    store.quotePublic({ franchiseId: 2, email: 'ada.center2@example.com', ...charge })
+  ]);
+  const dormantAuthenticated = await store.quoteAuthenticated({ franchiseId: 3, tutorId: 303, ...charge });
+  const dormantPublic = await store.quotePublic({ franchiseId: 3, email: 'ada.center3@example.com', ...charge });
+
+  assert.deepEqual(authenticated.map((result) => result.balance?.availableDays), [4, 4]);
+  assert.deepEqual(publicQuotes.map((result) => result.eligible), [true, true]);
+  assert.deepEqual(balanceProfileIds, ['10', '10', '10', '10', '10', '10']);
+  assert.equal(dormantAuthenticated.reason, 'identity_unresolved');
+  assert.equal(dormantPublic.reason, 'identity_unresolved');
+});

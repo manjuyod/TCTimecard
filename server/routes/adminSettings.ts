@@ -15,7 +15,12 @@ const withPtoStatus = async <T extends object>(franchiseId: number, settings: T)
     ...settings,
     ptoEnabled: pto.enabled,
     ptoFirstActivatedAt: pto.firstActivatedAt,
-    ptoLastSuccessfulSyncAt: pto.lastSuccessfulSyncAt
+    ptoLastSuccessfulSyncAt: pto.lastSuccessfulSyncAt,
+    ptoLastSyncError: pto.lastSyncError,
+    ptoLastSuccessfulRosterSyncAt: pto.lastSuccessfulRosterSyncAt,
+    ptoLastRosterSyncError: pto.lastRosterSyncError,
+    ptoLastSuccessfulDiscoveryAt: pto.lastSuccessfulDiscoveryAt,
+    ptoLastDiscoveryError: pto.lastDiscoveryError
   };
 };
 

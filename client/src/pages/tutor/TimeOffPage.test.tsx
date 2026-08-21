@@ -56,10 +56,19 @@ const installTimeOffFetch = (noticeRequired: boolean, options: {
       return new Response(JSON.stringify(ptoEnabled ? {
         profile: { id: '10', firstName: 'Ada', lastName: 'Lovelace', identityStatus: 'confirmed', active: true,
           balance: { grantedDays: 5, balanceDays: 4, reservedDays: 0.5, availableDays: 3.5 } },
-        memberships: [{ id: '20', franchiseid: 1, tutor_id: 123, active: true }],
+        memberships: [
+          { id: '20', profileId: '10', franchiseId: 1, tutorId: 123, active: true,
+            crmSnapshot: {}, firstSeenAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' },
+          { id: '21', profileId: '10', franchiseId: 2, tutorId: 202, active: true,
+            crmSnapshot: {}, firstSeenAt: '2026-02-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' }
+        ],
         emails: [
-          { id: '30', franchiseid: 1, email: 'ada@example.com', active: true, source: 'crm', source_membership_id: '20' },
-          { id: '31', franchiseid: 1, email: 'ada+pto@example.com', active: true, source: 'manual', source_membership_id: '20' }
+          { id: '30', profileId: '10', franchiseId: 1, email: 'ada@example.com', active: true,
+            source: 'crm', sourceMembershipId: '20', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' },
+          { id: '31', profileId: '10', franchiseId: 1, email: 'ada+pto@example.com', active: true,
+            source: 'manual', sourceMembershipId: '20', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' },
+          { id: '32', profileId: '10', franchiseId: 2, email: 'ada.center2@example.com', active: true,
+            source: 'crm', sourceMembershipId: '21', createdAt: '2026-02-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' }
         ],
         balance: {
           cycleStart: '2026-01-01', cycleEnd: '2026-12-31', renewsOn: '2027-01-01',
@@ -147,6 +156,22 @@ describe('tutor time-off policy', () => {
     expect(screen.getByText('2027-01-01: 0.5 days')).toBeInTheDocument();
     expect(submit).toBeEnabled();
     expect(calls.some((call) => call.path === '/api/pto/me/quote')).toBe(true);
+  });
+
+  it('groups active linked centers and aliases beneath one balance and one policy summary', async () => {
+    installTimeOffFetch(true, { ptoEnabled: true });
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+
+    expect(await screen.findByText('3.5 days available')).toBeInTheDocument();
+    expect(screen.getAllByText('Shared PTO balance')).toHaveLength(1);
+    expect(screen.getAllByText('PTO policy')).toHaveLength(1);
+    expect(screen.getByText('5 days per cycle · Renews 1/1 · 0 carryover days')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Center 1' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Center 2' })).toBeInTheDocument();
+    expect(screen.getByText('Tutor account 123')).toBeInTheDocument();
+    expect(screen.getByText('Tutor account 202')).toBeInTheDocument();
+    expect(screen.getByText('ada.center2@example.com')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Center 3' })).not.toBeInTheDocument();
   });
 
   it('keeps paid submission disabled when the shared balance is insufficient', async () => {

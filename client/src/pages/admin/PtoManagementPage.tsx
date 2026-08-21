@@ -171,7 +171,12 @@ export function PtoManagementPage(): JSX.Element {
         ...current,
         ptoEnabled: true,
         ptoFirstActivatedAt: current.ptoFirstActivatedAt ?? sync.lastSuccessfulSyncAt,
-        ptoLastSuccessfulSyncAt: sync.lastSuccessfulSyncAt
+        ptoLastSuccessfulSyncAt: sync.lastSuccessfulSyncAt,
+        ptoLastSyncError: sync.lastSyncError,
+        ptoLastSuccessfulRosterSyncAt: sync.lastSuccessfulRosterSyncAt,
+        ptoLastRosterSyncError: sync.lastRosterSyncError,
+        ptoLastSuccessfulDiscoveryAt: sync.lastSuccessfulDiscoveryAt,
+        ptoLastDiscoveryError: sync.lastDiscoveryError
       } : current);
       setPreviewOpen(false);
       setPreview(null);
@@ -237,7 +242,15 @@ export function PtoManagementPage(): JSX.Element {
     setError(null);
     try {
       const result = await syncPtoCenter(appliedFranchiseId);
-      setSettings((current) => current ? { ...current, ptoLastSuccessfulSyncAt: result.lastSuccessfulSyncAt } : current);
+      setSettings((current) => current ? {
+        ...current,
+        ptoLastSuccessfulSyncAt: result.lastSuccessfulSyncAt,
+        ptoLastSyncError: result.lastSyncError,
+        ptoLastSuccessfulRosterSyncAt: result.lastSuccessfulRosterSyncAt,
+        ptoLastRosterSyncError: result.lastRosterSyncError,
+        ptoLastSuccessfulDiscoveryAt: result.lastSuccessfulDiscoveryAt,
+        ptoLastDiscoveryError: result.lastDiscoveryError
+      } : current);
       await loadProgramData(appliedFranchiseId, 1, appliedSearch);
       toast.success(`Roster synced for ${result.activeTutorCount} active tutors`);
     } catch (cause) {
@@ -408,7 +421,12 @@ export function PtoManagementPage(): JSX.Element {
         ...current,
         ptoEnabled: center.enabled,
         ptoFirstActivatedAt: center.firstActivatedAt,
-        ptoLastSuccessfulSyncAt: center.lastSuccessfulSyncAt
+        ptoLastSuccessfulSyncAt: center.lastSuccessfulSyncAt,
+        ptoLastSyncError: center.lastSyncError,
+        ptoLastSuccessfulRosterSyncAt: center.lastSuccessfulRosterSyncAt,
+        ptoLastRosterSyncError: center.lastRosterSyncError,
+        ptoLastSuccessfulDiscoveryAt: center.lastSuccessfulDiscoveryAt,
+        ptoLastDiscoveryError: center.lastDiscoveryError
       } : current);
       setProfiles(null);
       setAudit(null);
@@ -481,11 +499,23 @@ export function PtoManagementPage(): JSX.Element {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-3 text-sm sm:grid-cols-2">
+          <div className="grid gap-3 text-sm sm:grid-cols-3">
             <p><span className="font-semibold">First activated:</span>{' '}
               {settings?.ptoFirstActivatedAt ? new Date(settings.ptoFirstActivatedAt).toLocaleString() : 'Never'}</p>
-            <p><span className="font-semibold">Last successful sync:</span>{' '}
-              {settings?.ptoLastSuccessfulSyncAt ? new Date(settings.ptoLastSuccessfulSyncAt).toLocaleString() : 'Never'}</p>
+            <SyncHealthCard
+              successLabel="Roster synced"
+              emptyLabel="Roster not synced"
+              failureLabel="Roster failed"
+              lastSuccessfulAt={settings?.ptoLastSuccessfulRosterSyncAt ?? null}
+              error={settings?.ptoLastRosterSyncError ?? null}
+            />
+            <SyncHealthCard
+              successLabel="Discovery synced"
+              emptyLabel="Discovery not synced"
+              failureLabel="Discovery failed"
+              lastSuccessfulAt={settings?.ptoLastSuccessfulDiscoveryAt ?? null}
+              error={settings?.ptoLastDiscoveryError ?? null}
+            />
           </div>
           <InlineError message={error} />
           {settings && !scopeCurrent ? (
@@ -729,6 +759,10 @@ export function PtoManagementPage(): JSX.Element {
                 <PreviewMetric value={preview.newMembershipCount} label="new memberships" />
                 <PreviewMetric value={preview.newProfileCount} label="new profiles" />
                 <PreviewMetric value={preview.pendingExactNameCandidateCount} label="identity matches" />
+                <PreviewMetric value={preview.discoveredAccountCount} label="discovered accounts" />
+                <PreviewMetric value={preview.linkedAccountCount} label="linked/dormant account" />
+                <PreviewMetric value={preview.excludedAccountCount} label="excluded account" />
+                <PreviewMetric value={preview.pendingReviewCount} label="pending reviews" />
               </div>
               <p className="rounded-lg bg-muted p-3 text-sm">
                 {preview.policy.entitlementDays} days per cycle, renewing {preview.policy.renewalMonth}/{preview.policy.renewalDay},
@@ -783,6 +817,25 @@ export function PtoManagementPage(): JSX.Element {
 
 function PreviewMetric({ value, label }: { value: number; label: string }): JSX.Element {
   return <p className="rounded-lg border bg-card p-3 text-sm font-semibold">{value} {label}</p>;
+}
+
+function SyncHealthCard({ successLabel, emptyLabel, failureLabel, lastSuccessfulAt, error }: {
+  successLabel: string;
+  emptyLabel: string;
+  failureLabel: string;
+  lastSuccessfulAt: string | null;
+  error: string | null;
+}): JSX.Element {
+  return (
+    <div className={`rounded-lg border p-3 ${error ? 'border-amber-300 bg-amber-50 text-amber-900' : ''}`}>
+      <p className="font-semibold">{error ? failureLabel : lastSuccessfulAt ? successLabel : emptyLabel}</p>
+      {error ? <p className="mt-1">{error}</p> : null}
+      <p className="mt-1 text-xs">
+        Last successful {successLabel.toLowerCase().replace(' synced', '')}:{' '}
+        {lastSuccessfulAt ? new Date(lastSuccessfulAt).toLocaleString() : 'Never'}
+      </p>
+    </div>
+  );
 }
 
 function DetailMetric({ label, value }: { label: string; value: string }): JSX.Element {

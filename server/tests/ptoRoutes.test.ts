@@ -14,15 +14,22 @@ afterEach(async () => {
 const profile = {
   profile: { id: '10', firstName: 'Ada', lastName: 'Lovelace', identityStatus: 'confirmed' as const, active: true,
     balance: { grantedDays: 5, balanceDays: 4, reservedDays: 1, availableDays: 3 } },
-  memberships: [{ id: '20', profileId: '10', franchiseId: 6, tutorId: 123, active: true,
-    crmSnapshot: {}, firstSeenAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }],
+  memberships: [
+    { id: '20', profileId: '10', franchiseId: 6, tutorId: 123, active: true,
+      crmSnapshot: {}, firstSeenAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+    { id: '21', profileId: '10', franchiseId: 7, tutorId: 202, active: true,
+      crmSnapshot: {}, firstSeenAt: '2026-02-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' }
+  ],
   emails: [
     { id: '30', profileId: '10', franchiseId: 6, email: 'ada@example.com', active: true,
       source: 'crm' as const, sourceMembershipId: '20', createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z' },
     { id: '31', profileId: '10', franchiseId: 6, email: 'manual@example.com', active: true,
       source: 'manual' as const, sourceMembershipId: '20', createdAt: '2026-01-01T00:00:00.000Z',
-      updatedAt: '2026-01-01T00:00:00.000Z' }
+      updatedAt: '2026-01-01T00:00:00.000Z' },
+    { id: '32', profileId: '10', franchiseId: 7, email: 'ada.center7@example.com', active: true,
+      source: 'crm' as const, sourceMembershipId: '21', createdAt: '2026-02-01T00:00:00.000Z',
+      updatedAt: '2026-02-01T00:00:00.000Z' }
   ],
   balance: { grantedDays: 5, balanceDays: 4, reservedDays: 1, availableDays: 3 },
   unresolvedReason: null
@@ -139,7 +146,10 @@ test('authenticated tutor reads the canonical profile and receives a balance-bea
   const base = await startApp(deps, { accountType: 'TUTOR', accountId: 123, franchiseId: 6 });
   const me = await fetch(`${base}/api/pto/me`);
   assert.equal(me.status, 200);
-  assert.deepEqual((await me.json() as { profile: unknown }).profile, profile.profile);
+  const meBody = await me.json() as { profile: unknown; memberships: unknown[]; emails: unknown[] };
+  assert.deepEqual(meBody.profile, profile.profile);
+  assert.deepEqual(meBody.memberships, profile.memberships);
+  assert.deepEqual(meBody.emails, profile.emails);
   const response = await fetch(`${base}/api/pto/me/quote`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ startDate: '2026-08-17', endDate: '2026-08-17', partialDay: false })

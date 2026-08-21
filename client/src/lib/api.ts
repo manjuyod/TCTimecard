@@ -154,6 +154,11 @@ export interface FranchiseSettings {
   ptoEnabled: boolean;
   ptoFirstActivatedAt: string | null;
   ptoLastSuccessfulSyncAt: string | null;
+  ptoLastSyncError: string | null;
+  ptoLastSuccessfulRosterSyncAt: string | null;
+  ptoLastRosterSyncError: string | null;
+  ptoLastSuccessfulDiscoveryAt: string | null;
+  ptoLastDiscoveryError: string | null;
 }
 
 export type PtoEligibilityReason =
@@ -347,8 +352,8 @@ export interface PtoEmail {
 
 export interface TutorPtoProfile {
   profile: PtoProfileSummary | null;
-  memberships: PtoRawRecord[];
-  emails: PtoRawRecord[];
+  memberships: PtoMembership[];
+  emails: PtoProfileEmail[];
   balance: PtoBalanceSummary | null;
   unresolvedReason: 'center_disabled' | 'membership_missing' | 'profile_inactive' | null;
   policy: PtoProgramPolicy;
