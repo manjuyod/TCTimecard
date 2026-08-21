@@ -262,7 +262,8 @@ test('admin PTO routes enforce selected center scope and expose every lifecycle 
     ['POST', '/api/pto/admin/profiles/10/memberships/20/detach', { franchiseId: 77 }],
     ['POST', '/api/pto/admin/profiles/10/emails', { franchiseId: 77, membershipId: 20, email: 'x@example.com' }],
     ['DELETE', '/api/pto/admin/profiles/10/emails/31?franchiseId=77'],
-    ['POST', '/api/pto/admin/profiles/10/adjustments', { franchiseId: 77, cycleStart: '2026-01-01', deltaDays: 0.5, reason: 'Correction' }],
+    ['POST', '/api/pto/admin/profiles/10/adjustments', { franchiseId: 77, membershipId: 20,
+      cycleStart: '2026-01-01', deltaDays: 0.5, reason: 'Correction' }],
     ['GET', '/api/pto/admin/audit?franchiseId=77']
   ];
   for (const [method, path, body] of requests) {
@@ -338,9 +339,9 @@ test('invalid adjustment dates and deltas are rejected before the balance servic
   deps.adjustBalance = async () => { calls += 1; return { ledgerEntryId: '40', availableDays: 3.5 }; };
   const base = await startApp(deps, { accountType: 'ADMIN', accountId: 900, franchiseId: 9 });
   for (const body of [
-    { cycleStart: '2026-13-40', deltaDays: 0.5, reason: 'Correction' },
-    { cycleStart: '2026-01-01', deltaDays: 0, reason: 'Correction' },
-    { cycleStart: '2026-01-01', deltaDays: 0.25, reason: 'Correction' }
+    { membershipId: 20, cycleStart: '2026-13-40', deltaDays: 0.5, reason: 'Correction' },
+    { membershipId: 20, cycleStart: '2026-01-01', deltaDays: 0, reason: 'Correction' },
+    { membershipId: 20, cycleStart: '2026-01-01', deltaDays: 0.25, reason: 'Correction' }
   ]) {
     const response = await fetch(`${base}/api/pto/admin/profiles/10/adjustments`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)

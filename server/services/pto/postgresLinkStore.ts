@@ -1,8 +1,10 @@
 import type {
+  AssignPtoAdjustmentProvenanceInput,
   PtoAccountLinkBaseInput,
   PtoAccountLinkMutationInput,
   PtoAccountLinkMutationResult,
   PtoAccountLinkPreview,
+  PtoAdjustmentProvenanceResult,
   PtoDiscoveredAccount
 } from './contracts';
 import type { PtoQueryable } from './postgresTypes';
@@ -147,5 +149,126 @@ export const createPostgresPtoLinkStore = (db: PtoQueryable) => ({
       detachedProfileId: value.detachedProfileId == null ? null : String(value.detachedProfileId),
       decisionVersion: numeric(value.decisionVersion)
     };
+  },
+
+  previewAccountUnlink: async (input: PtoAccountLinkBaseInput): Promise<PtoAccountLinkPreview> => {
+    const { account, canonicalProfileId } = await getPreviewAccount(db, input);
+    if (account.status !== 'linked') throw new Error('PTO_LINK_STALE: account is not linked');
+    const balanceResult = await db.query(`
+      SELECT granted_days, available_days
+      FROM public.pto_profile_balance($1, CURRENT_DATE)
+    `, [canonicalProfileId]);
+    const grantedDays = numeric(balanceResult.rows[0]?.granted_days);
+    const availableDays = numeric(balanceResult.rows[0]?.available_days);
+    if (!account.membershipId) {
+      return {
+        mode: 'unlink',
+        profileId: canonicalProfileId,
+        account,
+        version: account.version,
+        beforeBalances: [{ profileId: canonicalProfileId, availableDays }],
+        afterBalances: [{ profileId: canonicalProfileId, availableDays }],
+        affectedRequestIds: [],
+        ambiguousAdjustmentIds: [],
+        warnings: [...account.warnings]
+      };
+    }
+
+    const [requests, ambiguous, activity] = await Promise.all([
+      db.query(`
+        SELECT DISTINCT request.id
+        FROM public.time_off_requests request
+        JOIN public.pto_request_allocations allocation ON allocation.request_id = request.id
+        JOIN public.pto_entitlement_cycles cycle ON cycle.id = allocation.cycle_id
+        WHERE request.franchiseid = $1
+          AND public.pto_canonical_profile_id(cycle.profile_id) = $2
+        ORDER BY request.id
+      `, [account.franchiseId, canonicalProfileId]),
+      db.query(`
+        SELECT ledger.id
+        FROM public.pto_ledger_entries ledger
+        WHERE public.pto_canonical_profile_id(ledger.profile_id) = $1
+          AND ledger.event_type = 'adjustment'
+          AND ledger.source_membership_id IS NULL
+        ORDER BY ledger.id
+      `, [canonicalProfileId]),
+      db.query(`
+        WITH current_cycles AS (
+          SELECT cycle.id
+          FROM public.pto_entitlement_cycles cycle
+          JOIN public.pto_policies policy ON policy.id = cycle.policy_id
+          WHERE public.pto_canonical_profile_id(cycle.profile_id) = $2
+            AND cycle.starts_on = public.pto_cycle_start(
+              CURRENT_DATE, policy.renewal_month, policy.renewal_day
+            )
+        ), allocation_activity AS (
+          SELECT
+            COALESCE(SUM(allocation.charged_days) FILTER (WHERE allocation.state = 'reserved'), 0) AS reserved_days,
+            COALESCE(SUM(allocation.charged_days) FILTER (WHERE allocation.state = 'consumed'), 0) AS consumed_days
+          FROM public.pto_request_allocations allocation
+          JOIN current_cycles cycle ON cycle.id = allocation.cycle_id
+          JOIN public.time_off_requests request ON request.id = allocation.request_id
+          WHERE request.franchiseid = $1
+        ), adjustment_activity AS (
+          SELECT COALESCE(SUM(ledger.balance_delta), 0) AS adjustment_days
+          FROM public.pto_ledger_entries ledger
+          JOIN current_cycles cycle ON cycle.id = ledger.cycle_id
+          WHERE ledger.event_type = 'adjustment' AND ledger.source_membership_id = $3
+        )
+        SELECT allocation_activity.reserved_days, allocation_activity.consumed_days,
+          adjustment_activity.adjustment_days
+        FROM allocation_activity CROSS JOIN adjustment_activity
+      `, [account.franchiseId, canonicalProfileId, account.membershipId])
+    ]);
+    const reservedDays = numeric(activity.rows[0]?.reserved_days);
+    const consumedDays = numeric(activity.rows[0]?.consumed_days);
+    const adjustmentDays = numeric(activity.rows[0]?.adjustment_days);
+    const remainingAvailableDays = availableDays + reservedDays + consumedDays - adjustmentDays;
+    const detachedAvailableDays = grantedDays + adjustmentDays - reservedDays - consumedDays;
+    const ambiguousAdjustmentIds = ambiguous.rows.map((row) => String(row.id));
+    const warnings = [...account.warnings];
+    if (ambiguousAdjustmentIds.length) {
+      warnings.push('Legacy adjustments require membership reconciliation before unlinking');
+    }
+    return {
+      mode: 'unlink',
+      profileId: canonicalProfileId,
+      account,
+      version: account.version,
+      beforeBalances: [{ profileId: canonicalProfileId, availableDays }],
+      afterBalances: [
+        { profileId: canonicalProfileId, availableDays: remainingAvailableDays },
+        { profileId: `detached:${account.id}`, availableDays: detachedAvailableDays }
+      ],
+      affectedRequestIds: requests.rows.map((row) => String(row.id)),
+      ambiguousAdjustmentIds,
+      warnings
+    };
+  },
+
+  unlinkAccount: async (input: PtoAccountLinkMutationInput): Promise<PtoAccountLinkMutationResult> => {
+    const result = await db.query(`
+      SELECT public.pto_admin_unlink_account($1, $2, $3, $4, $5, $6) AS result
+    `, [input.profileId, input.accountId, input.actorId, input.actorFranchiseId,
+      input.expectedVersion, input.idempotencyKey]);
+    const value = result.rows[0]?.result as Record<string, unknown> | undefined;
+    if (!value) throw new Error('PTO account unlink did not return a result');
+    return {
+      canonicalProfileId: String(value.canonicalProfileId),
+      detachedProfileId: value.detachedProfileId == null ? null : String(value.detachedProfileId),
+      decisionVersion: numeric(value.decisionVersion)
+    };
+  },
+
+  assignAdjustmentProvenance: async (
+    input: AssignPtoAdjustmentProvenanceInput
+  ): Promise<PtoAdjustmentProvenanceResult> => {
+    const result = await db.query(`
+      SELECT public.pto_admin_assign_adjustment_provenance($1, $2, $3, $4, $5, $6) AS result
+    `, [input.profileId, input.ledgerEntryId, input.membershipId, input.actorId,
+      input.actorFranchiseId, input.idempotencyKey]);
+    const value = result.rows[0]?.result as Record<string, unknown> | undefined;
+    if (!value) throw new Error('PTO adjustment provenance did not return a result');
+    return { ledgerEntryId: String(value.ledgerEntryId), membershipId: String(value.membershipId) };
   }
 });

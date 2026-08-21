@@ -64,6 +64,9 @@ const createStore = (overrides: Partial<PtoServiceStore> = {}): PtoServiceStore 
     adjustBalance: unsupported,
     previewAccountLink: unsupported,
     linkAccount: unsupported,
+    previewAccountUnlink: unsupported,
+    unlinkAccount: unsupported,
+    assignAdjustmentProvenance: unsupported,
     listAudit: unsupported,
     runInTransaction: async (work) => work(store),
     ...overrides
@@ -304,10 +307,12 @@ test('balance adjustments require a reason and nonzero half-day increments befor
     rosterSource: roster(async () => [])
   });
   const base = {
-    profileId: '4', cycleStart: '2026-01-01', reason: 'Correction', actorId: 'admin-1', actorFranchiseId: 77
+    profileId: '4', membershipId: '8', cycleStart: '2026-01-01', reason: 'Correction',
+    actorId: 'admin-1', actorFranchiseId: 77
   };
 
   await assert.rejects(service.adjustPtoBalance({ ...base, deltaDays: 0 }), /nonzero/i);
+  await assert.rejects(service.adjustPtoBalance({ ...base, membershipId: '', deltaDays: 0.5 }), /source membership/i);
   await assert.rejects(service.adjustPtoBalance({ ...base, deltaDays: 0.25 }), /0.5/i);
   await assert.rejects(service.adjustPtoBalance({ ...base, deltaDays: 0.5, reason: ' ' }), /reason/i);
   assert.equal(writes, 0);
@@ -403,4 +408,70 @@ test('account link confirmation runs exactly one transaction', async () => {
 
   assert.equal(transactions, 1);
   assert.deepEqual(result, { canonicalProfileId: '4', detachedProfileId: null, decisionVersion: 2 });
+});
+
+test('account unlink preview is read-only and confirmation is transactional', async () => {
+  let transactions = 0;
+  const preview = {
+    mode: 'unlink' as const,
+    profileId: '4',
+    account: { id: '9', provider: 'timecard-center:2', crmId: '200', franchiseId: 2, tutorId: 200,
+      firstName: 'Ada', lastName: 'Lovelace', displayEmail: null, crmActive: true, centerEnabled: true,
+      membershipId: '8', status: 'linked' as const, version: 2,
+      lastSeenAt: '2026-08-19T20:00:00.000Z', warnings: [] },
+    version: 2,
+    beforeBalances: [{ profileId: '4', availableDays: 5 }],
+    afterBalances: [{ profileId: '4', availableDays: 5 }, { profileId: 'detached:9', availableDays: 5 }],
+    affectedRequestIds: [],
+    ambiguousAdjustmentIds: [],
+    warnings: []
+  };
+  const transactional = createStore({
+    unlinkAccount: async () => ({ canonicalProfileId: '4', detachedProfileId: '5', decisionVersion: 3 })
+  });
+  const service = createPtoService({
+    store: createStore({
+      previewAccountUnlink: async () => preview,
+      runInTransaction: async (work) => {
+        transactions += 1;
+        return work(transactional);
+      }
+    }),
+    rosterSource: roster(async () => [])
+  });
+  const base = { profileId: '4', accountId: '9', actorId: 'admin-1', actorFranchiseId: 1, expectedVersion: 2 };
+
+  assert.deepEqual(await service.previewPtoAccountUnlink(base), preview);
+  assert.equal(transactions, 0);
+  assert.deepEqual(await service.unlinkPtoAccount({ ...base,
+    idempotencyKey: '00000000-0000-4000-8000-000000000020' }),
+  { canonicalProfileId: '4', detachedProfileId: '5', decisionVersion: 3 });
+  assert.equal(transactions, 1);
+});
+
+test('adjustment provenance assignment runs in a transaction', async () => {
+  let transactions = 0;
+  const transactional = createStore({
+    assignAdjustmentProvenance: async (input) => ({
+      ledgerEntryId: input.ledgerEntryId,
+      membershipId: input.membershipId
+    })
+  });
+  const service = createPtoService({
+    store: createStore({
+      runInTransaction: async (work) => {
+        transactions += 1;
+        return work(transactional);
+      }
+    }),
+    rosterSource: roster(async () => [])
+  });
+
+  const result = await service.assignPtoAdjustmentProvenance({
+    profileId: '4', ledgerEntryId: '12', membershipId: '8', actorId: 'admin-1', actorFranchiseId: 1,
+    idempotencyKey: '00000000-0000-4000-8000-000000000021'
+  });
+
+  assert.equal(transactions, 1);
+  assert.deepEqual(result, { ledgerEntryId: '12', membershipId: '8' });
 });

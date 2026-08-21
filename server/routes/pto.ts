@@ -189,12 +189,14 @@ export function createPtoRouter(overrides: Partial<PtoRouteDeps> = {}) {
   }));
   router.post('/pto/admin/profiles/:profileId/adjustments', requireAdmin, admin(async (req, res, franchiseId) => {
     const profileId = requiredId(res, req.params.profileId, 'profile'); if (!profileId) return;
+    const membershipId = requiredId(res, req.body?.membershipId, 'membership'); if (!membershipId) return;
     const cycleStart = text(req.body?.cycleStart); const deltaDays = req.body?.deltaDays; const reason = text(req.body?.reason);
     if (!calendarDate(cycleStart) || typeof deltaDays !== 'number' || !Number.isFinite(deltaDays)
       || deltaDays === 0 || Math.abs(deltaDays * 2 - Math.round(deltaDays * 2)) > Number.EPSILON || !reason) {
       return res.status(400).json({ error: 'Valid cycleStart, half-day deltaDays, and reason are required' });
     }
-    return res.json(await deps.adjustBalance({ profileId, cycleStart, deltaDays, reason, actorId: actor(req), actorFranchiseId: franchiseId }));
+    return res.json(await deps.adjustBalance({ profileId, membershipId, cycleStart, deltaDays, reason,
+      actorId: actor(req), actorFranchiseId: franchiseId }));
   }));
   router.get('/pto/admin/audit', requireAdmin, admin(async (req, res, franchiseId) => {
     const profileId = req.query.profileId == null ? undefined : id(req.query.profileId);

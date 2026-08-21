@@ -1,6 +1,7 @@
 import type {
   AddPtoEmailInput,
   AdjustPtoBalanceInput,
+  AssignPtoAdjustmentProvenanceInput,
   DetachPtoMembershipInput,
   Id,
   ListAdminPtoProfilesInput,
@@ -87,7 +88,15 @@ export const createPtoService = (dependencies: {
     previewPtoAccountLink: (input: PtoAccountLinkBaseInput) => store.previewAccountLink(input),
     linkPtoAccount: (input: PtoAccountLinkMutationInput) =>
       store.runInTransaction((tx) => tx.linkAccount(input)),
+    previewPtoAccountUnlink: (input: PtoAccountLinkBaseInput) => store.previewAccountUnlink(input),
+    unlinkPtoAccount: (input: PtoAccountLinkMutationInput) =>
+      store.runInTransaction((tx) => tx.unlinkAccount(input)),
+    assignPtoAdjustmentProvenance: (input: AssignPtoAdjustmentProvenanceInput) =>
+      store.runInTransaction((tx) => tx.assignAdjustmentProvenance(input)),
     adjustPtoBalance: async (input: AdjustPtoBalanceInput) => {
+      if (!input.membershipId) {
+        throw new RangeError('A source membership is required for PTO adjustments');
+      }
       if (!Number.isFinite(input.deltaDays) || input.deltaDays === 0) {
         throw new RangeError('PTO adjustment must be nonzero');
       }

@@ -736,6 +736,14 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     const canonical = await queryRows(db,
       'SELECT public.pto_canonical_profile_id($1) AS id', [input.profileId]);
     const canonicalProfileId = String(canonical[0].id);
+    const memberships = await queryRows(db, `
+      SELECT id FROM public.pto_profile_centers
+      WHERE id = $1 AND active
+        AND public.pto_canonical_profile_id(profile_id) = $2
+    `, [input.membershipId, canonicalProfileId]);
+    if (!memberships[0]) {
+      throw new Error('PTO adjustment source membership is not active on this profile');
+    }
     const beforeBalance = await queryRows(db,
       'SELECT * FROM public.pto_profile_balance($1, $2::DATE)', [canonicalProfileId, input.cycleStart]);
     let cycles = await queryRows(db, `SELECT id FROM public.pto_entitlement_cycles
@@ -743,10 +751,11 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     if (!cycles[0]) cycles = await queryRows(db,
       'SELECT public.pto_get_or_create_cycle($1, $2::DATE) AS id', [canonicalProfileId, input.cycleStart]);
     const entry = await queryRows(db, `INSERT INTO public.pto_ledger_entries
-      (profile_id, cycle_id, event_type, balance_delta, idempotency_key, metadata)
+      (profile_id, cycle_id, event_type, balance_delta, idempotency_key, metadata, source_membership_id)
       VALUES ($1, $2, 'adjustment', $3, $4,
-        JSONB_BUILD_OBJECT('reason', $5::TEXT, 'actorId', $6::TEXT)) RETURNING id`,
-      [canonicalProfileId, cycles[0].id, input.deltaDays, `adjustment:${randomUUID()}`, input.reason, input.actorId]);
+        JSONB_BUILD_OBJECT('reason', $5::TEXT, 'actorId', $6::TEXT), $7) RETURNING id`,
+      [canonicalProfileId, cycles[0].id, input.deltaDays, `adjustment:${randomUUID()}`,
+        input.reason, input.actorId, input.membershipId]);
     const balances = await queryRows(db,
       'SELECT * FROM public.pto_profile_balance($1, $2::DATE)', [canonicalProfileId, input.cycleStart]);
     await db.query(`INSERT INTO public.pto_audit_events
@@ -755,7 +764,7 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       [canonicalProfileId, input.actorFranchiseId, input.actorId,
         { cycleStart: input.cycleStart, balance: beforeBalance[0] },
         { cycleStart: input.cycleStart, balance: balances[0], deltaDays: input.deltaDays,
-          reason: input.reason, ledgerEntryId: entry[0].id },
+          reason: input.reason, ledgerEntryId: entry[0].id, membershipId: input.membershipId },
         `balance-adjust:${entry[0].id}`]);
     return { ledgerEntryId: String(entry[0].id), availableDays: number(balances[0].available_days) };
   },

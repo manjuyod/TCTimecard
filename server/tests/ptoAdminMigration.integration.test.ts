@@ -494,12 +494,13 @@ test('linking active profiles retains one grant and previews a negative merged b
     tutors: [first], discovery: discovery() });
   await store.syncRoster({ franchiseId: 20, activate: true, actorId: 'admin-20',
     tutors: [second], discovery: discovery() });
-  const profiles = await pool.query<{ profile_id: string; franchiseid: number }>(`
-    SELECT profile_id, franchiseid FROM public.pto_profile_centers
+  const profiles = await pool.query<{ profile_id: string; franchiseid: number; membership_id: string }>(`
+    SELECT profile_id, franchiseid, id AS membership_id FROM public.pto_profile_centers
     WHERE franchiseid IN (10, 20) ORDER BY franchiseid
   `);
   await store.adjustBalance({
     profileId: profiles.rows[1].profile_id,
+    membershipId: profiles.rows[1].membership_id,
     cycleStart: `${new Date().getUTCFullYear()}-01-01`,
     deltaDays: -6,
     reason: 'Imported usage',
@@ -542,6 +543,262 @@ test('linking active profiles retains one grant and previews a negative merged b
   assert.deepEqual(merged.rows[0], { centers: [10, 20], available_days: '-1.00', grant_count: '1' });
 });
 
+test('adjustment provenance is required for new writes and reconciles legacy split blockers', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  const store = createPostgresPtoStore(pool);
+  const tutor = { id: 3030, franchiseId: 30, firstName: 'Provenance', lastName: 'Tutor',
+    email: 'provenance@example.com', isDeleted: false };
+  await store.syncRoster({ franchiseId: 30, activate: true, actorId: 'admin-30',
+    tutors: [tutor], discovery: discovery() });
+  const membership = await pool.query<{ id: string; profile_id: string }>(`
+    SELECT id, profile_id FROM public.pto_profile_centers WHERE franchiseid = 30 AND tutor_id = 3030
+  `);
+  const cycleStart = `${new Date().getUTCFullYear()}-01-01`;
+  const adjustmentInput = {
+    profileId: membership.rows[0].profile_id,
+    membershipId: membership.rows[0].id,
+    cycleStart,
+    deltaDays: 0.5,
+    reason: 'Center correction',
+    actorId: 'admin-30',
+    actorFranchiseId: 30
+  };
+  const adjustment = await (store.adjustBalance as never as {
+    (input: typeof adjustmentInput): Promise<{ ledgerEntryId: string }>;
+  })(adjustmentInput);
+  const attributed = await pool.query<{ source_membership_id: string | null }>(`
+    SELECT source_membership_id FROM public.pto_ledger_entries WHERE id = $1
+  `, [adjustment.ledgerEntryId]);
+  assert.equal(attributed.rows[0].source_membership_id, membership.rows[0].id);
+
+  const cycle = await pool.query<{ id: string }>(`
+    SELECT id FROM public.pto_entitlement_cycles WHERE profile_id = $1 AND starts_on = $2::DATE
+  `, [membership.rows[0].profile_id, cycleStart]);
+  const legacy = await pool.query<{ id: string }>(`
+    INSERT INTO public.pto_ledger_entries
+      (profile_id, cycle_id, event_type, balance_delta, idempotency_key, metadata)
+    VALUES ($1, $2, 'adjustment', -0.5, 'legacy:ambiguous-adjustment', '{"reason":"legacy import"}')
+    RETURNING id
+  `, [membership.rows[0].profile_id, cycle.rows[0].id]);
+  const accountDecision = await pool.query<{ account_id: string; version: number }>(`
+    SELECT decision.account_id, decision.version
+    FROM public.pto_profile_link_decisions decision
+    JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+    WHERE decision.profile_id = $1 AND account.franchiseid = 30 AND account.tutor_id = 3030
+  `, [membership.rows[0].profile_id]);
+  const unlinkInput = {
+    profileId: membership.rows[0].profile_id,
+    accountId: accountDecision.rows[0].account_id,
+    actorId: 'admin-30',
+    actorFranchiseId: 30,
+    expectedVersion: accountDecision.rows[0].version,
+    idempotencyKey: '00000000-0000-4000-8000-000000000010'
+  };
+  const preview = await (store as never as {
+    previewAccountUnlink(value: typeof unlinkInput): Promise<{ ambiguousAdjustmentIds: string[] }>;
+  }).previewAccountUnlink(unlinkInput);
+  assert.deepEqual(preview.ambiguousAdjustmentIds, [legacy.rows[0].id]);
+  await assert.rejects(
+    store.runInTransaction((tx) =>
+      (tx as never as { unlinkAccount(value: typeof unlinkInput): Promise<unknown> }).unlinkAccount(unlinkInput)
+    ),
+    /PTO_SPLIT_RECONCILIATION_REQUIRED|reconciliation/i
+  );
+
+  const provenanceInput = {
+    profileId: membership.rows[0].profile_id,
+    ledgerEntryId: legacy.rows[0].id,
+    membershipId: membership.rows[0].id,
+    actorId: 'admin-30',
+    actorFranchiseId: 30,
+    idempotencyKey: '00000000-0000-4000-8000-000000000011'
+  };
+  await assert.rejects(
+    store.runInTransaction((tx) =>
+      (tx as never as { assignAdjustmentProvenance(value: typeof provenanceInput): Promise<unknown> })
+        .assignAdjustmentProvenance({ ...provenanceInput, actorFranchiseId: 99 })
+    ),
+    /not authorized|PTO_LINK_FORBIDDEN/i
+  );
+  await store.runInTransaction((tx) =>
+    (tx as never as { assignAdjustmentProvenance(value: typeof provenanceInput): Promise<unknown> })
+      .assignAdjustmentProvenance(provenanceInput)
+  );
+  const reconciled = await pool.query<{ source_membership_id: string | null }>(`
+    SELECT source_membership_id FROM public.pto_ledger_entries WHERE id = $1
+  `, [legacy.rows[0].id]);
+  assert.equal(reconciled.rows[0].source_membership_id, membership.rows[0].id);
+});
+
+test('turning off a dormant linked account excludes it without creating a profile or grant', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  const store = createPostgresPtoStore(pool);
+  const local = { id: 4101, franchiseId: 41, firstName: 'Dormant', lastName: 'Optout',
+    email: 'local@example.com', isDeleted: false };
+  const remote = { id: 4202, franchiseId: 42, firstName: 'Dormant', lastName: 'Optout',
+    email: 'remote@example.com', isDeleted: false, provider: 'timecard-center:42', crmId: '4202' };
+  await store.syncRoster({ franchiseId: 41, activate: true, actorId: 'admin-41',
+    tutors: [local], discovery: discovery([remote]) });
+  const candidate = await pool.query<{ profile_id: string; account_id: string; version: number }>(`
+    SELECT decision.profile_id, decision.account_id, decision.version
+    FROM public.pto_profile_link_decisions decision
+    JOIN public.pto_discovered_tutor_accounts account ON account.id = decision.account_id
+    WHERE account.franchiseid = 42 AND account.tutor_id = 4202
+  `);
+  const linkInput = { profileId: candidate.rows[0].profile_id, accountId: candidate.rows[0].account_id,
+    actorId: 'admin-41', actorFranchiseId: 41, expectedVersion: candidate.rows[0].version,
+    idempotencyKey: '00000000-0000-4000-8000-000000000012' };
+  const linked = await store.runInTransaction((tx) => tx.linkAccount(linkInput));
+  const unlinkInput = { ...linkInput, expectedVersion: linked.decisionVersion,
+    idempotencyKey: '00000000-0000-4000-8000-000000000013' };
+  const preview = await (store as never as {
+    previewAccountUnlink(value: typeof unlinkInput): Promise<{ mode: string; affectedRequestIds: string[] }>;
+  }).previewAccountUnlink(unlinkInput);
+  assert.equal(preview.mode, 'unlink');
+  assert.deepEqual(preview.affectedRequestIds, []);
+  const result = await store.runInTransaction((tx) =>
+    (tx as never as { unlinkAccount(value: typeof unlinkInput): Promise<{ detachedProfileId: string | null; decisionVersion: number }> })
+      .unlinkAccount(unlinkInput)
+  );
+  assert.equal(result.detachedProfileId, null);
+  assert.equal(result.decisionVersion, 3);
+  const durable = await pool.query<{ status: string; version: number; identities: string; profiles: string }>(`
+    SELECT decision.status, decision.version,
+      (SELECT COUNT(*)::TEXT FROM public.pto_profile_crm_ids
+       WHERE provider = 'timecard-center:42' AND crm_id = '4202') AS identities,
+      (SELECT COUNT(*)::TEXT FROM public.pto_profiles) AS profiles
+    FROM public.pto_profile_link_decisions decision WHERE decision.account_id = $1
+  `, [candidate.rows[0].account_id]);
+  assert.deepEqual(durable.rows[0], { status: 'excluded', version: 3, identities: '0', profiles: '1' });
+});
+
+test('three-center account opt-out moves attributable activity with compensating history', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  const store = createPostgresPtoStore(pool);
+  await pool.query(`INSERT INTO public.pto_center_settings (franchiseid, enabled)
+    VALUES (1, TRUE), (2, TRUE), (3, TRUE)`);
+  const profile = await pool.query<{ id: string }>(`
+    INSERT INTO public.pto_profiles (first_name, last_name, identity_status)
+    VALUES ('Three', 'Center', 'confirmed') RETURNING id
+  `);
+  const profileId = profile.rows[0].id;
+  const memberships = await pool.query<{ id: string; franchiseid: number }>(`
+    INSERT INTO public.pto_profile_centers (profile_id, franchiseid, tutor_id, active)
+    VALUES ($1, 1, 100, TRUE), ($1, 2, 200, TRUE), ($1, 3, 300, TRUE)
+    RETURNING id, franchiseid
+  `, [profileId]);
+  const thirdMembership = memberships.rows.find((item) => item.franchiseid === 3);
+  assert.ok(thirdMembership);
+  await pool.query(`INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id)
+    VALUES ($1, 'timecard-center:1', '100'), ($1, 'timecard-center:2', '200'),
+      ($1, 'timecard-center:3', '300')`, [profileId]);
+  const accounts = await pool.query<{ id: string; franchiseid: number }>(`
+    INSERT INTO public.pto_discovered_tutor_accounts
+      (provider, crm_id, franchiseid, tutor_id, normalized_first_name, normalized_last_name, crm_snapshot)
+    VALUES
+      ('timecard-center:1', '100', 1, 100, 'three', 'center', '{"firstName":"Three","lastName":"Center"}'),
+      ('timecard-center:2', '200', 2, 200, 'three', 'center', '{"firstName":"Three","lastName":"Center"}'),
+      ('timecard-center:3', '300', 3, 300, 'three', 'center', '{"firstName":"Three","lastName":"Center"}')
+    RETURNING id, franchiseid
+  `);
+  await pool.query(`INSERT INTO public.pto_profile_link_decisions
+    (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
+    SELECT $1, id, 'linked', 'seed', franchiseid, NOW()
+    FROM public.pto_discovered_tutor_accounts`, [profileId]);
+  await pool.query(`INSERT INTO public.pto_profile_emails
+    (profile_id, franchiseid, email, source, source_membership_id)
+    VALUES ($1, 3, 'three@example.com', 'manual', $2)`, [profileId, thirdMembership.id]);
+  const cycle = await pool.query<{ id: string }>(
+    'SELECT public.pto_get_or_create_cycle($1, CURRENT_DATE) AS id', [profileId]
+  );
+  const requests = await pool.query<{ id: string }>(`
+    INSERT INTO public.time_off_requests
+      (franchiseid, tutorid, first_name, last_name, email, start_at, end_at, type, status, partial_day, public_metadata)
+    VALUES
+      (3, 300, 'Three', 'Center', 'three@example.com', NOW(), NOW(), 'pto', 'draft', FALSE, '{}'),
+      (3, 300, 'Three', 'Center', 'three@example.com', NOW(), NOW(), 'pto', 'draft', FALSE, '{}')
+    RETURNING id
+  `);
+  const allocations = await pool.query<{ id: string; request_id: string; state: string }>(`
+    INSERT INTO public.pto_request_allocations (request_id, cycle_id, charged_days, state)
+    VALUES ($1, $3, 0.5, 'reserved'), ($2, $3, 0.5, 'consumed')
+    RETURNING id, request_id, state
+  `, [requests.rows[0].id, requests.rows[1].id, cycle.rows[0].id]);
+  const reserved = allocations.rows.find((item) => item.state === 'reserved');
+  const consumed = allocations.rows.find((item) => item.state === 'consumed');
+  assert.ok(reserved);
+  assert.ok(consumed);
+  await pool.query(`
+    INSERT INTO public.pto_ledger_entries
+      (profile_id, cycle_id, request_id, allocation_id, event_type, balance_delta,
+       reserved_delta, idempotency_key, metadata, source_membership_id)
+    VALUES
+      ($1, $2, $3, $4, 'reserve', 0, 0.5, 'seed:reserve', '{}', NULL),
+      ($1, $2, $5, $6, 'reserve', 0, 0.5, 'seed:consume-reserve', '{}', NULL),
+      ($1, $2, $5, $6, 'consume', -0.5, -0.5, 'seed:consume', '{}', NULL),
+      ($1, $2, NULL, NULL, 'adjustment', 1, 0, 'seed:center3-adjustment',
+       '{"reason":"center correction"}', $7)
+  `, [profileId, cycle.rows[0].id, reserved.request_id, reserved.id,
+    consumed.request_id, consumed.id, thirdMembership.id]);
+  const beforeCounts = await pool.query<{ ledger: string; audit: string }>(`
+    SELECT (SELECT COUNT(*)::TEXT FROM public.pto_ledger_entries) AS ledger,
+      (SELECT COUNT(*)::TEXT FROM public.pto_audit_events) AS audit
+  `);
+  const thirdAccount = accounts.rows.find((item) => item.franchiseid === 3);
+  assert.ok(thirdAccount);
+  const input = { profileId, accountId: thirdAccount.id, actorId: 'admin-2', actorFranchiseId: 2,
+    expectedVersion: 1, idempotencyKey: '00000000-0000-4000-8000-000000000014' };
+  const preview = await (store as never as {
+    previewAccountUnlink(value: typeof input): Promise<{
+      affectedRequestIds: string[]; ambiguousAdjustmentIds: string[]; afterBalances: Array<{ availableDays: number }>;
+    }>;
+  }).previewAccountUnlink(input);
+  assert.deepEqual(preview.affectedRequestIds.sort(), requests.rows.map((item) => item.id).sort());
+  assert.deepEqual(preview.ambiguousAdjustmentIds, []);
+  assert.deepEqual(preview.afterBalances.map((item) => item.availableDays).sort(), [5, 5]);
+  const result = await store.runInTransaction((tx) =>
+    (tx as never as { unlinkAccount(value: typeof input): Promise<{ canonicalProfileId: string; detachedProfileId: string }> })
+      .unlinkAccount(input)
+  );
+
+  const oldCenters = await pool.query<{ franchiseid: number }>(`
+    SELECT franchiseid FROM public.pto_profile_centers
+    WHERE public.pto_canonical_profile_id(profile_id) = $1 ORDER BY franchiseid
+  `, [result.canonicalProfileId]);
+  const newCenters = await pool.query<{ franchiseid: number }>(`
+    SELECT franchiseid FROM public.pto_profile_centers WHERE profile_id = $1 ORDER BY franchiseid
+  `, [result.detachedProfileId]);
+  assert.deepEqual(oldCenters.rows.map((item) => item.franchiseid), [1, 2]);
+  assert.deepEqual(newCenters.rows.map((item) => item.franchiseid), [3]);
+  const balances = await pool.query<{ profile_id: string; granted_days: string; balance_days: string; reserved_days: string }>(`
+    SELECT requested.profile_id::TEXT,
+      balance.granted_days::TEXT, balance.balance_days::TEXT, balance.reserved_days::TEXT
+    FROM UNNEST($1::BIGINT[]) requested(profile_id)
+    CROSS JOIN LATERAL public.pto_profile_balance(requested.profile_id, CURRENT_DATE) balance
+    ORDER BY requested.profile_id
+  `, [[result.canonicalProfileId, result.detachedProfileId]]);
+  const oldBalance = balances.rows.find((item) => item.profile_id === result.canonicalProfileId);
+  const newBalance = balances.rows.find((item) => item.profile_id === result.detachedProfileId);
+  assert.deepEqual(oldBalance, { profile_id: result.canonicalProfileId,
+    granted_days: '5.00', balance_days: '5.00', reserved_days: '0.00' });
+  assert.deepEqual(newBalance, { profile_id: result.detachedProfileId,
+    granted_days: '5.00', balance_days: '5.50', reserved_days: '0.50' });
+  const movement = await pool.query<{ profile_id: string; event_type: string }>(`
+    SELECT profile_id::TEXT, event_type FROM public.pto_ledger_entries
+    WHERE idempotency_key LIKE 'split-%' OR idempotency_key LIKE 'account-split:%' ORDER BY id
+  `);
+  assert.ok(movement.rows.some((item) => item.profile_id === result.canonicalProfileId && item.event_type === 'release'));
+  assert.ok(movement.rows.some((item) => item.profile_id === result.detachedProfileId && item.event_type === 'reserve'));
+  assert.ok(movement.rows.some((item) => item.profile_id === result.detachedProfileId && item.event_type === 'consume'));
+  assert.ok(movement.rows.some((item) => item.profile_id === result.detachedProfileId && item.event_type === 'adjustment'));
+  const afterCounts = await pool.query<{ ledger: string; audit: string }>(`
+    SELECT (SELECT COUNT(*)::TEXT FROM public.pto_ledger_entries) AS ledger,
+      (SELECT COUNT(*)::TEXT FROM public.pto_audit_events) AS audit
+  `);
+  assert.ok(Number(afterCounts.rows[0].ledger) > Number(beforeCounts.rows[0].ledger));
+  assert.ok(Number(afterCounts.rows[0].audit) > Number(beforeCounts.rows[0].audit));
+});
+
 test('PostgreSQL store rejects center email ambiguity and audits authorized negative adjustments', { skip: !enabled }, async () => {
   assert.ok(pool);
   const store = createPostgresPtoStore(pool);
@@ -561,7 +818,8 @@ test('PostgreSQL store rejects center email ambiguity and audits authorized nega
     /ambiguous/i
   );
   await store.adjustBalance({
-    profileId: profiles.rows[0].id, cycleStart: new Date().getUTCFullYear() + '-01-01', deltaDays: -5.5,
+    profileId: profiles.rows[0].id, membershipId: memberships.rows[0].id,
+    cycleStart: new Date().getUTCFullYear() + '-01-01', deltaDays: -5.5,
     reason: 'Opening balance correction', actorId: 'admin-80', actorFranchiseId: 80
   });
   const balance = await pool.query<{ available_days: string }>(
@@ -800,6 +1058,7 @@ test('canonical-source admins can mutate and detach while balance components sta
   await store.addEmail({ profileId: target, membershipId: sourceMembership.id,
     email: 'canonical@example.com', actorId: 'admin-71', actorFranchiseId: 71 });
   const adjusted = await store.adjustBalance({ profileId: target,
+    membershipId: sourceMembership.id,
     cycleStart: `${new Date().getUTCFullYear()}-01-01`, deltaDays: -0.5, reason: 'Canonical correction',
     actorId: 'admin-71', actorFranchiseId: 71 });
   assert.equal(adjusted.availableDays, 2.5);
@@ -853,6 +1112,7 @@ test('activation, sync, email, and adjustment audits contain actual before and a
   await store.addEmail({ profileId: member.rows[0].profile_id, membershipId: member.rows[0].id,
     email: 'audit@example.com', actorId: 'admin-90', actorFranchiseId: 90 });
   await store.adjustBalance({ profileId: member.rows[0].profile_id,
+    membershipId: member.rows[0].id,
     cycleStart: `${new Date().getUTCFullYear()}-01-01`, deltaDays: -0.5, reason: 'Audit correction',
     actorId: 'admin-90', actorFranchiseId: 90 });
   const events = await pool.query<{ event_type: string; before_state: unknown; after_state: unknown }>(`

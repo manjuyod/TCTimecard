@@ -228,11 +228,26 @@ export interface PtoEmail {
 
 export interface AdjustPtoBalanceInput {
   profileId: Id;
+  membershipId: Id;
   cycleStart: string;
   deltaDays: number;
   reason: string;
   actorId: Id;
   actorFranchiseId: number;
+}
+
+export interface AssignPtoAdjustmentProvenanceInput {
+  profileId: Id;
+  ledgerEntryId: Id;
+  membershipId: Id;
+  actorId: Id;
+  actorFranchiseId: number;
+  idempotencyKey: string;
+}
+
+export interface PtoAdjustmentProvenanceResult {
+  ledgerEntryId: Id;
+  membershipId: Id;
 }
 
 export interface PtoBalanceAdjustmentResult {
@@ -289,6 +304,11 @@ export interface PtoServiceStore {
   adjustBalance(input: AdjustPtoBalanceInput): Promise<PtoBalanceAdjustmentResult>;
   previewAccountLink(input: PtoAccountLinkBaseInput): Promise<PtoAccountLinkPreview>;
   linkAccount(input: PtoAccountLinkMutationInput): Promise<PtoAccountLinkMutationResult>;
+  previewAccountUnlink(input: PtoAccountLinkBaseInput): Promise<PtoAccountLinkPreview>;
+  unlinkAccount(input: PtoAccountLinkMutationInput): Promise<PtoAccountLinkMutationResult>;
+  assignAdjustmentProvenance(
+    input: AssignPtoAdjustmentProvenanceInput
+  ): Promise<PtoAdjustmentProvenanceResult>;
   listAudit(input: NormalizedListPtoAuditInput): Promise<PagedResult<PtoAuditEvent>>;
   runInTransaction<T>(work: (store: PtoServiceStore) => Promise<T>): Promise<T>;
 }
