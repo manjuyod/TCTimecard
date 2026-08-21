@@ -571,7 +571,7 @@ export function PtoManagementPage(): JSX.Element {
                 ) : profiles?.items.length ? (
                   <Table>
                     <TableHeader><TableRow>
-                      <TableHead>Person</TableHead><TableHead>Identity</TableHead><TableHead>Available</TableHead><TableHead />
+                      <TableHead>Person</TableHead><TableHead>Available</TableHead><TableHead />
                     </TableRow></TableHeader>
                     <TableBody>
                       {profiles.items.map((profile) => {
@@ -579,7 +579,6 @@ export function PtoManagementPage(): JSX.Element {
                         return (
                           <TableRow key={profile.id}>
                             <TableCell><p className="font-semibold text-foreground">{name}</p><p className="text-xs text-muted-foreground">Profile {profile.id}</p></TableCell>
-                            <TableCell><Badge variant={profile.identityStatus === 'confirmed' ? 'success' : 'warning'}>{profile.identityStatus}</Badge></TableCell>
                             <TableCell>{profile.balance.availableDays} days</TableCell>
                             <TableCell className="text-right">
                               <Button variant="outline" size="sm" aria-label={`View ${name}`}
@@ -634,7 +633,7 @@ export function PtoManagementPage(): JSX.Element {
             <>
               <DialogHeader>
                 <DialogTitle>{selectedProfile.firstName} {selectedProfile.lastName}</DialogTitle>
-                <DialogDescription>Shared profile {selectedProfile.id} · {selectedProfile.identityStatus} identity</DialogDescription>
+                <DialogDescription>Shared profile {selectedProfile.id}</DialogDescription>
               </DialogHeader>
               <div className="grid gap-3 sm:grid-cols-4">
                 <DetailMetric label="Granted" value={`${selectedProfile.balance.grantedDays} days`} />

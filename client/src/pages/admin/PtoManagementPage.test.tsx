@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { PtoProfileSummary } from '../../lib/api';
 import { PtoManagementPage } from './PtoManagementPage';
 
 vi.mock('../../providers/AuthProvider', () => ({
@@ -114,6 +115,8 @@ describe('PTO management activation', () => {
     render(<MemoryRouter><PtoManagementPage /></MemoryRouter>);
 
     expect(await screen.findByText('Ada Lovelace')).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Identity' })).not.toBeInTheDocument();
+    expect(screen.queryByText('confirmed')).not.toBeInTheDocument();
     expect(screen.getByText('26 shared profiles')).toBeInTheDocument();
     expect(calls).toContain('/api/pto/admin/profiles?franchiseId=1&page=1&pageSize=25');
     expect(calls).toContain('/api/pto/admin/audit?franchiseId=1&page=1&pageSize=25');
@@ -126,7 +129,7 @@ describe('PTO management activation', () => {
     expect((await screen.findAllByText('Roster synced')).length).toBeGreaterThanOrEqual(2);
   });
 
-  it('shows profile identity, membership, email, ledger, and request details', async () => {
+  it('shows profile membership, email, ledger, request, and legacy match details without profile identity status', async () => {
     globalThis.fetch = async (input) => {
       const path = String(input);
       if (path.startsWith('/api/admin/settings')) return enabledSettings();
@@ -155,6 +158,9 @@ describe('PTO management activation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View Ada Lovelace' }));
 
     expect(await screen.findByRole('heading', { name: 'Ada Lovelace' })).toBeInTheDocument();
+    expect(screen.getByText('Shared profile 10')).toBeInTheDocument();
+    expect(screen.queryByText(/confirmed identity/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Identity matches')).toBeInTheDocument();
     expect(screen.getByText('Tutor 123 · Center 1')).toBeInTheDocument();
     expect(screen.getByText('ada+pto@example.com')).toBeInTheDocument();
     expect(screen.getByText('Profile 10 ↔ Profile 11')).toBeInTheDocument();
@@ -386,8 +392,8 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
   headers: { 'Content-Type': 'application/json' }
 });
 
-const profileSummary = (id: string, firstName: string, lastName: string, availableDays: number) => ({
-  id, firstName, lastName, identityStatus: 'confirmed', active: true,
+const profileSummary = (id: string, firstName: string, lastName: string, availableDays: number): PtoProfileSummary => ({
+  id, firstName, lastName, active: true,
   balance: { grantedDays: 5, balanceDays: 4, reservedDays: 1, availableDays }
 });
 

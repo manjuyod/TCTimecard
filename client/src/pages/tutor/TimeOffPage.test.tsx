@@ -54,7 +54,7 @@ const installTimeOffFetch = (noticeRequired: boolean, options: {
     }
     if (path === '/api/pto/me') {
       return new Response(JSON.stringify(ptoEnabled ? {
-        profile: { id: '10', firstName: 'Ada', lastName: 'Lovelace', identityStatus: 'confirmed', active: true,
+        profile: { id: '10', firstName: 'Ada', lastName: 'Lovelace', active: true,
           balance: { grantedDays: 5, balanceDays: 4, reservedDays: 0.5, availableDays: 3.5 } },
         memberships: [
           { id: '20', profileId: '10', franchiseId: 1, tutorId: 123, active: true,
