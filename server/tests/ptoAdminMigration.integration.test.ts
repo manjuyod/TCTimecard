@@ -124,12 +124,15 @@ test('confirmed merge deduplicates cycle grants while combining adjustments into
   const tutorView = await createPostgresPtoStore(pool).getTutorProfile({ franchiseId: 20, tutorId: 200 });
   assert.equal(tutorView.profile?.id, merged.rows[0].profile_id);
   assert.equal(tutorView.memberships.length, 2);
+  assert.equal(Object.prototype.hasOwnProperty.call(tutorView.profile ?? {}, 'identityStatus'), false);
   const adminStore = createPostgresPtoStore(pool);
   const adminDetail = await adminStore.getAdminProfile({ franchiseId: 20, profileId: merged.rows[0].profile_id });
   assert.equal(adminDetail?.id, merged.rows[0].profile_id);
   assert.equal(adminDetail?.memberships.length, 2);
+  assert.equal(Object.prototype.hasOwnProperty.call(adminDetail ?? {}, 'identityStatus'), false);
   const adminRoster = await adminStore.listAdminProfiles({ franchiseId: 20, search: '', page: 1, pageSize: 25 });
   assert.deepEqual(adminRoster.items.map((item) => item.id), [merged.rows[0].profile_id]);
+  assert.equal(Object.prototype.hasOwnProperty.call(adminRoster.items[0] ?? {}, 'identityStatus'), false);
 
   const repeated = await pool.query<{ profile_id: string }>(
     'SELECT public.pto_admin_decide_alias($1, $2, $3, $4) AS profile_id',

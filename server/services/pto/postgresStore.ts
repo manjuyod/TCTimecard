@@ -47,7 +47,6 @@ const profile = (row: Record<string, unknown>): PtoProfileSummary => ({
   id: String(row.id),
   firstName: String(row.first_name ?? ''),
   lastName: String(row.last_name ?? ''),
-  identityStatus: row.identity_status === 'confirmed' ? 'confirmed' : 'pending',
   active: Boolean(row.active),
   balance: balance(row)
 });
@@ -100,7 +99,7 @@ const discoveredAccount = (row: Record<string, unknown>): PtoDiscoveredAccount =
 };
 
 const profileSelect = `
-  SELECT profile.id, profile.first_name, profile.last_name, profile.identity_status, profile.active,
+  SELECT profile.id, profile.first_name, profile.last_name, profile.active,
     COALESCE(balance.granted_days, 0) AS granted_days,
     COALESCE(balance.balance_days, 0) AS balance_days,
     COALESCE(balance.reserved_days, 0) AS reserved_days,

@@ -157,7 +157,6 @@ export interface PtoProfileSummary {
   id: Id;
   firstName: string;
   lastName: string;
-  identityStatus: 'pending' | 'confirmed';
   active: boolean;
   balance: PtoBalance;
 }

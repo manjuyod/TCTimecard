@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 const profile = {
-  profile: { id: '10', firstName: 'Ada', lastName: 'Lovelace', identityStatus: 'confirmed' as const, active: true,
+  profile: { id: '10', firstName: 'Ada', lastName: 'Lovelace', active: true,
     balance: { grantedDays: 5, balanceDays: 4, reservedDays: 1, availableDays: 3 } },
   memberships: [
     { id: '20', profileId: '10', franchiseId: 6, tutorId: 123, active: true,
