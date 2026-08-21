@@ -49,7 +49,15 @@ const createStore = (overrides: Partial<PtoServiceStore> = {}): PtoServiceStore 
   return store;
 };
 
-const roster = (fetchTutors: PtoTutorRosterSource['fetchTutors']): PtoTutorRosterSource => ({ fetchTutors });
+const roster = (fetchTutors: PtoTutorRosterSource['fetchTutors']): PtoTutorRosterSource => ({
+  fetchTutors,
+  discoverRelatedAccounts: async () => ({
+    accounts: [],
+    attemptedAt: '1970-01-01T00:00:00.000Z',
+    completedAt: '1970-01-01T00:00:00.000Z',
+    error: null
+  })
+});
 
 test('activation preview reads a fresh active CRM roster without opening a write transaction', async () => {
   let transactions = 0;

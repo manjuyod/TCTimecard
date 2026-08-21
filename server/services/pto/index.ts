@@ -1,6 +1,7 @@
 export * from './contracts';
 export * from './service';
 export * from './rosterSource';
+export * from './discoverySource';
 export * from './postgresStore';
 
 import { getMssqlPool } from '../../db/mssql';

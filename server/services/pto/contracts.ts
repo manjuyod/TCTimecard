@@ -26,6 +26,18 @@ export interface PtoRosterTutor {
   isDeleted: boolean;
 }
 
+export interface PtoDiscoveredRosterAccount extends PtoRosterTutor {
+  provider: string;
+  crmId: string;
+}
+
+export interface PtoDiscoveryResult {
+  accounts: PtoDiscoveredRosterAccount[];
+  attemptedAt: string;
+  completedAt: string | null;
+  error: string | null;
+}
+
 export interface PtoActivationPreviewBase {
   activeCrmTutorCount: number;
   newMembershipCount: number;
@@ -185,6 +197,7 @@ export interface PtoAuditEvent {
 
 export interface PtoTutorRosterSource {
   fetchTutors(franchiseId: number): Promise<PtoRosterTutor[]>;
+  discoverRelatedAccounts(tutors: PtoRosterTutor[]): Promise<PtoDiscoveryResult>;
 }
 
 export interface PtoServiceStore {
