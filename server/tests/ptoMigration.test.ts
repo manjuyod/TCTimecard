@@ -7,6 +7,26 @@ const migrationPath = path.resolve(__dirname, '../db/migrations/0010_shared_pto.
 const loadMigration = (): string =>
   existsSync(migrationPath) ? readFileSync(migrationPath, 'utf8').replace(/\s+/g, ' ').trim() : '';
 
+const linkMigrationPath = path.resolve(__dirname, '../db/migrations/0013_persistent_pto_profile_links.sql');
+const loadLinkMigration = (): string =>
+  existsSync(linkMigrationPath) ? readFileSync(linkMigrationPath, 'utf8').replace(/\s+/g, ' ').trim() : '';
+
+test('persistent PTO link migration separates discovered accounts from explicit decisions', () => {
+  const sql = loadLinkMigration();
+
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.pto_discovered_tutor_accounts/i);
+  assert.match(sql, /UNIQUE \(provider, crm_id\)/i);
+  assert.match(sql, /UNIQUE \(franchiseid, tutor_id\)/i);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.pto_profile_link_decisions/i);
+  assert.match(sql, /status TEXT NOT NULL.*pending.*linked.*excluded/is);
+  assert.match(sql, /version INTEGER NOT NULL DEFAULT 1/i);
+  assert.match(sql, /source_membership_id BIGINT/i);
+  assert.match(sql, /last_successful_roster_sync_at TIMESTAMPTZ/i);
+  assert.match(sql, /last_roster_sync_error TEXT/i);
+  assert.match(sql, /last_successful_discovery_at TIMESTAMPTZ/i);
+  assert.match(sql, /last_discovery_error TEXT/i);
+});
+
 test('shared PTO migration creates normalized policy, identity, cycle, ledger, and allocation tables', () => {
   const sql = loadMigration();
   const tables = [

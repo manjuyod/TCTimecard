@@ -13,7 +13,9 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'id', 'effective_from', 'entitlement_days', 'renewal_month', 'renewal_day', 'carryover_days', 'created_at'
   ],
   pto_center_settings: [
-    'franchiseid', 'enabled', 'first_activated_at', 'last_successful_sync_at', 'last_sync_error', 'created_at', 'updated_at'
+    'franchiseid', 'enabled', 'first_activated_at', 'last_successful_sync_at', 'last_sync_error',
+    'last_successful_roster_sync_at', 'last_roster_sync_error', 'last_successful_discovery_at',
+    'last_discovery_error', 'created_at', 'updated_at'
   ],
   pto_profiles: [
     'id', 'first_name', 'last_name', 'normalized_first_name', 'normalized_last_name', 'identity_status', 'active', 'created_at'
@@ -29,12 +31,20 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'id', 'left_profile_id', 'right_profile_id', 'match_type', 'status', 'decided_by', 'decided_at', 'created_at'
   ],
   pto_profile_aliases: ['source_profile_id', 'target_profile_id', 'candidate_id', 'merged_at'],
+  pto_discovered_tutor_accounts: [
+    'id', 'provider', 'crm_id', 'franchiseid', 'tutor_id', 'normalized_first_name', 'normalized_last_name',
+    'crm_snapshot', 'crm_active', 'first_seen_at', 'last_seen_at'
+  ],
+  pto_profile_link_decisions: [
+    'id', 'profile_id', 'account_id', 'status', 'version', 'decided_by', 'decision_franchiseid', 'decided_at',
+    'created_at', 'updated_at'
+  ],
   pto_entitlement_cycles: [
     'id', 'profile_id', 'starts_on', 'ends_on', 'entitlement_days', 'policy_id', 'created_at'
   ],
   pto_ledger_entries: [
     'id', 'profile_id', 'cycle_id', 'request_id', 'allocation_id', 'event_type', 'balance_delta',
-    'reserved_delta', 'idempotency_key', 'metadata', 'created_at'
+    'reserved_delta', 'idempotency_key', 'metadata', 'source_membership_id', 'created_at'
   ],
   pto_request_allocations: [
     'id', 'request_id', 'cycle_id', 'charged_days', 'state', 'created_at', 'updated_at'
