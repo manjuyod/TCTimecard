@@ -37,12 +37,20 @@ const centerStatus = (franchiseId: number, row?: Record<string, unknown>): PtoCe
   enabled: Boolean(row?.enabled),
   firstActivatedAt: row?.first_activated_at == null ? null : new Date(row.first_activated_at as string).toISOString(),
   lastSuccessfulSyncAt: row?.last_successful_sync_at == null ? null : new Date(row.last_successful_sync_at as string).toISOString(),
-  lastSyncError: row?.last_sync_error == null ? null : String(row.last_sync_error)
+  lastSyncError: row?.last_sync_error == null ? null : String(row.last_sync_error),
+  lastSuccessfulRosterSyncAt: row?.last_successful_roster_sync_at == null
+    ? null : new Date(row.last_successful_roster_sync_at as string).toISOString(),
+  lastRosterSyncError: row?.last_roster_sync_error == null ? null : String(row.last_roster_sync_error),
+  lastSuccessfulDiscoveryAt: row?.last_successful_discovery_at == null
+    ? null : new Date(row.last_successful_discovery_at as string).toISOString(),
+  lastDiscoveryError: row?.last_discovery_error == null ? null : String(row.last_discovery_error)
 });
 
 const getStatus = async (db: Queryable, franchiseId: number): Promise<PtoCenterStatus> => {
   const result = await db.query(`
-    SELECT enabled, first_activated_at, last_successful_sync_at, last_sync_error
+    SELECT enabled, first_activated_at, last_successful_sync_at, last_sync_error,
+      last_successful_roster_sync_at, last_roster_sync_error,
+      last_successful_discovery_at, last_discovery_error
     FROM public.pto_center_settings WHERE franchiseid = $1
   `, [franchiseId]);
   return centerStatus(franchiseId, result.rows[0]);

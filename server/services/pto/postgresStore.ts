@@ -91,7 +91,9 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
 
   getCenterStatus: async (franchiseId): Promise<PtoCenterStatus> => {
     const rows = await queryRows(db, `
-      SELECT franchiseid, enabled, first_activated_at, last_successful_sync_at, last_sync_error
+      SELECT franchiseid, enabled, first_activated_at, last_successful_sync_at, last_sync_error,
+        last_successful_roster_sync_at, last_roster_sync_error,
+        last_successful_discovery_at, last_discovery_error
       FROM public.pto_center_settings WHERE franchiseid = $1
     `, [franchiseId]);
     const row = rows[0];
@@ -100,11 +102,15 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       enabled: Boolean(row?.enabled),
       firstActivatedAt: iso(row?.first_activated_at),
       lastSuccessfulSyncAt: iso(row?.last_successful_sync_at),
-      lastSyncError: row?.last_sync_error == null ? null : String(row.last_sync_error)
+      lastSyncError: row?.last_sync_error == null ? null : String(row.last_sync_error),
+      lastSuccessfulRosterSyncAt: iso(row?.last_successful_roster_sync_at),
+      lastRosterSyncError: row?.last_roster_sync_error == null ? null : String(row.last_roster_sync_error),
+      lastSuccessfulDiscoveryAt: iso(row?.last_successful_discovery_at),
+      lastDiscoveryError: row?.last_discovery_error == null ? null : String(row.last_discovery_error)
     };
   },
 
-  previewActivation: async (franchiseId, tutors) => {
+  previewActivation: async (franchiseId, tutors, discovery) => {
     const activeIds = tutors.map((tutor) => tutor.id);
     const counts = await queryRows(db, `
       WITH incoming AS (
@@ -142,13 +148,63 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     `, [franchiseId, JSON.stringify(tutors.map((tutor) => ({
       id: tutor.id, first_name: tutor.firstName, last_name: tutor.lastName
     })))]);
+    const discoveredDecisionCounts = await queryRows(db, `
+      WITH incoming AS (
+        SELECT * FROM JSONB_TO_RECORDSET($2::JSONB)
+          AS account(provider TEXT, crm_id TEXT)
+      ), relevant AS (
+        SELECT DISTINCT account.id, decision.status
+        FROM incoming
+        JOIN public.pto_discovered_tutor_accounts account
+          ON account.provider = incoming.provider AND account.crm_id = incoming.crm_id
+        JOIN public.pto_profile_link_decisions decision ON decision.account_id = account.id
+        WHERE EXISTS (
+          SELECT 1 FROM public.pto_profile_centers center
+          WHERE center.franchiseid = $1 AND center.active
+            AND public.pto_canonical_profile_id(center.profile_id)
+              = public.pto_canonical_profile_id(decision.profile_id)
+        )
+      )
+      SELECT COUNT(*) FILTER (WHERE status = 'linked') AS linked_count,
+        COUNT(*) FILTER (WHERE status = 'excluded') AS excluded_count,
+        COUNT(*) FILTER (WHERE status = 'pending') AS pending_count
+      FROM relevant
+    `, [franchiseId, JSON.stringify(discovery.accounts.map((account) => ({
+      provider: account.provider, crm_id: account.crmId
+    })))]);
+    const healthRows = await queryRows(db, `
+      SELECT last_successful_sync_at, last_sync_error,
+        last_successful_roster_sync_at, last_roster_sync_error,
+        last_successful_discovery_at, last_discovery_error
+      FROM public.pto_center_settings WHERE franchiseid = $1
+    `, [franchiseId]);
+    const health = healthRows[0];
+    const linkedAccountCount = number(discoveredDecisionCounts[0]?.linked_count);
+    const excludedAccountCount = number(discoveredDecisionCounts[0]?.excluded_count);
+    const rememberedPendingCount = number(discoveredDecisionCounts[0]?.pending_count);
+    const pendingReviewCount = Math.max(
+      rememberedPendingCount,
+      discovery.accounts.length - linkedAccountCount - excludedAccountCount
+    );
+    const warnings = tutors.some((tutor) => !tutor.firstName.trim() || !tutor.lastName.trim())
+      ? ['Some active CRM tutors have incomplete names'] : [];
+    if (discovery.error) warnings.push(`Discovery failed: ${discovery.error}`);
     return {
       activeCrmTutorCount: activeIds.length,
       newMembershipCount: number(counts[0]?.new_memberships),
       newProfileCount: number(counts[0]?.new_profiles),
-      pendingExactNameCandidateCount: number(counts[0]?.pending_candidates),
-      warnings: tutors.some((tutor) => !tutor.firstName.trim() || !tutor.lastName.trim())
-        ? ['Some active CRM tutors have incomplete names'] : []
+      discoveredAccountCount: discovery.accounts.length,
+      linkedAccountCount,
+      excludedAccountCount,
+      pendingReviewCount,
+      pendingExactNameCandidateCount: pendingReviewCount,
+      lastSuccessfulSyncAt: iso(health?.last_successful_sync_at),
+      lastSyncError: health?.last_sync_error == null ? null : String(health.last_sync_error),
+      lastSuccessfulRosterSyncAt: iso(health?.last_successful_roster_sync_at),
+      lastRosterSyncError: health?.last_roster_sync_error == null ? null : String(health.last_roster_sync_error),
+      lastSuccessfulDiscoveryAt: iso(health?.last_successful_discovery_at),
+      lastDiscoveryError: health?.last_discovery_error == null ? null : String(health.last_discovery_error),
+      warnings
     };
   },
 
@@ -156,8 +212,16 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     if (!input.tutors.every((tutor) => tutor.franchiseId === input.franchiseId)) {
       throw new Error('CRM roster contained a tutor from another franchise');
     }
+    if (!input.discovery.accounts.every((account) =>
+      account.provider === `timecard-center:${account.franchiseId}`
+      && account.crmId === String(account.id)
+    )) {
+      throw new Error('PTO discovery contained an invalid stable CRM identity');
+    }
     const priorCenterRows = await queryRows(db, `
-      SELECT enabled, first_activated_at, last_successful_sync_at, last_sync_error
+      SELECT enabled, first_activated_at, last_successful_sync_at, last_sync_error,
+        last_successful_roster_sync_at, last_roster_sync_error,
+        last_successful_discovery_at, last_discovery_error
       FROM public.pto_center_settings WHERE franchiseid = $1
     `, [input.franchiseId]);
     const priorRosterRows = await queryRows(db, `
@@ -169,6 +233,12 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       firstActivatedAt: iso(priorCenterRows[0]?.first_activated_at),
       lastSuccessfulSyncAt: iso(priorCenterRows[0]?.last_successful_sync_at),
       lastSyncError: priorCenterRows[0]?.last_sync_error == null ? null : String(priorCenterRows[0].last_sync_error),
+      lastSuccessfulRosterSyncAt: iso(priorCenterRows[0]?.last_successful_roster_sync_at),
+      lastRosterSyncError: priorCenterRows[0]?.last_roster_sync_error == null
+        ? null : String(priorCenterRows[0].last_roster_sync_error),
+      lastSuccessfulDiscoveryAt: iso(priorCenterRows[0]?.last_successful_discovery_at),
+      lastDiscoveryError: priorCenterRows[0]?.last_discovery_error == null
+        ? null : String(priorCenterRows[0].last_discovery_error),
       activeTutorIds: priorRosterRows.map((row) => number(row.tutor_id))
     };
     if (input.activate) {
@@ -184,12 +254,27 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     const seenIds: number[] = [];
     for (const tutor of input.tutors) {
       seenIds.push(tutor.id);
+      const provider = `timecard-center:${input.franchiseId}`;
       if (tutor.isDeleted) {
+        await db.query(`
+          INSERT INTO public.pto_discovered_tutor_accounts
+            (provider, crm_id, franchiseid, tutor_id, normalized_first_name,
+             normalized_last_name, crm_snapshot, crm_active, last_seen_at)
+          VALUES ($1, $2, $3, $4, LOWER(BTRIM($5)), LOWER(BTRIM($6)), $7, FALSE, NOW())
+          ON CONFLICT (provider, crm_id) DO UPDATE SET
+            franchiseid = EXCLUDED.franchiseid,
+            tutor_id = EXCLUDED.tutor_id,
+            normalized_first_name = EXCLUDED.normalized_first_name,
+            normalized_last_name = EXCLUDED.normalized_last_name,
+            crm_snapshot = EXCLUDED.crm_snapshot,
+            crm_active = FALSE,
+            last_seen_at = EXCLUDED.last_seen_at
+        `, [provider, String(tutor.id), input.franchiseId, tutor.id,
+          tutor.firstName, tutor.lastName, tutor]);
         await db.query(`UPDATE public.pto_profile_centers SET active = FALSE, updated_at = NOW()
           WHERE franchiseid = $1 AND tutor_id = $2`, [input.franchiseId, tutor.id]);
         continue;
       }
-      const provider = `timecard-center:${input.franchiseId}`;
       let identity = await queryRows(db, `
         SELECT public.pto_canonical_profile_id(profile_id) AS profile_id
         FROM public.pto_profile_crm_ids WHERE provider = $1 AND crm_id = $2
@@ -209,6 +294,28 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
         await db.query(`UPDATE public.pto_profiles SET first_name = $2, last_name = $3
           WHERE id = $1`, [profileId, tutor.firstName.trim(), tutor.lastName.trim()]);
       }
+      const localAccount = await queryRows(db, `
+        INSERT INTO public.pto_discovered_tutor_accounts
+          (provider, crm_id, franchiseid, tutor_id, normalized_first_name,
+           normalized_last_name, crm_snapshot, crm_active, last_seen_at)
+        VALUES ($1, $2, $3, $4, LOWER(BTRIM($5)), LOWER(BTRIM($6)), $7, TRUE, NOW())
+        ON CONFLICT (provider, crm_id) DO UPDATE SET
+          franchiseid = EXCLUDED.franchiseid,
+          tutor_id = EXCLUDED.tutor_id,
+          normalized_first_name = EXCLUDED.normalized_first_name,
+          normalized_last_name = EXCLUDED.normalized_last_name,
+          crm_snapshot = EXCLUDED.crm_snapshot,
+          crm_active = TRUE,
+          last_seen_at = EXCLUDED.last_seen_at
+        RETURNING id
+      `, [provider, String(tutor.id), input.franchiseId, tutor.id,
+        tutor.firstName, tutor.lastName, tutor]);
+      await db.query(`
+        INSERT INTO public.pto_profile_link_decisions
+          (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
+        VALUES ($1, $2, 'linked', $3, $4, NOW())
+        ON CONFLICT (profile_id, account_id) DO NOTHING
+      `, [profileId, localAccount[0].id, input.actorId, input.franchiseId]);
       let membership = await queryRows(db, `
         SELECT id, profile_id, FALSE AS inserted FROM public.pto_profile_centers
         WHERE franchiseid = $1 AND tutor_id = $2 FOR UPDATE
@@ -260,41 +367,182 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       `, [profileId, tutor.firstName, tutor.lastName]);
       pendingCandidateCount += candidates.rowCount ?? 0;
     }
+
+    if (input.discovery.accounts.length) {
+      const discoveredJson = JSON.stringify(input.discovery.accounts.map((account) => ({
+        provider: account.provider,
+        crm_id: account.crmId,
+        franchiseid: account.franchiseId,
+        tutor_id: account.id,
+        normalized_first_name: account.firstName.trim().toLowerCase(),
+        normalized_last_name: account.lastName.trim().toLowerCase(),
+        crm_snapshot: account,
+        crm_active: !account.isDeleted
+      })));
+      await db.query(`
+        WITH incoming AS (
+          SELECT * FROM JSONB_TO_RECORDSET($2::JSONB) AS account(
+            provider TEXT, crm_id TEXT, franchiseid INTEGER, tutor_id BIGINT,
+            normalized_first_name TEXT, normalized_last_name TEXT,
+            crm_snapshot JSONB, crm_active BOOLEAN
+          )
+        ), upserted AS (
+          INSERT INTO public.pto_discovered_tutor_accounts
+            (provider, crm_id, franchiseid, tutor_id, normalized_first_name,
+             normalized_last_name, crm_snapshot, crm_active, last_seen_at)
+          SELECT provider, crm_id, franchiseid, tutor_id, normalized_first_name,
+            normalized_last_name, crm_snapshot, crm_active, NOW()
+          FROM incoming
+          ON CONFLICT (provider, crm_id) DO UPDATE SET
+            franchiseid = EXCLUDED.franchiseid,
+            tutor_id = EXCLUDED.tutor_id,
+            normalized_first_name = EXCLUDED.normalized_first_name,
+            normalized_last_name = EXCLUDED.normalized_last_name,
+            crm_snapshot = EXCLUDED.crm_snapshot,
+            crm_active = EXCLUDED.crm_active,
+            last_seen_at = EXCLUDED.last_seen_at
+          RETURNING id, normalized_first_name, normalized_last_name
+        )
+        INSERT INTO public.pto_profile_link_decisions (profile_id, account_id, status)
+        SELECT DISTINCT public.pto_canonical_profile_id(center.profile_id), upserted.id, 'pending'
+        FROM upserted
+        JOIN public.pto_profile_centers center
+          ON center.franchiseid = $1 AND center.active
+        JOIN public.pto_profiles profile
+          ON profile.id = public.pto_canonical_profile_id(center.profile_id)
+         AND profile.normalized_first_name = upserted.normalized_first_name
+         AND profile.normalized_last_name = upserted.normalized_last_name
+        ON CONFLICT (profile_id, account_id) DO NOTHING
+      `, [input.franchiseId, discoveredJson]);
+
+      await db.query(`
+        WITH incoming AS (
+          SELECT * FROM JSONB_TO_RECORDSET($2::JSONB) AS account(provider TEXT, crm_id TEXT)
+        )
+        INSERT INTO public.pto_audit_events
+          (profile_id, franchiseid, actor_id, event_type, before_state, after_state, idempotency_key)
+        SELECT decision.profile_id, $1, $3, 'pto_account_discovered', NULL,
+          JSONB_BUILD_OBJECT('accountId', account.id, 'status', decision.status,
+            'discoveredAt', $4::TIMESTAMPTZ),
+          'pto-discovery:' || decision.profile_id || ':' || account.id || ':' || $4
+        FROM incoming
+        JOIN public.pto_discovered_tutor_accounts account
+          ON account.provider = incoming.provider AND account.crm_id = incoming.crm_id
+        JOIN public.pto_profile_link_decisions decision ON decision.account_id = account.id
+        WHERE EXISTS (
+          SELECT 1 FROM public.pto_profile_centers center
+          WHERE center.franchiseid = $1 AND center.active
+            AND public.pto_canonical_profile_id(center.profile_id)
+              = public.pto_canonical_profile_id(decision.profile_id)
+        )
+        ON CONFLICT (idempotency_key) DO NOTHING
+      `, [input.franchiseId, discoveredJson, input.actorId, input.discovery.attemptedAt]);
+    }
     const activeIds = input.tutors.filter((tutor) => !tutor.isDeleted).map((tutor) => tutor.id);
     const deactivated = await db.query(`
       UPDATE public.pto_profile_centers SET active = FALSE, updated_at = NOW()
       WHERE franchiseid = $1 AND active AND NOT (tutor_id = ANY($2::BIGINT[]))
     `, [input.franchiseId, activeIds]);
+    const discoveryCompletedAt = input.discovery.error ? null : input.discovery.completedAt;
     const syncRows = await queryRows(db, `
       INSERT INTO public.pto_center_settings
-        (franchiseid, enabled, last_successful_sync_at, last_sync_error)
-      VALUES ($1, $2, NOW(), NULL)
+        (franchiseid, enabled, last_successful_sync_at, last_sync_error,
+         last_successful_roster_sync_at, last_roster_sync_error,
+         last_successful_discovery_at, last_discovery_error)
+      VALUES ($1, $2, NOW(), NULL, NOW(), NULL, $3::TIMESTAMPTZ, $4)
       ON CONFLICT (franchiseid) DO UPDATE SET
         enabled = public.pto_center_settings.enabled OR EXCLUDED.enabled,
         last_successful_sync_at = EXCLUDED.last_successful_sync_at,
-        last_sync_error = NULL
-      RETURNING enabled, first_activated_at, last_successful_sync_at, last_sync_error
-    `, [input.franchiseId, input.activate]);
+        last_sync_error = NULL,
+        last_successful_roster_sync_at = EXCLUDED.last_successful_roster_sync_at,
+        last_roster_sync_error = NULL,
+        last_successful_discovery_at = COALESCE(
+          EXCLUDED.last_successful_discovery_at,
+          public.pto_center_settings.last_successful_discovery_at
+        ),
+        last_discovery_error = EXCLUDED.last_discovery_error
+      RETURNING enabled, first_activated_at, last_successful_sync_at, last_sync_error,
+        last_successful_roster_sync_at, last_roster_sync_error,
+        last_successful_discovery_at, last_discovery_error
+    `, [input.franchiseId, input.activate, discoveryCompletedAt, input.discovery.error]);
+    const decisionCounts = await queryRows(db, `
+      WITH incoming AS (
+        SELECT * FROM JSONB_TO_RECORDSET($2::JSONB) AS item(provider TEXT, crm_id TEXT)
+      ), relevant AS (
+        SELECT DISTINCT account.id, decision.status
+        FROM incoming
+        JOIN public.pto_discovered_tutor_accounts account
+          ON account.provider = incoming.provider AND account.crm_id = incoming.crm_id
+        JOIN public.pto_profile_link_decisions decision ON decision.account_id = account.id
+        WHERE EXISTS (
+          SELECT 1 FROM public.pto_profile_centers center
+          WHERE center.franchiseid = $1 AND center.active
+            AND public.pto_canonical_profile_id(center.profile_id)
+              = public.pto_canonical_profile_id(decision.profile_id)
+        )
+      )
+      SELECT COUNT(*) FILTER (WHERE status = 'linked') AS linked_count,
+        COUNT(*) FILTER (WHERE status = 'excluded') AS excluded_count,
+        COUNT(*) FILTER (WHERE status = 'pending') AS pending_count
+      FROM relevant
+    `, [input.franchiseId, JSON.stringify(input.discovery.accounts.map((account) => ({
+      provider: account.provider, crm_id: account.crmId
+    })))]);
     const nextRosterRows = await queryRows(db, `
       SELECT tutor_id FROM public.pto_profile_centers
       WHERE franchiseid = $1 AND active AND tutor_id IS NOT NULL ORDER BY tutor_id
     `, [input.franchiseId]);
     const lastSuccessfulSyncAt = iso(syncRows[0].last_successful_sync_at) ?? new Date().toISOString();
+    const linkedAccountCount = number(decisionCounts[0]?.linked_count);
+    const excludedAccountCount = number(decisionCounts[0]?.excluded_count);
+    const pendingReviewCount = number(decisionCounts[0]?.pending_count);
+    const warnings = input.tutors.some((tutor) => !tutor.isDeleted
+      && (!tutor.firstName.trim() || !tutor.lastName.trim()))
+      ? ['Some active CRM tutors have incomplete names'] : [];
+    if (input.discovery.error) warnings.push(`Discovery failed: ${input.discovery.error}`);
     const summary = {
       activeTutorCount: activeIds.length,
       activatedMembershipCount,
       deactivatedMembershipCount: deactivated.rowCount ?? 0,
       createdProfileCount,
-      pendingCandidateCount,
-      lastSuccessfulSyncAt
+      discoveredAccountCount: input.discovery.accounts.length,
+      linkedAccountCount,
+      excludedAccountCount,
+      pendingReviewCount,
+      pendingCandidateCount: pendingReviewCount,
+      lastSuccessfulSyncAt,
+      lastSyncError: syncRows[0].last_sync_error == null ? null : String(syncRows[0].last_sync_error),
+      lastSuccessfulRosterSyncAt: iso(syncRows[0].last_successful_roster_sync_at),
+      lastRosterSyncError: syncRows[0].last_roster_sync_error == null
+        ? null : String(syncRows[0].last_roster_sync_error),
+      lastSuccessfulDiscoveryAt: iso(syncRows[0].last_successful_discovery_at),
+      lastDiscoveryError: syncRows[0].last_discovery_error == null
+        ? null : String(syncRows[0].last_discovery_error),
+      warnings
     };
     const nextCenter = {
       enabled: Boolean(syncRows[0].enabled),
       firstActivatedAt: iso(syncRows[0].first_activated_at),
       lastSuccessfulSyncAt,
       lastSyncError: syncRows[0].last_sync_error == null ? null : String(syncRows[0].last_sync_error),
+      lastSuccessfulRosterSyncAt: iso(syncRows[0].last_successful_roster_sync_at),
+      lastRosterSyncError: syncRows[0].last_roster_sync_error == null
+        ? null : String(syncRows[0].last_roster_sync_error),
+      lastSuccessfulDiscoveryAt: iso(syncRows[0].last_successful_discovery_at),
+      lastDiscoveryError: syncRows[0].last_discovery_error == null
+        ? null : String(syncRows[0].last_discovery_error),
       activeTutorIds: nextRosterRows.map((row) => number(row.tutor_id))
     };
+    if (input.discovery.error) {
+      await db.query(`
+        INSERT INTO public.pto_audit_events
+          (franchiseid, actor_id, event_type, before_state, after_state, idempotency_key)
+        VALUES ($1, $2, 'pto_discovery_failed', NULL,
+          JSONB_BUILD_OBJECT('attemptedAt', $3::TIMESTAMPTZ, 'error', $4::TEXT),
+          'pto-discovery-failed:' || $1 || ':' || $3)
+        ON CONFLICT (idempotency_key) DO NOTHING
+      `, [input.franchiseId, input.actorId, input.discovery.attemptedAt, input.discovery.error]);
+    }
     await db.query(`
       INSERT INTO public.pto_audit_events
         (franchiseid, actor_id, event_type, before_state, after_state, idempotency_key)

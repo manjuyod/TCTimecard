@@ -21,7 +21,27 @@ const centerStatus = {
   enabled: false,
   firstActivatedAt: null,
   lastSuccessfulSyncAt: null,
-  lastSyncError: null
+  lastSyncError: null,
+  lastSuccessfulRosterSyncAt: null,
+  lastRosterSyncError: null,
+  lastSuccessfulDiscoveryAt: null,
+  lastDiscoveryError: null
+};
+
+const emptyHealth = {
+  lastSuccessfulSyncAt: null,
+  lastSyncError: null,
+  lastSuccessfulRosterSyncAt: null,
+  lastRosterSyncError: null,
+  lastSuccessfulDiscoveryAt: null,
+  lastDiscoveryError: null
+};
+
+const emptyAccountCounts = {
+  discoveredAccountCount: 0,
+  linkedAccountCount: 0,
+  excludedAccountCount: 0,
+  pendingReviewCount: 0
 };
 
 const unsupported = async (): Promise<never> => {
@@ -49,14 +69,17 @@ const createStore = (overrides: Partial<PtoServiceStore> = {}): PtoServiceStore 
   return store;
 };
 
-const roster = (fetchTutors: PtoTutorRosterSource['fetchTutors']): PtoTutorRosterSource => ({
-  fetchTutors,
-  discoverRelatedAccounts: async () => ({
+const roster = (
+  fetchTutors: PtoTutorRosterSource['fetchTutors'],
+  discoverRelatedAccounts: PtoTutorRosterSource['discoverRelatedAccounts'] = async () => ({
     accounts: [],
     attemptedAt: '1970-01-01T00:00:00.000Z',
     completedAt: '1970-01-01T00:00:00.000Z',
     error: null
   })
+): PtoTutorRosterSource => ({
+  fetchTutors,
+  discoverRelatedAccounts
 });
 
 test('activation preview reads a fresh active CRM roster without opening a write transaction', async () => {
@@ -73,7 +96,9 @@ test('activation preview reads a fresh active CRM roster without opening a write
         activeCrmTutorCount: tutors.length,
         newMembershipCount: 1,
         newProfileCount: 1,
+        ...emptyAccountCounts,
         pendingExactNameCandidateCount: 2,
+        ...emptyHealth,
         warnings: []
       };
     }
@@ -92,6 +117,37 @@ test('activation preview reads a fresh active CRM roster without opening a write
   assert.equal(previewTutors.length, 1);
   assert.equal(result.activeCrmTutorCount, 1);
   assert.equal(result.policy.entitlementDays, 5);
+});
+
+test('activation preview discovers related accounts from active local tutors', async () => {
+  let discoveredTutors: unknown[] = [];
+  const service = createPtoService({
+    store: createStore({
+      previewActivation: async (_franchiseId, tutors) => ({
+        activeCrmTutorCount: tutors.length,
+        newMembershipCount: 0,
+        newProfileCount: 0,
+        ...emptyAccountCounts,
+        pendingExactNameCandidateCount: 0,
+        ...emptyHealth,
+        warnings: []
+      })
+    }),
+    rosterSource: roster(async () => [
+      { id: 10, franchiseId: 77, firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com', isDeleted: false },
+      { id: 11, franchiseId: 77, firstName: 'Gone', lastName: 'Tutor', email: null, isDeleted: true }
+    ], async (tutors) => {
+      discoveredTutors = tutors;
+      return { accounts: [], attemptedAt: '2026-08-19T20:00:00.000Z',
+        completedAt: '2026-08-19T20:00:01.000Z', error: null };
+    })
+  });
+
+  await service.previewPtoActivation(77);
+
+  assert.deepEqual(discoveredTutors, [
+    { id: 10, franchiseId: 77, firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com', isDeleted: false }
+  ]);
 });
 
 test('sync refetches CRM before a single transaction and performs no store writes when CRM fails', async () => {
@@ -126,8 +182,11 @@ test('sync reconciles active and deleted CRM rows transactionally and returns th
         activatedMembershipCount: 1,
         deactivatedMembershipCount: 1,
         createdProfileCount: 1,
+        ...emptyAccountCounts,
         pendingCandidateCount: 0,
-        lastSuccessfulSyncAt: syncedAt
+        ...emptyHealth,
+        lastSuccessfulSyncAt: syncedAt,
+        warnings: []
       };
     }
   });
@@ -154,6 +213,45 @@ test('sync reconciles active and deleted CRM rows transactionally and returns th
 
   assert.deepEqual(calls, ['crm', 'begin', 'sync:2:true', 'commit']);
   assert.equal(result.lastSuccessfulSyncAt, syncedAt);
+});
+
+test('sync preserves a successful local roster when global discovery fails', async () => {
+  let capturedDiscovery: unknown;
+  const syncedAt = '2026-08-19T20:00:02.000Z';
+  const transactional = createStore({
+    syncRoster: async (input) => {
+      capturedDiscovery = (input as typeof input & { discovery?: unknown }).discovery;
+      return {
+        activeTutorCount: 1,
+        activatedMembershipCount: 1,
+        deactivatedMembershipCount: 0,
+        createdProfileCount: 1,
+        ...emptyAccountCounts,
+        pendingCandidateCount: 0,
+        ...emptyHealth,
+        lastSuccessfulSyncAt: syncedAt,
+        warnings: []
+      };
+    }
+  });
+  const service = createPtoService({
+    store: createStore({ runInTransaction: async (work) => work(transactional) }),
+    rosterSource: roster(async () => [
+      { id: 6801, franchiseId: 68, firstName: 'Ada', lastName: 'Lovelace',
+        email: 'ada@example.com', isDeleted: false }
+    ], async () => {
+      throw new Error('global discovery unavailable');
+    })
+  });
+
+  const result = await service.syncPtoRoster({ franchiseId: 68, activate: false, actorId: 'admin-68' });
+
+  assert.equal(result.lastSuccessfulSyncAt, syncedAt);
+  assert.match(String((capturedDiscovery as { attemptedAt?: unknown })?.attemptedAt), /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(
+    { ...(capturedDiscovery as Record<string, unknown>), attemptedAt: '<captured>' },
+    { accounts: [], attemptedAt: '<captured>', completedAt: null, error: 'global discovery unavailable' }
+  );
 });
 
 test('manual email normalization trims, lowercases, and rejects malformed values', () => {

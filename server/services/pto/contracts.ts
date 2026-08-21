@@ -9,7 +9,14 @@ export interface PtoProgramPolicy {
   carryoverDays: number;
 }
 
-export interface PtoCenterStatus {
+export interface PtoSyncHealth {
+  lastSuccessfulRosterSyncAt: string | null;
+  lastRosterSyncError: string | null;
+  lastSuccessfulDiscoveryAt: string | null;
+  lastDiscoveryError: string | null;
+}
+
+export interface PtoCenterStatus extends PtoSyncHealth {
   franchiseId: number;
   enabled: boolean;
   firstActivatedAt: string | null;
@@ -38,11 +45,17 @@ export interface PtoDiscoveryResult {
   error: string | null;
 }
 
-export interface PtoActivationPreviewBase {
+export interface PtoActivationPreviewBase extends PtoSyncHealth {
   activeCrmTutorCount: number;
   newMembershipCount: number;
   newProfileCount: number;
+  discoveredAccountCount: number;
+  linkedAccountCount: number;
+  excludedAccountCount: number;
+  pendingReviewCount: number;
   pendingExactNameCandidateCount: number;
+  lastSuccessfulSyncAt: string | null;
+  lastSyncError: string | null;
   warnings: string[];
 }
 
@@ -58,15 +71,22 @@ export interface PtoRosterSyncInput {
 
 export interface PtoRosterSyncStoreInput extends PtoRosterSyncInput {
   tutors: PtoRosterTutor[];
+  discovery: PtoDiscoveryResult;
 }
 
-export interface PtoRosterSyncSummary {
+export interface PtoRosterSyncSummary extends PtoSyncHealth {
   activeTutorCount: number;
   activatedMembershipCount: number;
   deactivatedMembershipCount: number;
   createdProfileCount: number;
+  discoveredAccountCount: number;
+  linkedAccountCount: number;
+  excludedAccountCount: number;
+  pendingReviewCount: number;
   pendingCandidateCount: number;
   lastSuccessfulSyncAt: string;
+  lastSyncError: string | null;
+  warnings: string[];
 }
 
 export interface PtoBalance {
@@ -203,7 +223,11 @@ export interface PtoTutorRosterSource {
 export interface PtoServiceStore {
   getProgramPolicy(): Promise<PtoProgramPolicy>;
   getCenterStatus(franchiseId: number): Promise<PtoCenterStatus>;
-  previewActivation(franchiseId: number, tutors: PtoRosterTutor[]): Promise<PtoActivationPreviewBase>;
+  previewActivation(
+    franchiseId: number,
+    tutors: PtoRosterTutor[],
+    discovery: PtoDiscoveryResult
+  ): Promise<PtoActivationPreviewBase>;
   syncRoster(input: PtoRosterSyncStoreInput): Promise<PtoRosterSyncSummary>;
   getTutorProfile(input: { franchiseId: number; tutorId: number }): Promise<PtoTutorProfileResult>;
   listAdminProfiles(input: NormalizedListAdminPtoProfilesInput): Promise<PagedResult<PtoProfileSummary>>;

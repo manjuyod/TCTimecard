@@ -8,7 +8,11 @@ import { createPostgresPtoStore } from '../services/pto';
 
 const enabled = process.env.RUN_PTO_POSTGRES_TESTS === '1';
 const containerName = `timecard-pto-admin-test-${process.pid}`;
-const migrations = ['0010_shared_pto.sql', '0011_pto_admin_invariants.sql'].map((file) =>
+const migrations = [
+  '0010_shared_pto.sql',
+  '0011_pto_admin_invariants.sql',
+  '0013_persistent_pto_profile_links.sql'
+].map((file) =>
   readFileSync(path.resolve(__dirname, `../db/migrations/${file}`), 'utf8')
 );
 let pool: Pool | undefined;
@@ -29,6 +33,22 @@ const waitForPostgres = async (candidate: Pool): Promise<void> => {
   }
   throw lastError;
 };
+
+const discovery = (accounts: Array<{
+  id: number;
+  franchiseId: number;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  isDeleted: boolean;
+  provider: string;
+  crmId: string;
+}> = []) => ({
+  accounts,
+  attemptedAt: '2026-08-19T20:00:00.000Z',
+  completedAt: '2026-08-19T20:00:01.000Z',
+  error: null
+});
 
 const reset = async (): Promise<void> => {
   assert.ok(pool);
@@ -260,7 +280,7 @@ test('PostgreSQL store syncs by stable tutor ID, preserves manual email, and nev
     email: 'first@example.com', isDeleted: false
   };
   await store.runInTransaction((tx) => tx.syncRoster({
-    franchiseId: 70, activate: true, actorId: 'admin-70', tutors: [tutor]
+    franchiseId: 70, activate: true, actorId: 'admin-70', tutors: [tutor], discovery: discovery()
   }));
   const membership = await pool.query<{ id: string; profile_id: string }>(
     'SELECT id, profile_id FROM public.pto_profile_centers WHERE franchiseid = 70 AND tutor_id = 700'
@@ -272,7 +292,7 @@ test('PostgreSQL store syncs by stable tutor ID, preserves manual email, and nev
   }));
   await store.runInTransaction((tx) => tx.syncRoster({
     franchiseId: 70, activate: false, actorId: 'admin-70',
-    tutors: [{ ...tutor, email: 'updated@example.com' }]
+    tutors: [{ ...tutor, email: 'updated@example.com' }], discovery: discovery()
   }));
 
   const stored = await pool.query<{ source: string; email: string }>(`
@@ -288,6 +308,64 @@ test('PostgreSQL store syncs by stable tutor ID, preserves manual email, and nev
     WHERE profile_id = $1 AND event_type = 'grant'
   `, [membership.rows[0].profile_id]);
   assert.equal(grants.rows[0].count, '1');
+});
+
+test('discovery sync creates pending decisions without overwriting excluded or linked decisions', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  const store = createPostgresPtoStore(pool);
+  const localTutor = {
+    id: 6801, franchiseId: 68, firstName: 'Ada', lastName: 'Lovelace',
+    email: 'ada@center68.example', isDeleted: false
+  };
+  const remoteAccount = {
+    id: 200, franchiseId: 2, firstName: 'Ada', lastName: 'Lovelace',
+    email: 'ada@center2.example', isDeleted: false,
+    provider: 'timecard-center:2', crmId: '200'
+  };
+  const sync = () => store.runInTransaction((tx) => tx.syncRoster({
+    franchiseId: 68,
+    activate: true,
+    actorId: 'admin-68',
+    tutors: [localTutor],
+    discovery: discovery([remoteAccount])
+  }));
+
+  await sync();
+  const account = await pool.query<{ id: string }>(`
+    SELECT id FROM public.pto_discovered_tutor_accounts
+    WHERE provider = 'timecard-center:2' AND crm_id = '200'
+  `);
+  const pending = await pool.query<{ status: string; version: number }>(`
+    SELECT status, version FROM public.pto_profile_link_decisions WHERE account_id = $1
+  `, [account.rows[0]?.id]);
+  assert.deepEqual(pending.rows, [{ status: 'pending', version: 1 }]);
+
+  await pool.query(`
+    UPDATE public.pto_profile_link_decisions SET status = 'excluded', version = 7 WHERE account_id = $1
+  `, [account.rows[0].id]);
+  await sync();
+  const excluded = await pool.query<{ status: string; version: number }>(`
+    SELECT status, version FROM public.pto_profile_link_decisions WHERE account_id = $1
+  `, [account.rows[0].id]);
+  assert.deepEqual(excluded.rows, [{ status: 'excluded', version: 7 }]);
+
+  await pool.query(`
+    UPDATE public.pto_profile_link_decisions SET status = 'linked', version = 8 WHERE account_id = $1
+  `, [account.rows[0].id]);
+  await sync();
+  const linked = await pool.query<{ status: string; version: number }>(`
+    SELECT status, version FROM public.pto_profile_link_decisions WHERE account_id = $1
+  `, [account.rows[0].id]);
+  assert.deepEqual(linked.rows, [{ status: 'linked', version: 8 }]);
+
+  const remoteMaterialization = await pool.query<{ memberships: string; cycles: string }>(`
+    SELECT
+      (SELECT COUNT(*)::TEXT FROM public.pto_profile_centers WHERE franchiseid = 2 AND tutor_id = 200) AS memberships,
+      (SELECT COUNT(*)::TEXT FROM public.pto_entitlement_cycles cycle
+       JOIN public.pto_profile_crm_ids crm ON crm.profile_id = cycle.profile_id
+       WHERE crm.provider = 'timecard-center:2' AND crm.crm_id = '200') AS cycles
+  `);
+  assert.deepEqual(remoteMaterialization.rows[0], { memberships: '0', cycles: '0' });
 });
 
 test('PostgreSQL store rejects center email ambiguity and audits authorized negative adjustments', { skip: !enabled }, async () => {
@@ -373,7 +451,8 @@ test('deleted and missing CRM tutors cannot resolve public PTO identity after sy
   const store = createPostgresPtoStore(db);
   const tutor = { id: 404, franchiseId: 40, firstName: 'Inactive', lastName: 'Tutor',
     email: 'inactive@example.com', isDeleted: false };
-  await store.syncRoster({ franchiseId: 40, activate: true, actorId: 'admin-40', tutors: [tutor] });
+  await store.syncRoster({ franchiseId: 40, activate: true, actorId: 'admin-40',
+    tutors: [tutor], discovery: discovery() });
   const resolvePublic = () => db.query(`SELECT public.pto_resolve_profile(
     40, NULL, NULL, 'inactive@example.com', 'public', 'Inactive', 'Tutor'
   )`);
@@ -388,13 +467,15 @@ test('deleted and missing CRM tutors cannot resolve public PTO identity after sy
   assert.equal(await membershipIsActive(), true);
 
   await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40',
-    tutors: [{ ...tutor, isDeleted: true }] });
+    tutors: [{ ...tutor, isDeleted: true }], discovery: discovery() });
   await assert.rejects(resolveAuthenticated, /active CRM membership/i);
   assert.equal(await membershipIsActive(), false);
   await assert.rejects(resolvePublic, /exactly one active profile/);
 
-  await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40', tutors: [tutor] });
-  await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40', tutors: [] });
+  await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40',
+    tutors: [tutor], discovery: discovery() });
+  await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40',
+    tutors: [], discovery: discovery() });
   const request = await db.query<{ id: string; created_at: Date }>(`
     INSERT INTO public.time_off_requests
       (franchiseid, tutorid, first_name, last_name, email, start_at, end_at, type, status, partial_day, public_metadata)
@@ -436,6 +517,7 @@ test('legacy email provenance and CRM identity follow a detached membership thro
   await pool.query(`INSERT INTO public.pto_profile_emails (profile_id, franchiseid, email)
     VALUES ($1, 51, 'legacy@example.com')`, [profileId]);
   await pool.query(migrations[1]);
+  await pool.query(migrations[2]);
   const membership = await pool.query<{ id: string }>(
     'SELECT id FROM public.pto_profile_centers WHERE profile_id = $1 AND franchiseid = 51', [profileId]
   );
@@ -449,7 +531,7 @@ test('legacy email provenance and CRM identity follow a detached membership thro
     franchiseId: 51, activate: true, actorId: 'admin-51', tutors: [{
       id: 5151, franchiseId: 51, firstName: 'Legacy', lastName: 'Tutor',
       email: 'updated@example.com', isDeleted: false
-    }]
+    }], discovery: discovery()
   }));
   const durable = await pool.query<{ crm_profile: string; email_profile: string; source_membership_id: string }>(`
     SELECT crm.profile_id AS crm_profile, email.profile_id AS email_profile, email.source_membership_id
@@ -471,7 +553,7 @@ test('manual email survives a CRM collision and ambiguity is checked across ever
     franchiseId: 60, activate: true, actorId: 'admin-60', tutors: [{
       id: 6060, franchiseId: 60, firstName: 'Collision', lastName: 'Tutor',
       email: 'same@example.com', isDeleted: false
-    }]
+    }], discovery: discovery()
   }));
   const member = await pool.query<{ id: string; profile_id: string }>(
     'SELECT id, profile_id FROM public.pto_profile_centers WHERE franchiseid = 60 AND tutor_id = 6060'
@@ -481,7 +563,7 @@ test('manual email survives a CRM collision and ambiguity is checked across ever
   await store.syncRoster({ franchiseId: 60, activate: false, actorId: 'admin-60', tutors: [{
     id: 6060, franchiseId: 60, firstName: 'Collision', lastName: 'Tutor',
     email: 'changed@example.com', isDeleted: false
-  }] });
+  }], discovery: discovery() });
   const collision = await pool.query<{ email: string; source: string; active: boolean }>(`
     SELECT email, source, active FROM public.pto_profile_emails
     WHERE profile_id = $1 ORDER BY email, source
@@ -574,7 +656,10 @@ test('preview is null-safe and counts only genuine new exact-name candidates', {
   const preview = await createPostgresPtoStore(pool).previewActivation(80, [
     { id: 8001, franchiseId: 80, firstName: 'Preview', lastName: 'Tutor', email: null, isDeleted: false },
     { id: 8002, franchiseId: 80, firstName: 'Preview', lastName: 'Tutor', email: null, isDeleted: false }
-  ]);
+  ], discovery([{
+    id: 9001, franchiseId: 90, firstName: 'Preview', lastName: 'Tutor', email: null, isDeleted: false,
+    provider: 'timecard-center:90', crmId: '9001'
+  }]));
   assert.equal(preview.newMembershipCount, 1);
   assert.equal(preview.newProfileCount, 1);
   assert.equal(preview.pendingExactNameCandidateCount, 1);
@@ -586,7 +671,7 @@ test('activation, sync, email, and adjustment audits contain actual before and a
   await store.runInTransaction((tx) => tx.syncRoster({
     franchiseId: 90, activate: true, actorId: 'admin-90', tutors: [{
       id: 9090, franchiseId: 90, firstName: 'Audit', lastName: 'Tutor', email: null, isDeleted: false
-    }]
+    }], discovery: discovery()
   }));
   const member = await pool.query<{ id: string; profile_id: string }>(
     'SELECT id, profile_id FROM public.pto_profile_centers WHERE franchiseid = 90 AND tutor_id = 9090'
@@ -607,6 +692,8 @@ test('activation, sync, email, and adjustment audits contain actual before and a
   }
   assert.deepEqual(events.rows[0].before_state, {
     enabled: false, firstActivatedAt: null, lastSuccessfulSyncAt: null, lastSyncError: null,
+    lastSuccessfulRosterSyncAt: null, lastRosterSyncError: null,
+    lastSuccessfulDiscoveryAt: null, lastDiscoveryError: null,
     activeTutorIds: []
   });
 });

@@ -43,15 +43,38 @@ const quote = {
   }
 };
 
+const syncHealth = {
+  lastSuccessfulSyncAt: '2026-08-15T00:00:00.000Z',
+  lastSyncError: null,
+  lastSuccessfulRosterSyncAt: '2026-08-15T00:00:00.000Z',
+  lastRosterSyncError: null,
+  lastSuccessfulDiscoveryAt: '2026-08-15T00:00:01.000Z',
+  lastDiscoveryError: null
+};
+
+const accountCounts = {
+  discoveredAccountCount: 0,
+  linkedAccountCount: 0,
+  excludedAccountCount: 0,
+  pendingReviewCount: 0
+};
+
 const baseDeps = (): PtoRouteDeps => ({
   nowIso: () => '2026-08-16T12:00:00.000Z',
   resolveTimezone: async () => 'America/Los_Angeles',
   resolveTimeOffNoticeRequired: async () => false,
   getProgramPolicy: async () => ({ id: '1', effectiveFrom: '1970-01-01', entitlementDays: 5, renewalMonth: 1, renewalDay: 1, carryoverDays: 0 }),
-  getCenterStatus: async (franchiseId) => ({ franchiseId, enabled: true, firstActivatedAt: '2026-01-01T00:00:00.000Z', lastSuccessfulSyncAt: '2026-08-15T00:00:00.000Z', lastSyncError: null }),
-  previewActivation: async () => ({ activeCrmTutorCount: 1, newMembershipCount: 0, newProfileCount: 0, pendingExactNameCandidateCount: 0, warnings: [], policy: { id: '1', effectiveFrom: '1970-01-01', entitlementDays: 5, renewalMonth: 1, renewalDay: 1, carryoverDays: 0 } }),
-  syncRoster: async () => ({ activeTutorCount: 1, activatedMembershipCount: 1, deactivatedMembershipCount: 0, createdProfileCount: 0, pendingCandidateCount: 0, lastSuccessfulSyncAt: '2026-08-16T12:00:00.000Z' }),
-  deactivateCenter: async (input) => ({ franchiseId: input.franchiseId, enabled: false, firstActivatedAt: '2026-01-01T00:00:00.000Z', lastSuccessfulSyncAt: '2026-08-15T00:00:00.000Z', lastSyncError: null }),
+  getCenterStatus: async (franchiseId) => ({ franchiseId, enabled: true,
+    firstActivatedAt: '2026-01-01T00:00:00.000Z', ...syncHealth }),
+  previewActivation: async () => ({ activeCrmTutorCount: 1, newMembershipCount: 0, newProfileCount: 0,
+    ...accountCounts, pendingExactNameCandidateCount: 0, ...syncHealth, warnings: [],
+    policy: { id: '1', effectiveFrom: '1970-01-01', entitlementDays: 5,
+      renewalMonth: 1, renewalDay: 1, carryoverDays: 0 } }),
+  syncRoster: async () => ({ activeTutorCount: 1, activatedMembershipCount: 1,
+    deactivatedMembershipCount: 0, createdProfileCount: 0, ...accountCounts, pendingCandidateCount: 0,
+    ...syncHealth, lastSuccessfulSyncAt: '2026-08-16T12:00:00.000Z', warnings: [] }),
+  deactivateCenter: async (input) => ({ franchiseId: input.franchiseId, enabled: false,
+    firstActivatedAt: '2026-01-01T00:00:00.000Z', ...syncHealth }),
   getTutorProfile: async () => profile,
   getBalanceSummary: async () => quote.balance,
   authorizePublicCenter: async () => ({ franchiseId: 6 }),

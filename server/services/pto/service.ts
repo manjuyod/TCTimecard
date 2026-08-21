@@ -6,6 +6,7 @@ import type {
   ListAdminPtoProfilesInput,
   ListPtoAuditInput,
   PtoAliasDecisionInput,
+  PtoDiscoveryResult,
   PtoServiceStore,
   PtoTutorRosterSource,
   RemovePtoEmailInput
@@ -18,6 +19,13 @@ const pageSize = (value: number | undefined): number =>
   Math.min(100, Number.isInteger(value) && Number(value) > 0 ? Number(value) : 25);
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+const discoveryFailure = (attemptedAt: string, error: unknown): PtoDiscoveryResult => ({
+  accounts: [],
+  attemptedAt,
+  completedAt: null,
+  error: error instanceof Error ? error.message : 'Global PTO account discovery failed'
+});
 
 export const normalizeManualPtoEmail = (value: string): string => {
   const normalized = value.trim().toLowerCase();
@@ -37,18 +45,24 @@ export const createPtoService = (dependencies: {
     getPtoProgramPolicy: () => store.getProgramPolicy(),
     getPtoCenterStatus: (franchiseId: number) => store.getCenterStatus(franchiseId),
     previewPtoActivation: async (franchiseId: number) => {
-      const [tutors, policy] = await Promise.all([
-        rosterSource.fetchTutors(franchiseId),
+      const tutors = await rosterSource.fetchTutors(franchiseId);
+      const activeTutors = tutors.filter((tutor) => !tutor.isDeleted);
+      const attemptedAt = new Date().toISOString();
+      const [discovery, policy] = await Promise.all([
+        rosterSource.discoverRelatedAccounts(activeTutors).catch((error) => discoveryFailure(attemptedAt, error)),
         store.getProgramPolicy()
       ]);
-      const activeTutors = tutors.filter((tutor) => !tutor.isDeleted);
-      const preview = await store.previewActivation(franchiseId, activeTutors);
+      const preview = await store.previewActivation(franchiseId, activeTutors, discovery);
       return { ...preview, policy };
     },
     syncPtoRoster: async (input: { franchiseId: number; activate: boolean; actorId: Id }) => {
       const tutors = await rosterSource.fetchTutors(input.franchiseId);
+      const activeTutors = tutors.filter((tutor) => !tutor.isDeleted);
+      const attemptedAt = new Date().toISOString();
+      const discovery = await rosterSource.discoverRelatedAccounts(activeTutors)
+        .catch((error) => discoveryFailure(attemptedAt, error));
       return store.runInTransaction((transactionalStore) =>
-        transactionalStore.syncRoster({ ...input, tutors })
+        transactionalStore.syncRoster({ ...input, tutors, discovery })
       );
     },
     getTutorPtoProfile: (input: { franchiseId: number; tutorId: number }) => store.getTutorProfile(input),
