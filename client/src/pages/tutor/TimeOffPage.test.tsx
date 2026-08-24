@@ -17,8 +17,15 @@ afterEach(() => {
 const installTimeOffFetch = (noticeRequired: boolean, options: {
   ptoEnabled?: boolean;
   quoteEligible?: boolean;
+  linkedLogin?: boolean;
 } = {}) => {
   const ptoEnabled = options.ptoEnabled ?? false;
+  const linkedLogin = options.linkedLogin ?? false;
+  const balance = {
+    cycleStart: '2026-01-01', cycleEnd: '2026-12-31', renewsOn: '2027-01-01',
+    grantedDays: 5, adjustedDays: 0, availableDays: linkedLogin ? 5 : 3.5,
+    reservedDays: linkedLogin ? 0 : 0.5, usedDays: linkedLogin ? 0 : 1
+  };
   const calls: Array<{ path: string; init?: RequestInit }> = [];
   globalThis.fetch = async (input, init) => {
     const path = String(input);
@@ -41,10 +48,7 @@ const installTimeOffFetch = (noticeRequired: boolean, options: {
           allowedTypes: ptoEnabled ? ['pto', 'sick', 'emergency', 'unpaid', 'other'] : ['sick', 'emergency', 'unpaid', 'other'],
           maxDurationHours: 336,
           pto: ptoEnabled ? {
-            enabled: true, reason: 'eligible', balance: {
-              cycleStart: '2026-01-01', cycleEnd: '2026-12-31', renewsOn: '2027-01-01',
-              grantedDays: 5, adjustedDays: 0, availableDays: 3.5, reservedDays: 0.5, usedDays: 1
-            }
+            enabled: true, reason: 'eligible', balance
           } : { enabled: false, reason: 'center_disabled' }
         }
       }), {
@@ -54,15 +58,24 @@ const installTimeOffFetch = (noticeRequired: boolean, options: {
     }
     if (path === '/api/pto/me') {
       return new Response(JSON.stringify(ptoEnabled ? {
-        profile: { id: '10', firstName: 'Ada', lastName: 'Lovelace', active: true,
-          balance: { grantedDays: 5, balanceDays: 4, reservedDays: 0.5, availableDays: 3.5 } },
-        memberships: [
+        profile: linkedLogin
+          ? { id: '8', firstName: 'Shannon', lastName: 'Force', active: true,
+              balance: { grantedDays: 5, balanceDays: 5, reservedDays: 0, availableDays: 5 } }
+          : { id: '10', firstName: 'Ada', lastName: 'Lovelace', active: true,
+              balance: { grantedDays: 5, balanceDays: 4, reservedDays: 0.5, availableDays: 3.5 } },
+        memberships: linkedLogin ? [
+          { id: '68', profileId: '8', franchiseId: 68, tutorId: 3937, active: true,
+            crmSnapshot: {}, firstSeenAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-23T12:00:00Z' }
+        ] : [
           { id: '20', profileId: '10', franchiseId: 1, tutorId: 123, active: true,
             crmSnapshot: {}, firstSeenAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' },
           { id: '21', profileId: '10', franchiseId: 2, tutorId: 202, active: true,
             crmSnapshot: {}, firstSeenAt: '2026-02-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' }
         ],
-        emails: [
+        emails: linkedLogin ? [
+          { id: '68', profileId: '8', franchiseId: 68, email: 'shannon.force@example.com', active: true,
+            source: 'crm', sourceMembershipId: '68', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-23T12:00:00Z' }
+        ] : [
           { id: '30', profileId: '10', franchiseId: 1, email: 'ada@example.com', active: true,
             source: 'crm', sourceMembershipId: '20', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' },
           { id: '31', profileId: '10', franchiseId: 1, email: 'ada+pto@example.com', active: true,
@@ -70,13 +83,12 @@ const installTimeOffFetch = (noticeRequired: boolean, options: {
           { id: '32', profileId: '10', franchiseId: 2, email: 'ada.center2@example.com', active: true,
             source: 'crm', sourceMembershipId: '21', createdAt: '2026-02-01T00:00:00Z', updatedAt: '2026-08-20T12:00:00Z' }
         ],
-        balance: {
-          cycleStart: '2026-01-01', cycleEnd: '2026-12-31', renewsOn: '2027-01-01',
-          grantedDays: 5, adjustedDays: 0, availableDays: 3.5, reservedDays: 0.5, usedDays: 1
-        },
+        balance,
         unresolvedReason: null,
         policy: { id: '1', effectiveFrom: '2026-01-01', entitlementDays: 5, renewalMonth: 1, renewalDay: 1, carryoverDays: 0 },
-        center: { franchiseId: 1, enabled: true, firstActivatedAt: '2026-01-01T00:00:00Z', lastSuccessfulSyncAt: '2026-08-20T12:00:00Z', lastSyncError: null }
+        center: linkedLogin
+          ? { franchiseId: 16, enabled: false, firstActivatedAt: null, lastSuccessfulSyncAt: null, lastSyncError: null }
+          : { franchiseId: 1, enabled: true, firstActivatedAt: '2026-01-01T00:00:00Z', lastSuccessfulSyncAt: '2026-08-20T12:00:00Z', lastSyncError: null }
       } : {
         profile: null, memberships: [], emails: [], balance: null, unresolvedReason: 'center_disabled',
         policy: { id: '1', effectiveFrom: '2026-01-01', entitlementDays: 5, renewalMonth: 1, renewalDay: 1, carryoverDays: 0 },
@@ -86,9 +98,22 @@ const installTimeOffFetch = (noticeRequired: boolean, options: {
     if (path === '/api/pto/me/quote') {
       const eligible = options.quoteEligible ?? true;
       return new Response(JSON.stringify({
-        eligible, reason: eligible ? 'eligible' : 'insufficient_balance', chargeDays: 1.5,
-        cycleAllocations: [{ cycleStart: '2026-01-01', days: 1 }, { cycleStart: '2027-01-01', days: 0.5 }]
+        eligible, reason: eligible ? 'eligible' : 'insufficient_balance', chargeDays: linkedLogin ? 1 : 1.5,
+        cycleAllocations: linkedLogin
+          ? [{ cycleStart: '2026-01-01', days: 1 }]
+          : [{ cycleStart: '2026-01-01', days: 1 }, { cycleStart: '2027-01-01', days: 0.5 }]
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (path === '/api/timeoff' && init?.method === 'POST') {
+      return new Response(JSON.stringify({
+        request: {
+          id: 3487, franchiseId: linkedLogin ? 16 : 1, tutorId: linkedLogin ? 3487 : 123,
+          startAt: '2026-08-24T07:00:00.000Z', endAt: '2026-08-25T06:59:59.999Z',
+          type: 'pto', notes: 'Family day', status: 'pending', createdAt: '2026-08-23T12:00:00Z',
+          decidedAt: null, decisionReason: null, source: 'authenticated', durationHours: 8
+        },
+        notification: { kind: 'admin_request', status: 'sent' }
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
     }
     if (path === '/api/pto/me/emails' && init?.method === 'POST') {
       return new Response(JSON.stringify({ email: {
@@ -156,6 +181,35 @@ describe('tutor time-off policy', () => {
     expect(screen.getByText('2027-01-01: 0.5 days')).toBeInTheDocument();
     expect(submit).toBeEnabled();
     expect(calls.some((call) => call.path === '/api/pto/me/quote')).toBe(true);
+  });
+
+  it('lets Shannon request from linked Center 16 against the Center 68 shared pool', async () => {
+    const calls = installTimeOffFetch(true, { ptoEnabled: true, quoteEligible: true, linkedLogin: true });
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+
+    expect(await screen.findByText('5 days available')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Center 68' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Center 16' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New Request' }));
+    fireEvent.click(screen.getByRole('combobox'));
+    const paidTimeOff = await screen.findByRole('option', { name: 'Paid time off' });
+    expect(paidTimeOff).toBeInTheDocument();
+    fireEvent.click(paidTimeOff);
+    fireEvent.change(document.querySelector('#startDate')!, { target: { value: '2026-08-24' } });
+    fireEvent.change(document.querySelector('#endDate')!, { target: { value: '2026-08-24' } });
+    fireEvent.change(screen.getByLabelText(/Reason/), { target: { value: 'Family day' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview PTO charge' }));
+
+    expect(await screen.findByText('1 day charged')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Submit request' }));
+
+    await waitFor(() => expect(calls.some((call) => call.path === '/api/timeoff' && call.init?.method === 'POST')).toBe(true));
+    expect(calls.some((call) => call.path === '/api/pto/me/quote')).toBe(true);
+    const request = calls.find((call) => call.path === '/api/timeoff' && call.init?.method === 'POST');
+    const requestBody = JSON.parse(String(request?.init?.body));
+    expect(requestBody).toMatchObject({ type: 'pto', startDate: '2026-08-24', endDate: '2026-08-24' });
+    expect(requestBody).not.toHaveProperty('franchiseId');
   });
 
   it('groups active linked centers and aliases beneath one balance and one policy summary', async () => {

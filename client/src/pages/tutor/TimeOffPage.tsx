@@ -476,7 +476,9 @@ export function TutorTimeOffPage(): JSX.Element {
                     </div>
                     {ptoQuote ? ptoQuote.eligible ? (
                       <div className="space-y-2">
-                        <p className="font-semibold text-emerald-700">{ptoQuote.chargeDays} days charged</p>
+                        <p className="font-semibold text-emerald-700">
+                          {ptoQuote.chargeDays} {ptoQuote.chargeDays === 1 ? 'day' : 'days'} charged
+                        </p>
                         <div className="flex flex-wrap gap-2">{ptoQuote.cycleAllocations.map((allocation) => (
                           <Badge key={`${allocation.cycleStart}-${allocation.days}`} variant="secondary">
                             {allocation.cycleStart}: {allocation.days} {allocation.days === 1 ? 'day' : 'days'}
