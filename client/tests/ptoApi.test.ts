@@ -6,40 +6,34 @@ const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 type PtoApi = {
-  fetchPtoActivationPreview: (franchiseId: number) => Promise<unknown>;
-  activatePtoCenter: (franchiseId: number) => Promise<unknown>;
+  syncPtoCenter: (franchiseId: number) => Promise<unknown>;
   fetchAdminPtoProfiles: (args: { franchiseId: number; search?: string; page?: number; pageSize?: number }) => Promise<unknown>;
   fetchTutorPtoProfile: () => Promise<unknown>;
   quoteTutorPto: (payload: Record<string, unknown>) => Promise<unknown>;
   addTutorPtoEmail: (email: string) => Promise<unknown>;
 };
 
-test('PTO API client exposes scoped admin activation and profile requests', async () => {
+test('PTO API client exposes scoped admin maintenance and profile requests', async () => {
   const pto = api as unknown as PtoApi;
-  assert.equal(typeof pto.fetchPtoActivationPreview, 'function');
-  assert.equal(typeof pto.activatePtoCenter, 'function');
+  assert.equal(typeof pto.syncPtoCenter, 'function');
   assert.equal(typeof pto.fetchAdminPtoProfiles, 'function');
 
   const calls: Array<{ input: string; init?: RequestInit }> = [];
   globalThis.fetch = async (input, init) => {
     calls.push({ input: String(input), init });
-    const body = String(input).includes('activation-preview')
-      ? { preview: { activeCrmTutorCount: 2 } }
-      : String(input).includes('/activate')
-        ? { sync: { activeTutorCount: 2 } }
-        : { items: [], page: 2, pageSize: 25, total: 0 };
+    const body = String(input).includes('/sync')
+      ? { sync: { activeTutorCount: 2 } }
+      : { items: [], page: 2, pageSize: 25, total: 0 };
     return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
 
-  await pto.fetchPtoActivationPreview(77);
-  await pto.activatePtoCenter(77);
+  await pto.syncPtoCenter(77);
   await pto.fetchAdminPtoProfiles({ franchiseId: 77, search: 'Ada Lovelace', page: 2, pageSize: 25 });
 
-  assert.equal(calls[0]?.input, '/api/pto/admin/activation-preview?franchiseId=77');
-  assert.equal(calls[1]?.input, '/api/pto/admin/activate');
-  assert.equal(calls[1]?.init?.method, 'POST');
-  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { franchiseId: 77 });
-  assert.equal(calls[2]?.input, '/api/pto/admin/profiles?franchiseId=77&search=Ada+Lovelace&page=2&pageSize=25');
+  assert.equal(calls[0]?.input, '/api/pto/admin/sync');
+  assert.equal(calls[0]?.init?.method, 'POST');
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { franchiseId: 77 });
+  assert.equal(calls[1]?.input, '/api/pto/admin/profiles?franchiseId=77&search=Ada+Lovelace&page=2&pageSize=25');
 });
 
 test('PTO API client sends authenticated quote and alternate-email requests', async () => {

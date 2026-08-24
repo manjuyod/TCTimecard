@@ -59,6 +59,15 @@ const installSettingsFetch = ({
 };
 
 describe('admin settings page', () => {
+  it('hides shared PTO administration when the selected center is inactive', async () => {
+    installSettingsFetch({ ptoEnabled: false });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: 'Settings' });
+    await waitFor(() => expect(screen.queryByText('Shared PTO')).not.toBeInTheDocument());
+    expect(screen.queryByRole('link', { name: 'Manage PTO' })).not.toBeInTheDocument();
+  });
+
   it('loads persisted settings for the selected franchise before saving', async () => {
     const calls = installSettingsFetch({
       autoClockOutEnabled: true,
@@ -271,11 +280,19 @@ describe('admin settings page', () => {
   });
 
   it('exposes a dedicated PTO management route inside the admin shell', async () => {
-    installSettingsFetch();
+    installSettingsFetch({ ptoEnabled: true });
     render(<MemoryRouter initialEntries={['/admin/pto']}><App /></MemoryRouter>);
 
     expect(await screen.findByRole('heading', { name: 'PTO Management' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /pto management/i })).toHaveAttribute('href', '/admin/pto');
+  });
+
+  it('hides PTO navigation in the admin shell when the session center is inactive', async () => {
+    installSettingsFetch({ ptoEnabled: false });
+    render(<MemoryRouter initialEntries={['/admin/settings']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('link', { name: /pto management/i })).not.toBeInTheDocument());
   });
 
   it('shows shared PTO status and links settings to PTO management', async () => {

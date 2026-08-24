@@ -210,26 +210,6 @@ export interface PtoCenterStatus extends PtoSyncHealth {
   lastSyncError: string | null;
 }
 
-export interface PtoActivationPreview {
-  activeCrmTutorCount: number;
-  newMembershipCount: number;
-  newProfileCount: number;
-  pendingExactNameCandidateCount: number;
-  discoveredAccountCount: number;
-  linkedAccountCount: number;
-  excludedAccountCount: number;
-  pendingReviewCount: number;
-  lastSuccessfulSyncAt: string | null;
-  lastSyncError: string | null;
-  lastSuccessfulRosterSyncAt: string | null;
-  lastRosterSyncError: string | null;
-  lastSuccessfulDiscoveryAt: string | null;
-  lastDiscoveryError: string | null;
-  candidateGroups: Array<{ profileId: string; profileName: string; account: PtoDiscoveredAccount }>;
-  warnings: string[];
-  policy: PtoProgramPolicy;
-}
-
 export interface PtoRosterSyncSummary extends PtoSyncHealth {
   activeTutorCount: number;
   activatedMembershipCount: number;
@@ -934,23 +914,6 @@ export const updateFranchiseSettings = async (args: {
 
 const ptoAdminMutation = async <T>(path: string, franchiseId: number, body: Record<string, unknown> = {}) =>
   apiFetch<T>(path, { method: 'POST', body: JSON.stringify({ ...body, franchiseId }) });
-
-export const fetchPtoActivationPreview = async (franchiseId: number): Promise<PtoActivationPreview> => {
-  const result = await apiFetch<{ preview: PtoActivationPreview }>(
-    `/api/pto/admin/activation-preview?franchiseId=${encodeURIComponent(franchiseId)}`
-  );
-  return result.preview;
-};
-
-export const activatePtoCenter = async (franchiseId: number): Promise<PtoRosterSyncSummary> => {
-  const result = await ptoAdminMutation<{ sync: PtoRosterSyncSummary }>('/api/pto/admin/activate', franchiseId);
-  return result.sync;
-};
-
-export const deactivatePtoCenter = async (franchiseId: number): Promise<PtoCenterStatus> => {
-  const result = await ptoAdminMutation<{ center: PtoCenterStatus }>('/api/pto/admin/deactivate', franchiseId);
-  return result.center;
-};
 
 export const syncPtoCenter = async (franchiseId: number): Promise<PtoRosterSyncSummary> => {
   const result = await ptoAdminMutation<{ sync: PtoRosterSyncSummary }>('/api/pto/admin/sync', franchiseId);

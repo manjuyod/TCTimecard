@@ -1,17 +1,14 @@
 import { useEffect, useState } from 'react';
+import { Navigate } from 'react-router-dom';
 import {
-  activatePtoCenter,
   addAdminPtoEmail,
   adjustAdminPtoBalance,
   assignPtoAdjustmentProvenance,
-  deactivatePtoCenter,
   fetchAdminPtoAudit,
   fetchAdminPtoProfile,
   fetchAdminPtoProfiles,
   fetchFranchiseSettings,
-  fetchPtoActivationPreview,
   FranchiseSettings,
-  PtoActivationPreview,
   PtoAccountLinkPreview,
   PtoAdminProfileDetail,
   PtoAuditEvent,
@@ -33,7 +30,7 @@ import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle
 } from '../../components/ui/dialog';
 import { InlineError } from '../../components/shared/InlineError';
 import { Input } from '../../components/ui/input';
@@ -54,10 +51,6 @@ export function PtoManagementPage(): JSX.Element {
   const [settings, setSettings] = useState<FranchiseSettings | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [preview, setPreview] = useState<PtoActivationPreview | null>(null);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewing, setPreviewing] = useState(false);
-  const [activating, setActivating] = useState(false);
   const [tab, setTab] = useState<'profiles' | 'audit'>('profiles');
   const [profiles, setProfiles] = useState<PtoPagedResult<PtoProfileSummary> | null>(null);
   const [audit, setAudit] = useState<PtoPagedResult<PtoAuditEvent> | null>(null);
@@ -78,12 +71,9 @@ export function PtoManagementPage(): JSX.Element {
   const [adjustmentReason, setAdjustmentReason] = useState('');
   const [accountPreview, setAccountPreview] = useState<PtoAccountLinkPreview | null>(null);
   const [accountContextProfile, setAccountContextProfile] = useState<PtoAdminProfileDetail | null>(null);
-  const [accountPreviewSource, setAccountPreviewSource] = useState<'profile' | 'activation'>('profile');
   const [accountPreviewing, setAccountPreviewing] = useState(false);
   const [accountConfirming, setAccountConfirming] = useState(false);
   const [provenanceSaving, setProvenanceSaving] = useState(false);
-  const [deactivateOpen, setDeactivateOpen] = useState(false);
-  const [deactivating, setDeactivating] = useState(false);
 
   const selectedFranchiseId = selectorAllowed ? Number(franchiseIdInput) : sessionFranchiseId;
   const validSelection = selectedFranchiseId !== null && Number.isSafeInteger(selectedFranchiseId)
@@ -143,53 +133,6 @@ export function PtoManagementPage(): JSX.Element {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionFranchiseId]);
-
-  const openActivationPreview = async () => {
-    if (appliedFranchiseId === null || !scopeCurrent) return;
-    setPreviewing(true);
-    setError(null);
-    try {
-      const result = await fetchPtoActivationPreview(appliedFranchiseId);
-      setPreview(result);
-      setPreviewOpen(true);
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : 'Unable to preview PTO activation';
-      setError(message);
-      toast.error(message);
-    } finally {
-      setPreviewing(false);
-    }
-  };
-
-  const activate = async () => {
-    if (appliedFranchiseId === null || !preview) return;
-    setActivating(true);
-    setError(null);
-    try {
-      const sync = await activatePtoCenter(appliedFranchiseId);
-      setSettings((current) => current ? {
-        ...current,
-        ptoEnabled: true,
-        ptoFirstActivatedAt: current.ptoFirstActivatedAt ?? sync.lastSuccessfulSyncAt,
-        ptoLastSuccessfulSyncAt: sync.lastSuccessfulSyncAt,
-        ptoLastSyncError: sync.lastSyncError,
-        ptoLastSuccessfulRosterSyncAt: sync.lastSuccessfulRosterSyncAt,
-        ptoLastRosterSyncError: sync.lastRosterSyncError,
-        ptoLastSuccessfulDiscoveryAt: sync.lastSuccessfulDiscoveryAt,
-        ptoLastDiscoveryError: sync.lastDiscoveryError
-      } : current);
-      setPreviewOpen(false);
-      setPreview(null);
-      await loadProgramData(appliedFranchiseId, 1, '');
-      toast.success(`PTO activated for ${sync.activeTutorCount} active tutors`);
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : 'Unable to activate PTO';
-      setError(message);
-      toast.error(message);
-    } finally {
-      setActivating(false);
-    }
-  };
 
   const loadProfile = async (profileId: string) => {
     if (appliedFranchiseId === null || !scopeCurrent) return;
@@ -297,8 +240,7 @@ export function PtoManagementPage(): JSX.Element {
 
   const openAccountLinkPreview = async (
     profileId: string,
-    intent: PtoAccountLinkIntent,
-    source: 'profile' | 'activation'
+    intent: PtoAccountLinkIntent
   ) => {
     if (appliedFranchiseId === null) return;
     setAccountPreviewing(true);
@@ -317,11 +259,9 @@ export function PtoManagementPage(): JSX.Element {
       const [nextPreview, contextProfile] = await Promise.all([previewRequest, profileRequest]);
       setAccountPreview(nextPreview);
       setAccountContextProfile(contextProfile);
-      setAccountPreviewSource(source);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Unable to preview PTO account change';
-      if (source === 'profile') setProfileError(message);
-      else setError(message);
+      setProfileError(message);
       toast.error(message);
     } finally {
       setAccountPreviewing(false);
@@ -330,17 +270,12 @@ export function PtoManagementPage(): JSX.Element {
 
   const refreshStaleAccountContext = async (previewValue: PtoAccountLinkPreview) => {
     if (appliedFranchiseId === null) return;
-    if (accountPreviewSource === 'profile') {
-      const detail = await fetchAdminPtoProfile(appliedFranchiseId, previewValue.profileId);
-      setSelectedProfile(detail);
-      setAccountContextProfile(detail);
-      setEmailMembershipId(detail.memberships[0]?.id ?? '');
-      setAdjustmentMembershipId(detail.memberships[0]?.id ?? '');
-      setProfileError('This account link changed. The profile was refreshed; review it and try again.');
-    } else {
-      setPreview(await fetchPtoActivationPreview(appliedFranchiseId));
-      setError('This account link changed. The activation preview was refreshed; review it and try again.');
-    }
+    const detail = await fetchAdminPtoProfile(appliedFranchiseId, previewValue.profileId);
+    setSelectedProfile(detail);
+    setAccountContextProfile(detail);
+    setEmailMembershipId(detail.memberships[0]?.id ?? '');
+    setAdjustmentMembershipId(detail.memberships[0]?.id ?? '');
+    setProfileError('This account link changed. The profile was refreshed; review it and try again.');
   };
 
   const confirmAccountLink = async () => {
@@ -357,13 +292,9 @@ export function PtoManagementPage(): JSX.Element {
       };
       const response = currentPreview.mode === 'link' ? await linkPtoAccount(args) : await unlinkPtoAccount(args);
       setAccountContextProfile(response.profile);
-      if (accountPreviewSource === 'profile') {
-        setSelectedProfile(response.profile);
-        setEmailMembershipId(response.profile.memberships[0]?.id ?? '');
-        setAdjustmentMembershipId(response.profile.memberships[0]?.id ?? '');
-      } else {
-        setPreview(await fetchPtoActivationPreview(appliedFranchiseId));
-      }
+      setSelectedProfile(response.profile);
+      setEmailMembershipId(response.profile.memberships[0]?.id ?? '');
+      setAdjustmentMembershipId(response.profile.memberships[0]?.id ?? '');
       setAccountPreview(null);
       toast.success(currentPreview.mode === 'link' ? 'PTO account linked' : 'PTO account unlinked');
     } catch (cause) {
@@ -373,8 +304,7 @@ export function PtoManagementPage(): JSX.Element {
         toast.error('The account link changed and the page was refreshed.');
       } else {
         const message = cause instanceof Error ? cause.message : 'Unable to update PTO account link';
-        if (accountPreviewSource === 'profile') setProfileError(message);
-        else setError(message);
+        setProfileError(message);
         toast.error(message);
       }
     } finally {
@@ -411,38 +341,6 @@ export function PtoManagementPage(): JSX.Element {
     }
   };
 
-  const deactivate = async () => {
-    if (appliedFranchiseId === null || !scopeCurrent) return;
-    setDeactivating(true);
-    setError(null);
-    try {
-      const center = await deactivatePtoCenter(appliedFranchiseId);
-      setSettings((current) => current ? {
-        ...current,
-        ptoEnabled: center.enabled,
-        ptoFirstActivatedAt: center.firstActivatedAt,
-        ptoLastSuccessfulSyncAt: center.lastSuccessfulSyncAt,
-        ptoLastSyncError: center.lastSyncError,
-        ptoLastSuccessfulRosterSyncAt: center.lastSuccessfulRosterSyncAt,
-        ptoLastRosterSyncError: center.lastRosterSyncError,
-        ptoLastSuccessfulDiscoveryAt: center.lastSuccessfulDiscoveryAt,
-        ptoLastDiscoveryError: center.lastDiscoveryError
-      } : current);
-      setProfiles(null);
-      setAudit(null);
-      setSelectedProfile(null);
-      setProfileOpen(false);
-      setDeactivateOpen(false);
-      toast.success('PTO deactivated for this center');
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : 'Unable to deactivate PTO';
-      setError(message);
-      toast.error(message);
-    } finally {
-      setDeactivating(false);
-    }
-  };
-
   const changeProfilePage = async (page: number) => {
     if (appliedFranchiseId === null || page < 1) return;
     await loadProgramData(appliedFranchiseId, page, appliedSearch);
@@ -455,12 +353,16 @@ export function PtoManagementPage(): JSX.Element {
     await loadProgramData(appliedFranchiseId, 1, search);
   };
 
+  if (!loading && settings && scopeCurrent && !settings.ptoEnabled) {
+    return <Navigate to="/admin/dashboard" replace />;
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-foreground">PTO Management</h1>
-          <p className="text-sm text-muted-foreground">Activate and administer shared cross-center PTO.</p>
+          <p className="text-sm text-muted-foreground">Administer database-enabled shared cross-center PTO.</p>
         </div>
         <Button variant="outline" onClick={() => void load()} disabled={loading || !validSelection}>Refresh</Button>
       </div>
@@ -469,7 +371,7 @@ export function PtoManagementPage(): JSX.Element {
         <Card>
           <CardHeader>
             <CardTitle>Franchise context</CardTitle>
-            <CardDescription>PTO activation and roster data are scoped to the selected center.</CardDescription>
+            <CardDescription>PTO roster data are scoped to the selected database-enabled center.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap items-end gap-3">
             <div className="w-60 space-y-2">
@@ -489,7 +391,7 @@ export function PtoManagementPage(): JSX.Element {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <CardTitle>Center PTO program</CardTitle>
-              <CardDescription>PTO remains disabled until an administrator previews and confirms activation.</CardDescription>
+              <CardDescription>Database engineers control which centers participate in shared PTO.</CardDescription>
             </div>
             {loading ? <Skeleton className="h-6 w-24" /> : (
               <Badge variant={settings?.ptoEnabled ? 'success' : 'muted'}>
@@ -523,20 +425,9 @@ export function PtoManagementPage(): JSX.Element {
               Apply the selected franchise to refresh PTO data.
             </p>
           ) : null}
-          {!settings?.ptoEnabled ? (
-            <Button onClick={() => void openActivationPreview()} disabled={loading || previewing || !scopeCurrent}>
-              {previewing ? 'Preparing preview...' : 'Preview activation'}
-            </Button>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={() => void syncRoster()} disabled={loading || syncing || !scopeCurrent}>
-                {syncing ? 'Syncing...' : 'Sync roster'}
-              </Button>
-              <Button variant="outline" onClick={() => setDeactivateOpen(true)} disabled={loading || syncing || !scopeCurrent}>
-                Deactivate PTO
-              </Button>
-            </div>
-          )}
+          <Button onClick={() => void syncRoster()} disabled={loading || syncing || !scopeCurrent || !settings?.ptoEnabled}>
+            {syncing ? 'Syncing...' : 'Sync roster'}
+          </Button>
         </CardContent>
       </Card>
 
@@ -647,7 +538,7 @@ export function PtoManagementPage(): JSX.Element {
                 <PtoAccountLinksPanel
                   accounts={selectedProfile.accounts}
                   disabled={profileAction !== null || accountPreviewing}
-                  onIntent={(intent) => void openAccountLinkPreview(selectedProfile.id, intent, 'profile')}
+                  onIntent={(intent) => void openAccountLinkPreview(selectedProfile.id, intent)}
                 />
               </DetailSection>
 
@@ -732,65 +623,6 @@ export function PtoManagementPage(): JSX.Element {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={deactivateOpen} onOpenChange={(open) => { if (!deactivating) setDeactivateOpen(open); }}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Deactivate PTO?</DialogTitle>
-            <DialogDescription>New paid-time-off submissions will be blocked for this center. Existing reservations and ledger history are preserved.</DialogDescription></DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeactivateOpen(false)} disabled={deactivating}>Cancel</Button>
-            <Button onClick={() => void deactivate()} disabled={deactivating}>{deactivating ? 'Deactivating...' : 'Confirm deactivation'}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={previewOpen} onOpenChange={(open) => { if (!activating) setPreviewOpen(open); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Activation preview</DialogTitle>
-            <DialogDescription>
-              Review the roster and shared entitlement policy before this center begins participating.
-            </DialogDescription>
-          </DialogHeader>
-          {preview ? (
-            <div className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <PreviewMetric value={preview.activeCrmTutorCount} label="active tutors" />
-                <PreviewMetric value={preview.newMembershipCount} label="new memberships" />
-                <PreviewMetric value={preview.newProfileCount} label="new profiles" />
-                <PreviewMetric value={preview.pendingExactNameCandidateCount} label="identity matches" />
-                <PreviewMetric value={preview.discoveredAccountCount} label="discovered accounts" />
-                <PreviewMetric value={preview.linkedAccountCount} label="linked/dormant account" />
-                <PreviewMetric value={preview.excludedAccountCount} label="excluded account" />
-                <PreviewMetric value={preview.pendingReviewCount} label="pending reviews" />
-              </div>
-              <p className="rounded-lg bg-muted p-3 text-sm">
-                {preview.policy.entitlementDays} days per cycle, renewing {preview.policy.renewalMonth}/{preview.policy.renewalDay},
-                {' '}{preview.policy.carryoverDays} carryover days.
-              </p>
-              {preview.warnings.map((warning) => (
-                <p key={warning} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{warning}</p>
-              ))}
-              {activationCandidateGroups(preview).map((group) => (
-                <section key={group.profileId} className="space-y-2 rounded-lg border p-3">
-                  <p className="text-sm font-semibold">Proposed profile: {group.profileName}</p>
-                  <PtoAccountLinksPanel
-                    accounts={group.accounts}
-                    disabled={accountPreviewing}
-                    onIntent={(intent) => void openAccountLinkPreview(group.profileId, intent, 'activation')}
-                  />
-                </section>
-              ))}
-            </div>
-          ) : null}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPreviewOpen(false)} disabled={activating}>Cancel</Button>
-            <Button onClick={() => void activate()} disabled={activating || !preview}>
-              {activating ? 'Activating...' : 'Activate and sync'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {accountPreview ? (
         <PtoLinkPreviewDialog
           key={`${accountPreview.mode}-${accountPreview.account.id}-${accountPreview.version}-${accountPreview.ambiguousAdjustmentIds.join('-')}`}
@@ -812,10 +644,6 @@ export function PtoManagementPage(): JSX.Element {
       ) : null}
     </div>
   );
-}
-
-function PreviewMetric({ value, label }: { value: number; label: string }): JSX.Element {
-  return <p className="rounded-lg border bg-card p-3 text-sm font-semibold">{value} {label}</p>;
 }
 
 function SyncHealthCard({ successLabel, emptyLabel, failureLabel, lastSuccessfulAt, error }: {
@@ -871,22 +699,4 @@ const apiErrorCode = (cause: unknown): string | null => {
   if (!(cause instanceof ApiError) || !cause.data || typeof cause.data !== 'object') return null;
   const code = (cause.data as Record<string, unknown>).code;
   return typeof code === 'string' ? code : null;
-};
-
-const activationCandidateGroups = (preview: PtoActivationPreview): Array<{
-  profileId: string;
-  profileName: string;
-  accounts: PtoActivationPreview['candidateGroups'][number]['account'][];
-}> => {
-  const grouped = new Map<string, {
-    profileId: string;
-    profileName: string;
-    accounts: PtoActivationPreview['candidateGroups'][number]['account'][];
-  }>();
-  for (const row of preview.candidateGroups ?? []) {
-    const group = grouped.get(row.profileId) ?? { profileId: row.profileId, profileName: row.profileName, accounts: [] };
-    group.accounts.push(row.account);
-    grouped.set(row.profileId, group);
-  }
-  return [...grouped.values()];
 };

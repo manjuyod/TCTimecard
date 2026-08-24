@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import { PublicOnlyRoute, ProtectedRoute, RoleRoute } from './components/auth/RouteGuards';
 import { LoginPage } from './pages/auth/LoginPage';
@@ -15,6 +16,8 @@ import { EmailDecisionPage } from './pages/timeoff/EmailDecisionPage';
 import { AppShell, NavItem } from './components/layout/AppShell';
 import { WeeklyAttestationGate } from './components/tutor/WeeklyAttestationGate';
 import { useAuth } from './providers/AuthProvider';
+import { fetchFranchiseSettings } from './lib/api';
+import { getSessionFranchiseId } from './lib/franchise';
 
 const tutorNav: NavItem[] = [
   { label: 'Dashboard', path: '/tutor/dashboard', icon: 'LayoutDashboard' },
@@ -26,9 +29,9 @@ const adminNav: NavItem[] = [
   { label: 'Dashboard', path: '/admin/dashboard', icon: 'LayoutDashboard' },
   { label: 'Approvals', path: '/admin/approvals', icon: 'Inbox' },
   { label: 'Pay Period Summary', path: '/admin/pay-period-summary', icon: 'Table2' },
-  { label: 'PTO Management', path: '/admin/pto', icon: 'Umbrella' },
   { label: 'Settings', path: '/admin/settings', icon: 'Settings' }
 ];
+const ptoAdminNav: NavItem = { label: 'PTO Management', path: '/admin/pto', icon: 'Umbrella' };
 
 function TutorLayout(): JSX.Element {
   const { session, logout } = useAuth();
@@ -42,8 +45,25 @@ function TutorLayout(): JSX.Element {
 
 function AdminLayout(): JSX.Element {
   const { session, logout } = useAuth();
+  const sessionFranchiseId = getSessionFranchiseId(session);
+  const [ptoVisible, setPtoVisible] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setPtoVisible(false);
+    if (sessionFranchiseId !== null) {
+      void fetchFranchiseSettings(sessionFranchiseId)
+        .then((settings) => { if (active) setPtoVisible(settings.ptoEnabled); })
+        .catch(() => { if (active) setPtoVisible(false); });
+    }
+    return () => { active = false; };
+  }, [sessionFranchiseId]);
+
+  const navItems = ptoVisible
+    ? [...adminNav.slice(0, 3), ptoAdminNav, ...adminNav.slice(3)]
+    : adminNav;
   return (
-    <AppShell navItems={adminNav} role="ADMIN" userName={session?.displayName ?? null} onLogout={logout}>
+    <AppShell navItems={navItems} role="ADMIN" userName={session?.displayName ?? null} onLogout={logout}>
       <Outlet />
     </AppShell>
   );

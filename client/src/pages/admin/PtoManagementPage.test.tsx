@@ -18,75 +18,40 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-describe('PTO management activation', () => {
-  it('previews the scoped roster and requires confirmation before activation', async () => {
-    let enabled = false;
-    const calls: Array<{ path: string; init?: RequestInit }> = [];
-    globalThis.fetch = async (input, init) => {
+describe('PTO management', () => {
+  it('hides PTO management for an inactive center without exposing activation controls', async () => {
+    const calls: string[] = [];
+    globalThis.fetch = async (input) => {
       const path = String(input);
-      calls.push({ path, init });
-      if (path.startsWith('/api/admin/settings')) {
-        return json({ settings: {
-          franchiseId: 1, autoClockOutEnabled: false, clockInTimeSnapEnabled: false,
-          timeOffNoticeRequired: true, ptoEnabled: enabled, ptoFirstActivatedAt: enabled ? '2026-08-20T12:00:00Z' : null,
-          ptoLastSuccessfulSyncAt: enabled ? '2026-08-20T12:00:00Z' : null
-        } });
-      }
-      if (path.startsWith('/api/pto/admin/activation-preview')) {
-        return json({ preview: {
-          activeCrmTutorCount: 12, newMembershipCount: 12, newProfileCount: 10,
-          pendingExactNameCandidateCount: 2, warnings: ['Two exact-name matches require review'],
-          discoveredAccountCount: 4, linkedAccountCount: 1, excludedAccountCount: 1, pendingReviewCount: 2,
-          candidateGroups: [{ profileId: '10', profileName: 'Ada Lovelace', account: discoveredAccount('pending', 1) }],
-          policy: { id: '1', effectiveFrom: '2026-01-01', entitlementDays: 5,
-            renewalMonth: 1, renewalDay: 1, carryoverDays: 0 }
-        } });
-      }
-      if (path === '/api/pto/admin/profiles/10?franchiseId=1') return json({ profile: accountProfile('pending', 3) });
-      if (path === '/api/pto/admin/profiles/10/accounts/99/link-preview') return json({ preview: {
-        mode: 'link', profileId: '10', account: discoveredAccount('pending', 1), version: 1,
-        beforeBalances: [{ profileId: '10', availableDays: 3 }],
-        afterBalances: [{ profileId: '10', availableDays: 3 }], affectedRequestIds: [],
-        ambiguousAdjustmentIds: [], warnings: []
+      calls.push(path);
+      if (path.startsWith('/api/admin/settings')) return json({ settings: {
+        franchiseId: 1, autoClockOutEnabled: false, clockInTimeSnapEnabled: false,
+        timeOffNoticeRequired: true, ptoEnabled: false, ptoFirstActivatedAt: null,
+        ptoLastSuccessfulSyncAt: null
       } });
-      if (path === '/api/pto/admin/activate') {
-        enabled = true;
-        return json({ sync: {
-          activeTutorCount: 12, activatedMembershipCount: 12, deactivatedMembershipCount: 0,
-          createdProfileCount: 10, pendingCandidateCount: 2, lastSuccessfulSyncAt: '2026-08-20T12:00:00Z'
-        } });
-      }
-      if (path.startsWith('/api/pto/admin/profiles')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
-      if (path.startsWith('/api/pto/admin/audit')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
       throw new Error(`Unexpected request: ${path}`);
     };
 
     render(<MemoryRouter><PtoManagementPage /></MemoryRouter>);
 
-    expect(await screen.findByText('PTO is disabled')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /preview activation/i }));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'PTO Management' })).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /activation|deactivate/i })).not.toBeInTheDocument();
+    expect(calls.some((path) => path.includes('activation-preview'))).toBe(false);
+  });
 
-    expect(await screen.findByRole('heading', { name: 'Activation preview' })).toBeInTheDocument();
-    expect(screen.getByText('12 active tutors')).toBeInTheDocument();
-    expect(screen.getByText('2 identity matches')).toBeInTheDocument();
-    expect(screen.getByText('4 discovered accounts')).toBeInTheDocument();
-    expect(screen.getByText('1 linked/dormant account')).toBeInTheDocument();
-    expect(screen.getByText('1 excluded account')).toBeInTheDocument();
-    expect(screen.getByText('2 pending reviews')).toBeInTheDocument();
-    expect(screen.getByText(/Two exact-name matches require review/i)).toBeInTheDocument();
-    const candidateSwitch = screen.getByRole('switch', { name: 'Pending review account Center 2 tutor 202' });
-    expect(candidateSwitch).not.toBeChecked();
-    fireEvent.click(candidateSwitch);
-    expect(await screen.findByRole('heading', { name: 'Link PTO account?' })).toBeInTheDocument();
-    expect(screen.getByText(/acting for Center 1/i)).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Cancel' }).at(-1)!);
+  it('shows maintenance tools without activation controls for an enabled center', async () => {
+    globalThis.fetch = async (input) => {
+      const path = String(input);
+      if (path.startsWith('/api/admin/settings')) return enabledSettings();
+      if (path.startsWith('/api/pto/admin/profiles?')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
+      if (path.startsWith('/api/pto/admin/audit?')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
+      throw new Error(`Unexpected request: ${path}`);
+    };
 
-    fireEvent.click(screen.getByRole('button', { name: /activate and sync/i }));
+    render(<MemoryRouter><PtoManagementPage /></MemoryRouter>);
 
-    expect(await screen.findByText('PTO is active')).toBeInTheDocument();
-    await waitFor(() => expect(calls.some((call) => call.path === '/api/pto/admin/activate')).toBe(true));
-    const activation = calls.find((call) => call.path === '/api/pto/admin/activate');
-    expect(JSON.parse(String(activation?.init?.body))).toEqual({ franchiseId: 1 });
+    expect(await screen.findByRole('button', { name: 'Sync roster' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /activation|deactivate/i })).not.toBeInTheDocument();
   });
 
   it('loads center-scoped profiles and audit history with server-side pagination', async () => {
@@ -341,32 +306,6 @@ describe('PTO management activation', () => {
     expect(await screen.findByText(/profile was refreshed; review it and try again/i)).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Excluded account Center 2 tutor 202' })).not.toBeChecked();
     expect(profileLoads).toBe(2);
-  });
-
-  it('requires confirmation before disabling PTO for the applied center', async () => {
-    const calls: Array<{ path: string; init?: RequestInit }> = [];
-    globalThis.fetch = async (input, init) => {
-      const path = String(input);
-      calls.push({ path, init });
-      if (path.startsWith('/api/admin/settings')) return enabledSettings();
-      if (path.startsWith('/api/pto/admin/profiles?')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
-      if (path.startsWith('/api/pto/admin/audit?')) return json({ items: [], page: 1, pageSize: 25, total: 0 });
-      if (path === '/api/pto/admin/deactivate') return json({ center: {
-        franchiseId: 1, enabled: false, firstActivatedAt: '2026-01-01T00:00:00Z',
-        lastSuccessfulSyncAt: '2026-08-20T12:00:00Z', lastSyncError: null
-      } });
-      throw new Error(`Unexpected request: ${path}`);
-    };
-
-    render(<MemoryRouter><PtoManagementPage /></MemoryRouter>);
-    await screen.findByText('PTO is active');
-    fireEvent.click(screen.getByRole('button', { name: 'Deactivate PTO' }));
-    expect(await screen.findByRole('heading', { name: 'Deactivate PTO?' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm deactivation' }));
-
-    expect(await screen.findByText('PTO is disabled')).toBeInTheDocument();
-    const call = calls.find((entry) => entry.path === '/api/pto/admin/deactivate');
-    expect(JSON.parse(String(call?.init?.body))).toEqual({ franchiseId: 1 });
   });
 
   it('marks loaded PTO data stale when a different franchise is selected', async () => {

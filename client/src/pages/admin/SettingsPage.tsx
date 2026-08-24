@@ -293,24 +293,24 @@ export function SettingsPage(): JSX.Element {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div><CardTitle>Shared PTO</CardTitle>
-              <CardDescription>One auditable balance follows confirmed tutors across participating centers.</CardDescription></div>
-            <Badge variant={ptoEnabled ? 'success' : 'muted'}>
-              {ptoEnabled ? 'Shared PTO is active' : 'Shared PTO is disabled'}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="flex flex-wrap items-center justify-between gap-4">
-          <div className="text-sm text-muted-foreground">
-            <p>First activated: {ptoFirstActivatedAt ? new Date(ptoFirstActivatedAt).toLocaleString() : 'Never'}</p>
-            <p>Last successful sync: {ptoLastSuccessfulSyncAt ? new Date(ptoLastSuccessfulSyncAt).toLocaleString() : 'Never'}</p>
-          </div>
-          <Button asChild disabled={!generalSettingsScopeApplied}><Link to="/admin/pto">Manage PTO</Link></Button>
-        </CardContent>
-      </Card>
+      {ptoEnabled ? (
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div><CardTitle>Shared PTO</CardTitle>
+                <CardDescription>One auditable balance follows confirmed tutors across participating centers.</CardDescription></div>
+              <Badge variant="success">Shared PTO is active</Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="flex flex-wrap items-center justify-between gap-4">
+            <div className="text-sm text-muted-foreground">
+              <p>First activated: {ptoFirstActivatedAt ? new Date(ptoFirstActivatedAt).toLocaleString() : 'Never'}</p>
+              <p>Last successful sync: {ptoLastSuccessfulSyncAt ? new Date(ptoLastSuccessfulSyncAt).toLocaleString() : 'Never'}</p>
+            </div>
+            <Button asChild disabled={!generalSettingsScopeApplied}><Link to="/admin/pto">Manage PTO</Link></Button>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>
