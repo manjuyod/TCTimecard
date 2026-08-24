@@ -1,12 +1,18 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
+  addTutorPtoEmail,
+  fetchTutorPtoProfile,
+  PtoQuote,
+  quoteTutorPto,
+  removeTutorPtoEmail,
   TimeOffPolicy,
   TimeOffRequest,
   TimeOffType,
   cancelTimeOff,
   fetchTimeOff,
   fetchTimeOffPolicy,
-  submitTimeOff
+  submitTimeOff,
+  TutorPtoProfile
 } from '../../lib/api';
 import { formatDateRange, formatDateTime, hoursBetween } from '../../lib/utils';
 import { TimeOffFormErrors, TimeOffFormValue, validateTimeOffForm } from '../../lib/timeOff';
@@ -44,13 +50,22 @@ export function TutorTimeOffPage(): JSX.Element {
   const [formErrors, setFormErrors] = useState<TimeOffFormErrors>({});
   const [submitting, setSubmitting] = useState(false);
   const [cancelingId, setCancelingId] = useState<number | null>(null);
+  const [ptoProfile, setPtoProfile] = useState<TutorPtoProfile | null>(null);
+  const [ptoQuote, setPtoQuote] = useState<PtoQuote | null>(null);
+  const [quoteFingerprint, setQuoteFingerprint] = useState<string | null>(null);
+  const [quoting, setQuoting] = useState(false);
+  const [alternateEmail, setAlternateEmail] = useState('');
+  const [emailAction, setEmailAction] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const [requestData, policyData] = await Promise.all([fetchTimeOff(), fetchTimeOffPolicy()]);
+      const [requestData, policyData, profileData] = await Promise.all([
+        fetchTimeOff(), fetchTimeOffPolicy(), fetchTutorPtoProfile().catch(() => null)
+      ]);
       setRequests(requestData);
       setPolicy(policyData);
+      setPtoProfile(profileData);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Unable to load time off');
     } finally {
@@ -62,6 +77,21 @@ export function TutorTimeOffPage(): JSX.Element {
     void load();
   }, []);
 
+  const currentQuoteFingerprint = JSON.stringify({
+    startDate: form.startDate,
+    endDate: form.endDate,
+    partialDay: form.partialDay,
+    leaveTime: form.partialDay ? form.leaveTime : null,
+    returnTime: form.partialDay ? form.returnTime : null
+  });
+  const currentEligibleQuote = form.type === 'pto' && ptoQuote?.eligible === true
+    && quoteFingerprint === currentQuoteFingerprint;
+
+  useEffect(() => {
+    setPtoQuote(null);
+    setQuoteFingerprint(null);
+  }, [form.startDate, form.endDate, form.partialDay, form.leaveTime, form.returnTime]);
+
   const sortedRequests = useMemo(() => {
     return [...requests].sort((a, b) => {
       const difference = new Date(a.startAt).getTime() - new Date(b.startAt).getTime();
@@ -70,7 +100,7 @@ export function TutorTimeOffPage(): JSX.Element {
   }, [requests, sortOrder]);
 
   const minimumStart = policy
-    ? policy.exemptTypes.includes(form.type as 'sick' | 'emergency')
+    ? !policy.noticeRequired || policy.exemptTypes.includes(form.type as 'sick' | 'emergency')
       ? policy.today
       : policy.minimumStartDate
     : undefined;
@@ -85,9 +115,80 @@ export function TutorTimeOffPage(): JSX.Element {
     return Object.keys(errors).length === 0;
   };
 
+  const previewPtoQuote = async () => {
+    if (!policy) return;
+    const errors = validateTimeOffForm({ ...form, type: 'pto', reason: 'PTO quote preview' }, policy);
+    const quoteErrors: TimeOffFormErrors = {
+      startDate: errors.startDate,
+      endDate: errors.endDate,
+      leaveTime: errors.leaveTime,
+      returnTime: errors.returnTime
+    };
+    Object.keys(quoteErrors).forEach((key) => {
+      if (!quoteErrors[key as keyof TimeOffFormErrors]) delete quoteErrors[key as keyof TimeOffFormErrors];
+    });
+    if (Object.keys(quoteErrors).length) {
+      setFormErrors((current) => ({ ...current, ...quoteErrors }));
+      return;
+    }
+    setQuoting(true);
+    try {
+      const quote = await quoteTutorPto({
+        startDate: form.startDate,
+        endDate: form.endDate,
+        partialDay: form.partialDay,
+        leaveTime: form.partialDay ? form.leaveTime : null,
+        returnTime: form.partialDay ? form.returnTime : null
+      });
+      setPtoQuote(quote);
+      setQuoteFingerprint(currentQuoteFingerprint);
+    } catch (err) {
+      setPtoQuote(null);
+      setQuoteFingerprint(null);
+      toast.error(err instanceof Error ? err.message : 'Unable to preview PTO charge');
+    } finally {
+      setQuoting(false);
+    }
+  };
+
+  const refreshPtoProfile = async () => setPtoProfile(await fetchTutorPtoProfile());
+
+  const addAlternateEmail = async () => {
+    const email = alternateEmail.trim();
+    if (!email) return;
+    setEmailAction('add');
+    try {
+      await addTutorPtoEmail(email);
+      setAlternateEmail('');
+      await refreshPtoProfile();
+      toast.success('Alternate PTO email added');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Unable to add alternate email');
+    } finally {
+      setEmailAction(null);
+    }
+  };
+
+  const removeAlternateEmail = async (emailId: string) => {
+    setEmailAction(emailId);
+    try {
+      await removeTutorPtoEmail(emailId);
+      await refreshPtoProfile();
+      toast.success('Alternate PTO email removed');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Unable to remove alternate email');
+    } finally {
+      setEmailAction(null);
+    }
+  };
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!validate()) return;
+    if (form.type === 'pto' && !currentEligibleQuote) {
+      toast.error('Preview an eligible PTO charge before submitting.');
+      return;
+    }
     setSubmitting(true);
     try {
       const result = await submitTimeOff({
@@ -101,6 +202,8 @@ export function TutorTimeOffPage(): JSX.Element {
       });
       setRequests((previous) => [result.request, ...previous]);
       setForm(emptyForm());
+      setPtoQuote(null);
+      setQuoteFingerprint(null);
       setTab('list');
       if (result.notification.status === 'failed') toast.warning(result.notification.warning);
       else toast.success('Time off submitted and the admin was notified.');
@@ -137,6 +240,20 @@ export function TutorTimeOffPage(): JSX.Element {
         </div>
       </div>
 
+      {policy?.pto.enabled && policy.pto.balance ? (
+        <Card className="overflow-hidden">
+          <div className="h-1 bg-gradient-to-r from-brand-blue to-brand-orange" />
+          <CardContent className="grid gap-4 p-5 sm:grid-cols-[1.5fr_repeat(3,1fr)] sm:items-center">
+            <div><p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Shared PTO balance</p>
+              <p className="text-2xl font-semibold text-foreground">{policy.pto.balance.availableDays} days available</p>
+              <p className="text-xs text-muted-foreground">Renews {policy.pto.balance.renewsOn}</p></div>
+            <BalanceValue label="Granted" value={policy.pto.balance.grantedDays} />
+            <BalanceValue label="Reserved" value={policy.pto.balance.reservedDays} />
+            <BalanceValue label="Used" value={policy.pto.balance.usedDays} />
+          </CardContent>
+        </Card>
+      ) : null}
+
       <Tabs value={tab} onValueChange={(value) => setTab(value as 'list' | 'new')}>
         <TabsList>
           <TabsTrigger value="list">My Requests</TabsTrigger>
@@ -144,6 +261,52 @@ export function TutorTimeOffPage(): JSX.Element {
         </TabsList>
 
         <TabsContent value="list" className="mt-4">
+          <div className="space-y-4">
+          {ptoProfile?.profile ? (
+            <Card>
+              <CardHeader><CardTitle>Linked PTO centers</CardTitle>
+                <CardDescription>These active center accounts share the balance shown above.</CardDescription></CardHeader>
+              <CardContent className="space-y-3">
+                <div className="rounded-lg bg-muted p-3 text-sm">
+                  <p className="font-semibold text-foreground">PTO policy</p>
+                  <p className="text-muted-foreground">
+                    {ptoProfile.policy.entitlementDays} days per cycle · Renews {ptoProfile.policy.renewalMonth}/{ptoProfile.policy.renewalDay}
+                    {' '}· {ptoProfile.policy.carryoverDays} carryover days
+                  </p>
+                </div>
+                {ptoProfile.memberships.map((membership) => {
+                  const aliases = ptoProfile.emails.filter((email) => email.sourceMembershipId === membership.id);
+                  return (
+                    <section key={membership.id} className="space-y-2 rounded-lg border p-3">
+                      <div>
+                        <h3 className="font-semibold text-foreground">Center {membership.franchiseId}</h3>
+                        <p className="text-xs text-muted-foreground">Tutor account {membership.tutorId ?? 'unassigned'}</p>
+                      </div>
+                      {aliases.map((email) => (
+                        <div key={email.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-muted/50 p-3 text-sm">
+                          <div><p className="font-semibold text-foreground">{email.email}</p>
+                            <p className="text-xs text-muted-foreground">{email.source === 'crm' ? 'CRM email' : 'Manual alternate email'}</p></div>
+                          {email.source === 'manual' ? <Button variant="outline" size="sm" aria-label={`Remove ${email.email}`}
+                            onClick={() => void removeAlternateEmail(email.id)} disabled={emailAction !== null}>
+                            {emailAction === email.id ? 'Removing...' : 'Remove'}
+                          </Button> : null}
+                        </div>
+                      ))}
+                    </section>
+                  );
+                })}
+                <div className="flex flex-wrap items-end gap-3 rounded-lg border border-dashed p-3">
+                  <div className="min-w-64 flex-1 space-y-2"><Label htmlFor="alternatePtoEmail">New alternate email</Label>
+                    <Input id="alternatePtoEmail" type="email" value={alternateEmail}
+                      onChange={(event) => setAlternateEmail(event.target.value)} /></div>
+                  <Button onClick={() => void addAlternateEmail()} disabled={emailAction !== null || !alternateEmail.trim()}>
+                    {emailAction === 'add' ? 'Adding...' : 'Add email'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card>
             <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
@@ -204,6 +367,7 @@ export function TutorTimeOffPage(): JSX.Element {
               )}
             </CardContent>
           </Card>
+          </div>
         </TabsContent>
 
         <TabsContent value="new" className="mt-4">
@@ -211,12 +375,19 @@ export function TutorTimeOffPage(): JSX.Element {
             <CardHeader>
               <CardTitle>Request time off</CardTitle>
               <CardDescription>
-                PTO, Unpaid, and Other require 14 days notice. Sick and Emergency requests may begin today.
+                {policy?.noticeRequired
+                  ? 'PTO, Unpaid, and Other require 14 days notice. Sick and Emergency requests may begin today.'
+                  : 'All time-off requests may begin today. Past dates are not allowed.'}
                 {policy ? ` Dates use ${policy.timezone}.` : ''}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <form className="space-y-4" onSubmit={handleSubmit}>
+                {!policy?.allowedTypes.includes('pto') ? (
+                  <p className="rounded-lg border border-dashed bg-muted/40 p-3 text-sm text-muted-foreground">
+                    Paid time off is unavailable for this center or tutor identity. Other request types remain available.
+                  </p>
+                ) : null}
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="startDate" requiredMark>Start date</Label>
@@ -272,7 +443,7 @@ export function TutorTimeOffPage(): JSX.Element {
                     <Select value={form.type} onValueChange={(value) => setForm((previous) => ({ ...previous, type: value as TimeOffType }))}>
                       <SelectTrigger><SelectValue placeholder="Select type" /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="pto">Paid time off</SelectItem>
+                        {policy?.allowedTypes.includes('pto') ? <SelectItem value="pto">Paid time off</SelectItem> : null}
                         <SelectItem value="sick">Sick</SelectItem>
                         <SelectItem value="emergency">Emergency</SelectItem>
                         <SelectItem value="unpaid">Unpaid</SelectItem>
@@ -294,8 +465,34 @@ export function TutorTimeOffPage(): JSX.Element {
                   </div>
                 </div>
 
+                {form.type === 'pto' ? (
+                  <div className="space-y-3 rounded-lg border border-brand-blue/20 bg-brand-blue/5 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div><p className="text-sm font-semibold text-foreground">PTO charge preview</p>
+                        <p className="text-xs text-muted-foreground">Quotes use the shared balance across all confirmed centers.</p></div>
+                      <Button type="button" variant="outline" onClick={() => void previewPtoQuote()} disabled={quoting}>
+                        {quoting ? 'Checking...' : 'Preview PTO charge'}
+                      </Button>
+                    </div>
+                    {ptoQuote ? ptoQuote.eligible ? (
+                      <div className="space-y-2">
+                        <p className="font-semibold text-emerald-700">
+                          {ptoQuote.chargeDays} {ptoQuote.chargeDays === 1 ? 'day' : 'days'} charged
+                        </p>
+                        <div className="flex flex-wrap gap-2">{ptoQuote.cycleAllocations.map((allocation) => (
+                          <Badge key={`${allocation.cycleStart}-${allocation.days}`} variant="secondary">
+                            {allocation.cycleStart}: {allocation.days} {allocation.days === 1 ? 'day' : 'days'}
+                          </Badge>
+                        ))}</div>
+                      </div>
+                    ) : (
+                      <p className="text-sm font-semibold text-destructive">{ptoQuoteMessage(ptoQuote.reason)}</p>
+                    ) : <p className="text-xs text-muted-foreground">Preview is required before a paid request can be submitted.</p>}
+                  </div>
+                ) : null}
+
                 <div className="flex gap-3">
-                  <Button type="submit" disabled={submitting || !policy}>{submitting ? 'Submitting...' : 'Submit request'}</Button>
+                  <Button type="submit" disabled={submitting || !policy || (form.type === 'pto' && !currentEligibleQuote)}>{submitting ? 'Submitting...' : 'Submit request'}</Button>
                   <Button type="button" variant="ghost" onClick={() => setForm(emptyForm())} disabled={submitting}>Clear</Button>
                 </div>
               </form>
@@ -306,3 +503,14 @@ export function TutorTimeOffPage(): JSX.Element {
     </div>
   );
 }
+
+function BalanceValue({ label, value }: { label: string; value: number }): JSX.Element {
+  return <div><p className="text-xs font-semibold text-muted-foreground">{label}</p><p className="text-lg font-semibold text-foreground">{value} days</p></div>;
+}
+
+const ptoQuoteMessage = (reason: PtoQuote['reason']): string => {
+  if (reason === 'insufficient_balance' || reason === 'no_balance') return 'There is not enough shared PTO for these dates.';
+  if (reason === 'identity_unresolved') return 'Your PTO identity must be resolved before submitting paid time off.';
+  if (reason === 'center_disabled') return 'Paid time off is disabled for this center.';
+  return 'This PTO request is not eligible.';
+};

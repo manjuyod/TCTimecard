@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
@@ -37,16 +38,25 @@ export function SettingsPage(): JSX.Element {
   const sessionFranchiseId = getSessionFranchiseId(session);
   const selectorAllowed = isSelectorAllowed(session);
   const [franchiseIdInput, setFranchiseIdInput] = useState(sessionFranchiseId !== null ? String(sessionFranchiseId) : '');
-  const [appliedFranchiseId, setAppliedFranchiseId] = useState<number | null>(null);
+  const [generalAppliedFranchiseId, setGeneralAppliedFranchiseId] = useState<number | null>(null);
+  const [payrollAppliedFranchiseId, setPayrollAppliedFranchiseId] = useState<number | null>(null);
+  const loadVersionRef = useRef(0);
   const [autoClockOutEnabled, setAutoClockOutEnabled] = useState(false);
   const [clockInTimeSnapEnabled, setClockInTimeSnapEnabled] = useState(false);
+  const [timeOffNoticeRequired, setTimeOffNoticeRequired] = useState(true);
+  const [ptoEnabled, setPtoEnabled] = useState(false);
+  const [ptoFirstActivatedAt, setPtoFirstActivatedAt] = useState<string | null>(null);
+  const [ptoLastSuccessfulSyncAt, setPtoLastSuccessfulSyncAt] = useState<string | null>(null);
   const [payrollSettings, setPayrollSettings] = useState<PayrollSettings | null>(null);
   const [payrollForm, setPayrollForm] = useState<PayrollSettingsFormState>(EMPTY_PAYROLL_SETTINGS_FORM);
   const [autoLoading, setAutoLoading] = useState(false);
+  const [timeOffLoading, setTimeOffLoading] = useState(false);
   const [payrollLoading, setPayrollLoading] = useState(false);
   const [autoSaving, setAutoSaving] = useState(false);
+  const [timeOffSaving, setTimeOffSaving] = useState(false);
   const [payrollSaving, setPayrollSaving] = useState(false);
   const [autoError, setAutoError] = useState<string | null>(null);
+  const [timeOffError, setTimeOffError] = useState<string | null>(null);
   const [payrollError, setPayrollError] = useState<string | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
 
@@ -58,7 +68,8 @@ export function SettingsPage(): JSX.Element {
   };
 
   const selectedFranchiseId = resolveFranchiseId();
-  const settingsScopeApplied = appliedFranchiseId !== null && selectedFranchiseId === appliedFranchiseId;
+  const generalSettingsScopeApplied = generalAppliedFranchiseId !== null && selectedFranchiseId === generalAppliedFranchiseId;
+  const payrollSettingsScopeApplied = payrollAppliedFranchiseId !== null && selectedFranchiseId === payrollAppliedFranchiseId;
 
   const load = async (forcedFranchiseId?: number | null) => {
     const franchiseId = resolveFranchiseId(forcedFranchiseId);
@@ -66,35 +77,90 @@ export function SettingsPage(): JSX.Element {
       setContextError('Franchise ID is required.');
       return;
     }
+    const loadVersion = ++loadVersionRef.current;
 
+    setGeneralAppliedFranchiseId(null);
+    setPayrollAppliedFranchiseId(null);
     setAutoLoading(true);
+    setTimeOffLoading(true);
     setPayrollLoading(true);
     setAutoError(null);
+    setTimeOffError(null);
     setPayrollError(null);
     setContextError(null);
+
+    const generalLoad = fetchFranchiseSettings(franchiseId)
+      .then((general) => {
+        if (loadVersionRef.current !== loadVersion) return;
+        setAutoClockOutEnabled(general.autoClockOutEnabled);
+        setClockInTimeSnapEnabled(general.clockInTimeSnapEnabled);
+        setTimeOffNoticeRequired(general.timeOffNoticeRequired);
+        setPtoEnabled(general.ptoEnabled);
+        setPtoFirstActivatedAt(general.ptoFirstActivatedAt);
+        setPtoLastSuccessfulSyncAt(general.ptoLastSuccessfulSyncAt);
+        setGeneralAppliedFranchiseId(franchiseId);
+      })
+      .catch((err: unknown) => {
+        if (loadVersionRef.current !== loadVersion) return;
+        const message = err instanceof Error ? err.message : 'Unable to load franchise settings';
+        setAutoError(message);
+        setTimeOffError(message);
+        toast.error(message);
+      })
+      .finally(() => {
+        if (loadVersionRef.current !== loadVersion) return;
+        setAutoLoading(false);
+        setTimeOffLoading(false);
+      });
+
+    const payrollLoad = fetchPayrollSettings(franchiseId)
+      .then((payroll) => {
+        if (loadVersionRef.current !== loadVersion) return;
+        setPayrollSettings(payroll);
+        setPayrollForm(toPayrollSettingsFormState(payroll));
+        setPayrollAppliedFranchiseId(franchiseId);
+      })
+      .catch((err: unknown) => {
+        if (loadVersionRef.current !== loadVersion) return;
+        const message = err instanceof Error ? err.message : 'Unable to load payroll settings';
+        setPayrollError(message);
+        toast.error(message);
+      })
+      .finally(() => {
+        if (loadVersionRef.current !== loadVersion) return;
+        setPayrollLoading(false);
+      });
+
+    await Promise.all([generalLoad, payrollLoad]);
+  };
+
+  const saveTimeOffSettings = async () => {
+    const franchiseId = generalAppliedFranchiseId;
+    if (franchiseId === null || selectedFranchiseId !== franchiseId) {
+      setTimeOffError('Apply a valid Franchise ID before saving.');
+      return;
+    }
+
+    setTimeOffSaving(true);
+    setTimeOffError(null);
     try {
-      const [general, payroll] = await Promise.all([
-        fetchFranchiseSettings(franchiseId),
-        fetchPayrollSettings(franchiseId)
-      ]);
-      setAutoClockOutEnabled(general.autoClockOutEnabled);
-      setClockInTimeSnapEnabled(general.clockInTimeSnapEnabled);
-      setPayrollSettings(payroll);
-      setPayrollForm(toPayrollSettingsFormState(payroll));
-      setAppliedFranchiseId(franchiseId);
+      const settings = await updateFranchiseSettings({
+        franchiseId,
+        timeOffNoticeRequired
+      });
+      setTimeOffNoticeRequired(settings.timeOffNoticeRequired);
+      toast.success('Time off settings updated');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to load franchise settings';
-      setAutoError(message);
-      setPayrollError(message);
+      const message = err instanceof Error ? err.message : 'Unable to update time off settings';
+      setTimeOffError(message);
       toast.error(message);
     } finally {
-      setAutoLoading(false);
-      setPayrollLoading(false);
+      setTimeOffSaving(false);
     }
   };
 
   const saveAutomaticTimekeeping = async () => {
-    const franchiseId = appliedFranchiseId;
+    const franchiseId = generalAppliedFranchiseId;
     if (franchiseId === null || selectedFranchiseId !== franchiseId) {
       setAutoError('Apply a valid Franchise ID before saving.');
       return;
@@ -121,7 +187,7 @@ export function SettingsPage(): JSX.Element {
   };
 
   const savePayrollSettings = async () => {
-    const franchiseId = appliedFranchiseId;
+    const franchiseId = payrollAppliedFranchiseId;
     if (franchiseId === null || selectedFranchiseId !== franchiseId) {
       setPayrollError('Apply a valid Franchise ID before saving.');
       return;
@@ -150,7 +216,9 @@ export function SettingsPage(): JSX.Element {
   };
 
   useEffect(() => {
-    setAppliedFranchiseId(null);
+    loadVersionRef.current += 1;
+    setGeneralAppliedFranchiseId(null);
+    setPayrollAppliedFranchiseId(null);
     if (!selectorAllowed) {
       setFranchiseIdInput(sessionFranchiseId !== null ? String(sessionFranchiseId) : '');
       if (sessionFranchiseId !== null) void load(sessionFranchiseId);
@@ -167,7 +235,7 @@ export function SettingsPage(): JSX.Element {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-slate-900">Settings</h1>
-        <p className="text-sm text-muted-foreground">Configure franchise-wide timekeeping and payroll settings.</p>
+        <p className="text-sm text-muted-foreground">Configure franchise-wide timekeeping, time off, and payroll settings.</p>
       </div>
 
       {selectorAllowed ? (
@@ -183,8 +251,14 @@ export function SettingsPage(): JSX.Element {
               <InlineError message={contextError} />
             </div>
             <div className="flex flex-wrap gap-3">
-              <Button onClick={() => void load()} disabled={autoLoading || payrollLoading || selectedFranchiseId === null}>
-                {autoLoading || payrollLoading ? 'Loading...' : 'Apply'}
+              <Button
+                onClick={() => void load()}
+                disabled={
+                  autoLoading || timeOffLoading || payrollLoading ||
+                  autoSaving || timeOffSaving || payrollSaving || selectedFranchiseId === null
+                }
+              >
+                {autoLoading || timeOffLoading || payrollLoading ? 'Loading...' : 'Apply'}
               </Button>
               <Badge variant="muted" className="self-center">Session franchise: {session?.franchiseId ?? 'N/A'}</Badge>
             </div>
@@ -214,7 +288,60 @@ export function SettingsPage(): JSX.Element {
           </label>
           <InlineError message={autoError} />
           <div className="flex justify-end">
-            <Button onClick={() => void saveAutomaticTimekeeping()} disabled={autoLoading || autoSaving || !settingsScopeApplied}>{autoSaving ? 'Saving...' : 'Save automatic timekeeping'}</Button>
+            <Button onClick={() => void saveAutomaticTimekeeping()} disabled={autoLoading || autoSaving || !generalSettingsScopeApplied}>{autoSaving ? 'Saving...' : 'Save automatic timekeeping'}</Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {ptoEnabled ? (
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div><CardTitle>Shared PTO</CardTitle>
+                <CardDescription>One auditable balance follows confirmed tutors across participating centers.</CardDescription></div>
+              <Badge variant="success">Shared PTO is active</Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="flex flex-wrap items-center justify-between gap-4">
+            <div className="text-sm text-muted-foreground">
+              <p>First activated: {ptoFirstActivatedAt ? new Date(ptoFirstActivatedAt).toLocaleString() : 'Never'}</p>
+              <p>Last successful sync: {ptoLastSuccessfulSyncAt ? new Date(ptoLastSuccessfulSyncAt).toLocaleString() : 'Never'}</p>
+            </div>
+            <Button asChild disabled={!generalSettingsScopeApplied}><Link to="/admin/pto">Manage PTO</Link></Button>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Time Off</CardTitle>
+          <CardDescription>Configure request notice rules for every tutor in this franchise.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <label className="flex items-center justify-between gap-4 rounded-lg border p-4">
+            <span>
+              <span className="block text-sm font-semibold">Require 14 days’ notice</span>
+              <span className="block text-sm text-muted-foreground">
+                Applies to PTO, Unpaid, and Other requests. Sick and Emergency requests may still begin today.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label="Require 14 days’ notice"
+              checked={timeOffNoticeRequired}
+              onChange={(event) => setTimeOffNoticeRequired(event.target.checked)}
+              disabled={timeOffLoading || timeOffSaving}
+            />
+          </label>
+          <InlineError message={timeOffError} />
+          <div className="flex justify-end">
+            <Button
+              onClick={() => void saveTimeOffSettings()}
+              disabled={timeOffLoading || timeOffSaving || !generalSettingsScopeApplied}
+            >
+              {timeOffSaving ? 'Saving...' : 'Save time off settings'}
+            </Button>
           </div>
         </CardContent>
       </Card>
@@ -261,7 +388,7 @@ export function SettingsPage(): JSX.Element {
           <InlineError message={payrollError} />
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-muted-foreground">One-off override rows still take precedence over these recurring settings.</p>
-            <Button onClick={() => void savePayrollSettings()} disabled={payrollSaving || payrollLoading || !settingsScopeApplied}>{payrollSaving ? 'Saving...' : 'Save payroll settings'}</Button>
+            <Button onClick={() => void savePayrollSettings()} disabled={payrollSaving || payrollLoading || !payrollSettingsScopeApplied}>{payrollSaving ? 'Saving...' : 'Save payroll settings'}</Button>
           </div>
         </CardContent>
       </Card>

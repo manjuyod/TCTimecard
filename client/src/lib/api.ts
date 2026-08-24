@@ -55,9 +55,11 @@ export interface TimeOffPolicy {
   today: string;
   minimumStartDate: string;
   noticeDays: 14;
+  noticeRequired: boolean;
   exemptTypes: Array<'sick' | 'emergency'>;
   allowedTypes: TimeOffType[];
   maxDurationHours: number;
+  pto: PtoPolicyStatus;
 }
 
 export interface TimeOffNotificationResult {
@@ -148,6 +150,219 @@ export interface FranchiseSettings {
   franchiseId: number;
   autoClockOutEnabled: boolean;
   clockInTimeSnapEnabled: boolean;
+  timeOffNoticeRequired: boolean;
+  ptoEnabled: boolean;
+  ptoFirstActivatedAt: string | null;
+  ptoLastSuccessfulSyncAt: string | null;
+  ptoLastSyncError: string | null;
+  ptoLastSuccessfulRosterSyncAt: string | null;
+  ptoLastRosterSyncError: string | null;
+  ptoLastSuccessfulDiscoveryAt: string | null;
+  ptoLastDiscoveryError: string | null;
+}
+
+export type PtoEligibilityReason =
+  | 'eligible'
+  | 'center_disabled'
+  | 'identity_unresolved'
+  | 'no_balance'
+  | 'insufficient_balance'
+  | 'invalid_request';
+
+export interface PtoBalanceSummary {
+  cycleStart: string;
+  cycleEnd: string;
+  renewsOn: string;
+  grantedDays: number;
+  adjustedDays: number;
+  availableDays: number;
+  reservedDays: number;
+  usedDays: number;
+}
+
+export interface PtoPolicyStatus {
+  enabled: boolean;
+  reason: PtoEligibilityReason;
+  balance?: PtoBalanceSummary;
+}
+
+export interface PtoProgramPolicy {
+  id: string;
+  effectiveFrom: string;
+  entitlementDays: number;
+  renewalMonth: number;
+  renewalDay: number;
+  carryoverDays: number;
+}
+
+export interface PtoSyncHealth {
+  lastSuccessfulRosterSyncAt: string | null;
+  lastRosterSyncError: string | null;
+  lastSuccessfulDiscoveryAt: string | null;
+  lastDiscoveryError: string | null;
+}
+
+export interface PtoCenterStatus extends PtoSyncHealth {
+  franchiseId: number;
+  enabled: boolean;
+  firstActivatedAt: string | null;
+  lastSuccessfulSyncAt: string | null;
+  lastSyncError: string | null;
+}
+
+export interface PtoRosterSyncSummary extends PtoSyncHealth {
+  activeTutorCount: number;
+  activatedMembershipCount: number;
+  deactivatedMembershipCount: number;
+  createdProfileCount: number;
+  pendingCandidateCount: number;
+  discoveredAccountCount: number;
+  linkedAccountCount: number;
+  excludedAccountCount: number;
+  pendingReviewCount: number;
+  lastSuccessfulSyncAt: string;
+  lastSyncError: string | null;
+  warnings: string[];
+}
+
+export interface PtoProfileBalance {
+  grantedDays: number;
+  balanceDays: number;
+  reservedDays: number;
+  availableDays: number;
+}
+
+export interface PtoProfileSummary {
+  id: string;
+  firstName: string;
+  lastName: string;
+  active: boolean;
+  balance: PtoProfileBalance;
+}
+
+export type PtoRawRecord = Record<string, unknown>;
+
+export type PtoAccountLinkStatus = 'pending' | 'linked' | 'excluded';
+
+export interface PtoDiscoveredAccount {
+  id: string;
+  provider: string;
+  crmId: string;
+  franchiseId: number;
+  tutorId: number;
+  firstName: string;
+  lastName: string;
+  displayEmail: string | null;
+  crmActive: boolean;
+  centerEnabled: boolean;
+  membershipId: string | null;
+  status: PtoAccountLinkStatus;
+  version: number;
+  lastSeenAt: string;
+  warnings: string[];
+}
+
+export interface PtoMembership {
+  id: string;
+  profileId: string;
+  franchiseId: number;
+  tutorId: number | null;
+  active: boolean;
+  crmSnapshot: Record<string, unknown>;
+  firstSeenAt: string;
+  updatedAt: string;
+}
+
+export interface PtoProfileEmail extends PtoEmail {
+  profileId: string;
+  franchiseId: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PtoAccountLinkPreview {
+  mode: 'link' | 'unlink';
+  profileId: string;
+  account: PtoDiscoveredAccount;
+  version: number;
+  beforeBalances: Array<{ profileId: string; availableDays: number }>;
+  afterBalances: Array<{ profileId: string; availableDays: number }>;
+  affectedRequestIds: string[];
+  ambiguousAdjustmentIds: string[];
+  warnings: string[];
+}
+
+export interface PtoAccountMutationArgs {
+  franchiseId: number;
+  profileId: string;
+  accountId: string;
+  expectedVersion: number;
+  idempotencyKey: string;
+}
+
+export interface PtoAccountMutationResult {
+  canonicalProfileId: string;
+  detachedProfileId: string | null;
+  decisionVersion: number;
+}
+
+export interface PtoAccountMutationResponse {
+  result: PtoAccountMutationResult;
+  profile: PtoAdminProfileDetail;
+}
+
+export interface PtoAdminProfileDetail extends PtoProfileSummary {
+  memberships: PtoMembership[];
+  emails: PtoProfileEmail[];
+  accounts: PtoDiscoveredAccount[];
+  candidates: PtoRawRecord[];
+  ledger: PtoRawRecord[];
+  requests: PtoRawRecord[];
+  audit: PtoRawRecord[];
+}
+
+export interface PtoEmail {
+  id: string;
+  email: string;
+  active: boolean;
+  source: 'crm' | 'manual';
+  sourceMembershipId: string | null;
+}
+
+export interface TutorPtoProfile {
+  profile: PtoProfileSummary | null;
+  memberships: PtoMembership[];
+  emails: PtoProfileEmail[];
+  balance: PtoBalanceSummary | null;
+  unresolvedReason: 'center_disabled' | 'membership_missing' | 'profile_inactive' | null;
+  policy: PtoProgramPolicy;
+  center: PtoCenterStatus;
+}
+
+export interface PtoQuote {
+  eligible: boolean;
+  reason: PtoEligibilityReason;
+  chargeDays: number;
+  cycleAllocations: Array<{ cycleStart: string; days: number }>;
+  balance?: PtoBalanceSummary;
+}
+
+export interface PtoPagedResult<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+}
+
+export interface PtoAuditEvent {
+  id: string;
+  profileId: string | null;
+  franchiseId: number | null;
+  actorId: string;
+  eventType: string;
+  before: unknown;
+  after: unknown;
+  createdAt: string;
 }
 
 export interface HoursSummary {
@@ -675,6 +890,7 @@ export const updateFranchiseSettings = async (args: {
   franchiseId?: number | null;
   autoClockOutEnabled?: boolean;
   clockInTimeSnapEnabled?: boolean;
+  timeOffNoticeRequired?: boolean;
 }): Promise<FranchiseSettings> => {
   const payload: Record<string, unknown> = {};
   if (args.franchiseId !== undefined && args.franchiseId !== null) {
@@ -686,11 +902,198 @@ export const updateFranchiseSettings = async (args: {
   if (args.clockInTimeSnapEnabled !== undefined) {
     payload.clockInTimeSnapEnabled = args.clockInTimeSnapEnabled;
   }
+  if (args.timeOffNoticeRequired !== undefined) {
+    payload.timeOffNoticeRequired = args.timeOffNoticeRequired;
+  }
   const result = await apiFetch<{ settings: FranchiseSettings }>(
     '/api/admin/settings',
     { method: 'PATCH', body: JSON.stringify(payload) }
   );
   return result.settings;
+};
+
+const ptoAdminMutation = async <T>(path: string, franchiseId: number, body: Record<string, unknown> = {}) =>
+  apiFetch<T>(path, { method: 'POST', body: JSON.stringify({ ...body, franchiseId }) });
+
+export const syncPtoCenter = async (franchiseId: number): Promise<PtoRosterSyncSummary> => {
+  const result = await ptoAdminMutation<{ sync: PtoRosterSyncSummary }>('/api/pto/admin/sync', franchiseId);
+  return result.sync;
+};
+
+export const fetchAdminPtoProfiles = async (args: {
+  franchiseId: number;
+  search?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<PtoPagedResult<PtoProfileSummary>> => {
+  const params = new URLSearchParams({ franchiseId: String(args.franchiseId) });
+  if (args.search) params.set('search', args.search);
+  params.set('page', String(args.page ?? 1));
+  params.set('pageSize', String(args.pageSize ?? 25));
+  return apiFetch(`/api/pto/admin/profiles?${params.toString()}`);
+};
+
+export const fetchAdminPtoProfile = async (
+  franchiseId: number,
+  profileId: string
+): Promise<PtoAdminProfileDetail> => {
+  const result = await apiFetch<{ profile: PtoAdminProfileDetail }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(profileId)}?franchiseId=${encodeURIComponent(franchiseId)}`
+  );
+  return result.profile;
+};
+
+const accountPreviewBody = (args: Omit<PtoAccountMutationArgs, 'idempotencyKey'>) => ({
+  franchiseId: args.franchiseId,
+  expectedVersion: args.expectedVersion
+});
+
+const accountMutationBody = (args: PtoAccountMutationArgs) => ({
+  ...accountPreviewBody(args),
+  idempotencyKey: args.idempotencyKey
+});
+
+export const previewPtoAccountLink = async (
+  args: Omit<PtoAccountMutationArgs, 'idempotencyKey'>
+): Promise<PtoAccountLinkPreview> => {
+  const result = await apiFetch<{ preview: PtoAccountLinkPreview }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/accounts/${encodeURIComponent(args.accountId)}/link-preview`,
+    { method: 'POST', body: JSON.stringify(accountPreviewBody(args)) }
+  );
+  return result.preview;
+};
+
+export const linkPtoAccount = (args: PtoAccountMutationArgs): Promise<PtoAccountMutationResponse> => apiFetch(
+  `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/accounts/${encodeURIComponent(args.accountId)}/link`,
+  { method: 'PUT', body: JSON.stringify(accountMutationBody(args)) }
+);
+
+export const previewPtoAccountUnlink = async (
+  args: Omit<PtoAccountMutationArgs, 'idempotencyKey'>
+): Promise<PtoAccountLinkPreview> => {
+  const result = await apiFetch<{ preview: PtoAccountLinkPreview }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/accounts/${encodeURIComponent(args.accountId)}/unlink-preview`,
+    { method: 'POST', body: JSON.stringify(accountPreviewBody(args)) }
+  );
+  return result.preview;
+};
+
+export const unlinkPtoAccount = (args: PtoAccountMutationArgs): Promise<PtoAccountMutationResponse> => apiFetch(
+  `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/accounts/${encodeURIComponent(args.accountId)}/link`,
+  { method: 'DELETE', body: JSON.stringify(accountMutationBody(args)) }
+);
+
+export const assignPtoAdjustmentProvenance = async (args: {
+  franchiseId: number;
+  profileId: string;
+  ledgerEntryId: string;
+  membershipId: string;
+  idempotencyKey: string;
+}): Promise<{ ledgerEntryId: string; membershipId: string }> => {
+  const result = await apiFetch<{ result: { ledgerEntryId: string; membershipId: string } }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/adjustments/${encodeURIComponent(args.ledgerEntryId)}/provenance`,
+    { method: 'PUT', body: JSON.stringify({ franchiseId: args.franchiseId,
+      membershipId: args.membershipId, idempotencyKey: args.idempotencyKey }) }
+  );
+  return result.result;
+};
+
+export const decidePtoAlias = async (args: {
+  franchiseId: number;
+  candidateId: string;
+  decision: 'confirm' | 'reject';
+}) => ptoAdminMutation<{ profileId: string; decision: 'confirm' | 'reject' }>(
+  `/api/pto/admin/aliases/${encodeURIComponent(args.candidateId)}/decide`,
+  args.franchiseId,
+  { decision: args.decision }
+);
+
+export const detachPtoMembership = async (args: {
+  franchiseId: number;
+  profileId: string;
+  membershipId: string;
+}) => ptoAdminMutation<{ sourceProfileId: string; detachedProfileId: string }>(
+  `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/memberships/${encodeURIComponent(args.membershipId)}/detach`,
+  args.franchiseId
+);
+
+export const addAdminPtoEmail = async (args: {
+  franchiseId: number;
+  profileId: string;
+  membershipId: string;
+  email: string;
+}): Promise<PtoEmail> => {
+  const result = await ptoAdminMutation<{ email: PtoEmail }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/emails`,
+    args.franchiseId,
+    { membershipId: args.membershipId, email: args.email }
+  );
+  return result.email;
+};
+
+export const removeAdminPtoEmail = async (args: {
+  franchiseId: number;
+  profileId: string;
+  emailId: string;
+}): Promise<PtoEmail> => {
+  const result = await apiFetch<{ email: PtoEmail }>(
+    `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/emails/${encodeURIComponent(args.emailId)}?franchiseId=${encodeURIComponent(args.franchiseId)}`,
+    { method: 'DELETE' }
+  );
+  return result.email;
+};
+
+export const adjustAdminPtoBalance = async (args: {
+  franchiseId: number;
+  profileId: string;
+  membershipId: string;
+  cycleStart: string;
+  deltaDays: number;
+  reason: string;
+}) => ptoAdminMutation<{ ledgerEntryId: string; availableDays: number }>(
+  `/api/pto/admin/profiles/${encodeURIComponent(args.profileId)}/adjustments`,
+  args.franchiseId,
+  { membershipId: args.membershipId, cycleStart: args.cycleStart,
+    deltaDays: args.deltaDays, reason: args.reason }
+);
+
+export const fetchAdminPtoAudit = async (args: {
+  franchiseId: number;
+  profileId?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<PtoPagedResult<PtoAuditEvent>> => {
+  const params = new URLSearchParams({
+    franchiseId: String(args.franchiseId),
+    page: String(args.page ?? 1),
+    pageSize: String(args.pageSize ?? 25)
+  });
+  if (args.profileId) params.set('profileId', args.profileId);
+  return apiFetch(`/api/pto/admin/audit?${params.toString()}`);
+};
+
+export const fetchTutorPtoProfile = (): Promise<TutorPtoProfile> => apiFetch('/api/pto/me');
+
+export const quoteTutorPto = (payload: {
+  startDate: string;
+  endDate: string;
+  partialDay: boolean;
+  leaveTime?: string | null;
+  returnTime?: string | null;
+}): Promise<PtoQuote> => apiFetch('/api/pto/me/quote', { method: 'POST', body: JSON.stringify(payload) });
+
+export const addTutorPtoEmail = async (email: string): Promise<PtoEmail> => {
+  const result = await apiFetch<{ email: PtoEmail }>('/api/pto/me/emails', {
+    method: 'POST', body: JSON.stringify({ email })
+  });
+  return result.email;
+};
+
+export const removeTutorPtoEmail = async (emailId: string): Promise<PtoEmail> => {
+  const result = await apiFetch<{ email: PtoEmail }>(`/api/pto/me/emails/${encodeURIComponent(emailId)}`, {
+    method: 'DELETE'
+  });
+  return result.email;
 };
 
 export interface AdminSummaryRow {

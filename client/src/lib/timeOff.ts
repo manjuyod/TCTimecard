@@ -35,6 +35,7 @@ export function validateTimeOffForm(form: TimeOffFormValue, policy: TimeOffPolic
     errors.startDate = 'Start date cannot be in the past.';
   } else if (
     form.startDate &&
+    policy.noticeRequired &&
     !policy.exemptTypes.includes(form.type as 'sick' | 'emergency') &&
     form.startDate < policy.minimumStartDate
   ) {

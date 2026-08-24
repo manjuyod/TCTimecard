@@ -13,7 +13,8 @@ test('franchise settings client sends scoped GET and partial Time Snap PATCH', a
       settings: {
         franchiseId: 77,
         autoClockOutEnabled: true,
-        clockInTimeSnapEnabled: true
+        clockInTimeSnapEnabled: true,
+        timeOffNoticeRequired: false
       }
     }), {
       status: 200, headers: { 'Content-Type': 'application/json' }
@@ -27,5 +28,33 @@ test('franchise settings client sends scoped GET and partial Time Snap PATCH', a
   assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
     franchiseId: 77,
     clockInTimeSnapEnabled: true
+  });
+});
+
+test('franchise settings client sends an isolated time-off notice PATCH', async () => {
+  const calls: Array<{ input: string; init?: RequestInit }> = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return new Response(JSON.stringify({
+      settings: {
+        franchiseId: 77,
+        autoClockOutEnabled: true,
+        clockInTimeSnapEnabled: true,
+        timeOffNoticeRequired: false
+      }
+    }), {
+      status: 200, headers: { 'Content-Type': 'application/json' }
+    });
+  };
+
+  const settings = await updateFranchiseSettings({
+    franchiseId: 77,
+    timeOffNoticeRequired: false
+  });
+
+  assert.equal(settings.timeOffNoticeRequired, false);
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
+    franchiseId: 77,
+    timeOffNoticeRequired: false
   });
 });

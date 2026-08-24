@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import { PublicOnlyRoute, ProtectedRoute, RoleRoute } from './components/auth/RouteGuards';
 import { LoginPage } from './pages/auth/LoginPage';
@@ -10,10 +11,13 @@ import { AdminDashboardPage } from './pages/admin/Dashboard';
 import { ApprovalsPage } from './pages/admin/ApprovalsPage';
 import { PayPeriodSummaryPage } from './pages/admin/PayPeriodSummaryPage';
 import { SettingsPage } from './pages/admin/SettingsPage';
+import { PtoManagementPage } from './pages/admin/PtoManagementPage';
 import { EmailDecisionPage } from './pages/timeoff/EmailDecisionPage';
 import { AppShell, NavItem } from './components/layout/AppShell';
 import { WeeklyAttestationGate } from './components/tutor/WeeklyAttestationGate';
 import { useAuth } from './providers/AuthProvider';
+import { fetchFranchiseSettings } from './lib/api';
+import { getSessionFranchiseId } from './lib/franchise';
 
 const tutorNav: NavItem[] = [
   { label: 'Dashboard', path: '/tutor/dashboard', icon: 'LayoutDashboard' },
@@ -27,6 +31,7 @@ const adminNav: NavItem[] = [
   { label: 'Pay Period Summary', path: '/admin/pay-period-summary', icon: 'Table2' },
   { label: 'Settings', path: '/admin/settings', icon: 'Settings' }
 ];
+const ptoAdminNav: NavItem = { label: 'PTO Management', path: '/admin/pto', icon: 'Umbrella' };
 
 function TutorLayout(): JSX.Element {
   const { session, logout } = useAuth();
@@ -40,8 +45,25 @@ function TutorLayout(): JSX.Element {
 
 function AdminLayout(): JSX.Element {
   const { session, logout } = useAuth();
+  const sessionFranchiseId = getSessionFranchiseId(session);
+  const [ptoVisible, setPtoVisible] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setPtoVisible(false);
+    if (sessionFranchiseId !== null) {
+      void fetchFranchiseSettings(sessionFranchiseId)
+        .then((settings) => { if (active) setPtoVisible(settings.ptoEnabled); })
+        .catch(() => { if (active) setPtoVisible(false); });
+    }
+    return () => { active = false; };
+  }, [sessionFranchiseId]);
+
+  const navItems = ptoVisible
+    ? [...adminNav.slice(0, 3), ptoAdminNav, ...adminNav.slice(3)]
+    : adminNav;
   return (
-    <AppShell navItems={adminNav} role="ADMIN" userName={session?.displayName ?? null} onLogout={logout}>
+    <AppShell navItems={navItems} role="ADMIN" userName={session?.displayName ?? null} onLogout={logout}>
       <Outlet />
     </AppShell>
   );
@@ -74,6 +96,7 @@ function App(): JSX.Element {
             <Route path="/admin/dashboard" element={<AdminDashboardPage />} />
             <Route path="/admin/approvals" element={<ApprovalsPage />} />
             <Route path="/admin/pay-period-summary" element={<PayPeriodSummaryPage />} />
+            <Route path="/admin/pto" element={<PtoManagementPage />} />
             <Route path="/admin/settings" element={<SettingsPage />} />
           </Route>
         </Route>

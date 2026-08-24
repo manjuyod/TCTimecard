@@ -12,6 +12,7 @@ import payPeriodRoutes from './routes/payPeriod';
 import hoursRoutes from './routes/hours';
 import extraHoursRoutes from './routes/extrahours';
 import timeOffRoutes from './routes/timeoff';
+import ptoRoutes from './routes/pto';
 import timeEntryRoutes from './routes/timeEntry';
 import attestationRoutes from './routes/attestation';
 import clockRoutes from './routes/clock';
@@ -23,6 +24,7 @@ import { closePostgresPool } from './db/postgres';
 import { closeMssqlPool } from './db/mssql';
 import { startAutoClockOutScheduler } from './services/autoClockOutScheduler';
 import { installGracefulShutdown } from './services/gracefulShutdown';
+import { mapPtoHttpError } from './services/pto/errors';
 import { setSensitivePageHeaders } from './middleware/sensitivePageHeaders';
 
 dotenv.config();
@@ -86,6 +88,7 @@ app.use('/api/pay-period', payPeriodRoutes);
 app.use('/api', hoursRoutes);
 app.use('/api', extraHoursRoutes);
 app.use('/api', timeOffRoutes);
+app.use('/api', ptoRoutes);
 app.use('/api', timeEntryRoutes);
 app.use('/api', attestationRoutes);
 app.use('/api', clockRoutes);
@@ -109,6 +112,11 @@ if (fs.existsSync(distPath)) {
 
 // Centralized error handler to ensure API routes always return JSON instead of Express HTML error pages
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  const ptoError = mapPtoHttpError(err);
+  if (ptoError) {
+    res.status(ptoError.status).json({ error: ptoError.error, code: ptoError.code });
+    return;
+  }
   const status =
     typeof (err as { status?: number } | null | undefined)?.status === 'number'
       ? (err as { status: number }).status

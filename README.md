@@ -3,8 +3,8 @@
 A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring franchises to track manually entered tutoring hours, enforce approvals on any variance from the scheduled blocks, collect weekly attestations, request time off, and process approvals. UI is Tailwind + shadcn/ui with FullCalendar, and legacy branding tokens are applied globally.
 
 ## What's included
-- Tutor: dashboard hour totals (week / pay period / month), clock in/out (server-time minute precision) + status widget, calendar view (schedule + time off overlay), manual entry of arrival/departure (supporting break splits) with automatic approval requests on any mismatch to scheduled hours, weekly attestation (hard-blocking next-week entry until signed), submit/cancel time off.
-- Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary comparison table (CRM reported hours vs approved logged hours), tutor drilldown modal by date, legacy clipboard copy, and grouped pay-period review export in Excel or CSV with spreadsheet-formula neutralization and oversized-export guardrails.
+- Tutor: dashboard hour totals (week / pay period / month), clock in/out (server-time minute precision) + status widget, calendar view (schedule + time off overlay), manual entry of arrival/departure (supporting break splits) with automatic approval requests on any mismatch to scheduled hours, weekly attestation (hard-blocking next-week entry until signed), submit/cancel time off, one shared PTO balance with active linked centers/aliases, quotes, and alternate PTO emails.
+- Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary comparison table (CRM reported hours vs approved logged hours), tutor drilldown modal by date, maintenance for database-enabled cross-center PTO profiles/discovery/link previews/audits, legacy clipboard copy, and grouped pay-period review export in Excel or CSV with spreadsheet-formula neutralization and oversized-export guardrails.
 - Auth: MSSQL-backed login with optional multi-account selection; cookie sessions (rolling 15 minutes).
 - Data: tutoring schedule + tutor/franchise identity from MSSQL; requests + payroll config from Postgres.
 
@@ -19,7 +19,7 @@ A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring 
 - `npm run build:client` / `npm run build:server` - build either side individually.
 - `npm run typecheck` - typecheck server + client (no emit).
 - `npm run lint` - currently aliases `typecheck`.
-- `npm test` - runs server unit tests (`node --test` via `tsx` loader).
+- `npm test` - runs server tests, client helper/UI tests, and load-tool contract tests.
 - `npm start` - serve the built client and API from Express using the compiled `server/dist`.
 
 ## Local dev
@@ -38,7 +38,7 @@ Tutor:
 - `/tutor/dashboard`, `/tutor/calendar`, `/tutor/time-off` (manual time entry and variance requests live in the dashboard/calendar; the old extra-hours page is removed)
 
 Admin:
-- `/admin/dashboard`, `/admin/approvals`, `/admin/pay-period-summary`, `/admin/settings`
+- `/admin/dashboard`, `/admin/approvals`, `/admin/pay-period-summary`, `/admin/pto`, `/admin/settings`
 
 ## API routes (high level)
 Health:
@@ -89,6 +89,15 @@ Time off:
 - `POST /api/timeoff/:id/cancel`
 - `GET /api/timeoff/admin/pending?franchiseId=...&limit=...`
 - `POST /api/timeoff/:id/decide`
+
+Shared PTO:
+- `GET /api/pto/me`, `POST /api/pto/me/quote`
+- `POST /api/pto/me/emails`, `DELETE /api/pto/me/emails/:emailId`
+- `POST /api/pto/public/quote` (center-scoped bearer token; balance-free response)
+- `POST /api/pto/admin/sync` (enabled centers only; application routes cannot activate or deactivate a center)
+- `GET /api/pto/admin/profiles`, typed profile/account detail, email and membership-scoped adjustment routes, and `GET /api/pto/admin/audit`
+- `POST /api/pto/admin/profiles/:profileId/accounts/:accountId/link-preview` and `.../unlink-preview`
+- `PUT /api/pto/admin/profiles/:profileId/accounts/:accountId/link`, `DELETE` on the same route, and adjustment-provenance assignment
 
 Admin pay-period review:
 - `GET /api/hours/admin/pay-period/summary?franchiseId=...&forDate=...` (CRM-vs-logged tutor summary)
@@ -164,12 +173,30 @@ The shared Neon `time_off_requests` table must include the public-form compatibi
 `absence_label`, partial-day fields, bridge identity, and `public_metadata`. This app reuses that existing schema and does
 not create a separate time-off migration. Notification send/failure/retry state is appended to `time_off_audit.metadata`.
 Run `npm run db:check-timeoff-schema` for a read-only compatibility preflight before deployment.
+The preflight also verifies the shared PTO, persistent discovery/decision, adjustment-provenance, sync-health, and hashed public center-link schema created by migrations `0010`–`0013`.
 
 ### Postgres migrations
 - Run: `npm run db:migrate`
 - Migration SQL lives in `server/db/migrations/` and is tracked in `public.schema_migrations`.
 - `0007_franchise_auto_clock_out.sql` additively creates the per-franchise `auto_clock_out_enabled` setting with a safe default of `false`.
 - `0008_clock_in_time_snap.sql` additively creates the per-franchise `clock_in_time_snap_enabled` setting with a safe default of `false`.
+- `0009_time_off_notice_requirement.sql` adds the per-center time-off notice setting.
+- `0010_shared_pto.sql` creates the shared policy, identity, entitlement-cycle, ledger, allocation, and lifecycle foundation.
+- `0011_pto_admin_invariants.sql` adds canonical identity administration, roster provenance, and append-only audit support.
+- `0012_pto_routes.sql` adds hashed public center links and the disabled-center request guard.
+- `0013_persistent_pto_profile_links.sql` adds durable discovered accounts, remembered link/exclusion decisions, separate roster/discovery health, adjustment provenance, deterministic legacy backfill, and audited link/unlink functions.
+- `0014_database_controlled_pto_linked_login.sql` adds exact linked-login resolution and lets authenticated requests reserve a sponsored canonical pool while retaining their login-center ownership.
+
+### Shared cross-center PTO
+
+- PTO is disabled by default. Only database engineers may change `public.pto_center_settings.enabled`; Center 68 is currently the sole enabled center. Disabled centers do not show PTO navigation or settings, and the application exposes no activation/deactivation route.
+- An authenticated tutor may use the canonical shared pool from any exact, CRM-active account with an explicit `linked` decision when that canonical profile has at least one active membership at an enabled center. The request and approval workflow remain owned by the login center and tutor account; the canonical pool is reserved immediately on submission.
+- Newly discovered accounts remain default-off. Pending and excluded decisions never grant access, and excluded decisions survive later syncs.
+- Account link/unlink confirmation is server-previewed, versioned, idempotent, and audited. Legacy adjustments require center-membership provenance before a split.
+- Admin maintenance and sync are available only for enabled centers. Status reports local roster health separately from global discovery health.
+- PostgreSQL reserves entitlement on submission, consumes it on approval, and releases it on denial or pending cancellation.
+- Public aliases remain center-scoped and require their own center to be enabled even when an authenticated linked login can use the same shared pool from an inactive center. The public quote contract never returns balances or profile identifiers. See [public integration](docs/pto-public-integration.md).
+- Deploy and pilot with the [shared PTO rollout runbook](docs/operations/shared-pto-rollout.md).
 
 ### Franchise automatic clock-out
 

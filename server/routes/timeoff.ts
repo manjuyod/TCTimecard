@@ -5,6 +5,7 @@ import { requireAdmin, requireTutor } from '../middleware/auth';
 import { enforceFranchiseScope } from '../middleware/franchiseScope';
 import { getFranchisePayrollSettings } from '../payroll/payPeriodResolution';
 import { fetchFranchiseContact, FranchiseContact } from '../services/franchiseContact';
+import { getFranchiseSettings } from '../services/franchiseSettings';
 import {
   decideTimeOffByEmailToken,
   decideTimeOffRequest,
@@ -16,7 +17,10 @@ import {
 import { fetchTimeOffTutorById, fetchTimeOffTutorsByIds, TutorDirectoryIdentity } from '../services/timeOffDirectory';
 import { sendTimeOffGmailDwd } from '../services/timeOffEmail';
 import { createTimeOffDecisionToken, CreatedTimeOffDecisionToken } from '../services/timeOffDecisionToken';
-import { buildTimeOffPolicy, normalizeTimeOffSubmission } from '../services/timeOffPolicy';
+import { buildTimeOffPolicy, localDateForTimeZone, normalizeTimeOffSubmission } from '../services/timeOffPolicy';
+import { calculatePtoCharge } from '../services/ptoCharge';
+import { mapPtoHttpError } from '../services/pto/errors';
+import { getAuthenticatedPtoPolicyStatus, quoteAuthenticatedPto } from '../services/pto/routeStore';
 import {
   appendTimeOffAudit,
   cancelPendingTimeOff,
@@ -29,7 +33,8 @@ import {
   NotificationFailureRow
 } from '../services/timeOffRepository';
 import { sendAdminRequestNotification } from '../services/timeOffWorkflow';
-import { NormalizedTimeOffSubmission, TimeOffNotificationResult, TimeOffRecord } from '../types/timeoff';
+import { NormalizedTimeOffSubmission, TimeOffNotificationResult, TimeOffPolicy, TimeOffRecord } from '../types/timeoff';
+import type { PtoPolicyStatus, PtoQuote } from '../types/pto';
 
 const MAX_TIME_OFF_DURATION_HOURS = 336;
 const EMAIL_DECISION_UNAVAILABLE = 'Decision link is invalid, expired, or already used.';
@@ -41,6 +46,9 @@ export interface TimeOffRouteDeps {
   previewEmailDecision: typeof previewTimeOffEmailDecision;
   decideEmailRequest: typeof decideTimeOffByEmailToken;
   resolveTimezone: (franchiseId: number) => Promise<string>;
+  resolveTimeOffNoticeRequired: (franchiseId: number) => Promise<boolean>;
+  getPtoPolicyStatus: (input: { franchiseId: number; tutorId: number; balanceDate: string }) => Promise<PtoPolicyStatus>;
+  quotePto: typeof quoteAuthenticatedPto;
   fetchTutor: (tutorId: number) => Promise<TutorDirectoryIdentity | null>;
   fetchTutors: (tutorIds: number[]) => Promise<Map<number, TutorDirectoryIdentity>>;
   fetchCenter: (franchiseId: number) => Promise<FranchiseContact | null>;
@@ -84,6 +92,10 @@ const defaultDeps: TimeOffRouteDeps = {
   previewEmailDecision: previewTimeOffEmailDecision,
   decideEmailRequest: decideTimeOffByEmailToken,
   resolveTimezone: async (franchiseId) => (await getFranchisePayrollSettings(franchiseId)).timezone,
+  resolveTimeOffNoticeRequired: async (franchiseId) =>
+    (await getFranchiseSettings(franchiseId)).timeOffNoticeRequired,
+  getPtoPolicyStatus: getAuthenticatedPtoPolicyStatus,
+  quotePto: quoteAuthenticatedPto,
   fetchTutor: fetchTimeOffTutorById,
   fetchTutors: fetchTimeOffTutorsByIds,
   fetchCenter: fetchFranchiseContact,
@@ -174,26 +186,63 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
   router.get('/timeoff/policy', requireTutor, asyncHandler(async (req, res) => {
     const context = tutorContext(req);
     if (!context) return res.status(400).json({ error: 'Tutor context missing' });
-    const timezone = await deps.resolveTimezone(context.franchiseId);
-    return res.json({
-      policy: buildTimeOffPolicy({
-        timezone,
-        nowIso: deps.nowIso(),
-        maxDurationHours: MAX_TIME_OFF_DURATION_HOURS
-      })
+    const [timezone, noticeRequired] = await Promise.all([
+      deps.resolveTimezone(context.franchiseId),
+      deps.resolveTimeOffNoticeRequired(context.franchiseId)
+    ]);
+    const nowIso = deps.nowIso();
+    const pto = await deps.getPtoPolicyStatus({
+      ...context,
+      balanceDate: localDateForTimeZone(nowIso, timezone)
     });
+    const policy: TimeOffPolicy = { ...buildTimeOffPolicy({
+        timezone,
+        nowIso,
+        maxDurationHours: MAX_TIME_OFF_DURATION_HOURS,
+        noticeRequired
+      }), pto };
+    if (pto.reason !== 'eligible' || (pto.balance?.availableDays ?? 0) <= 0) {
+      policy.allowedTypes = policy.allowedTypes.filter((type) => type !== 'pto');
+    }
+    return res.json({ policy });
   }));
 
   router.post('/timeoff', requireTutor, asyncHandler(async (req, res) => {
     const context = tutorContext(req);
     if (!context) return res.status(400).json({ error: 'Tutor context missing' });
-    const timezone = await deps.resolveTimezone(context.franchiseId);
+    const [timezone, noticeRequired] = await Promise.all([
+      deps.resolveTimezone(context.franchiseId),
+      deps.resolveTimeOffNoticeRequired(context.franchiseId)
+    ]);
+    const nowIso = deps.nowIso();
     const normalized = normalizeTimeOffSubmission(req.body ?? {}, {
       timezone,
-      nowIso: deps.nowIso(),
-      maxDurationHours: MAX_TIME_OFF_DURATION_HOURS
+      nowIso,
+      maxDurationHours: MAX_TIME_OFF_DURATION_HOURS,
+      noticeRequired
     });
     if (!normalized.valid) return res.status(400).json({ error: normalized.errors[0], errors: normalized.errors });
+    if (normalized.value.type === 'pto') {
+      const charge = calculatePtoCharge({
+        startDate: normalized.value.startDate,
+        endDate: normalized.value.endDate,
+        partialDay: normalized.value.partialDay,
+        durationHours: normalized.value.durationHours
+      });
+      let quote: PtoQuote;
+      try {
+        quote = await deps.quotePto({
+          ...context,
+          balanceDate: localDateForTimeZone(nowIso, timezone),
+          chargeDays: charge.totalDays,
+          dayCharges: charge.dayCharges.map(({ date, days }) => ({ date, days }))
+        });
+      } catch (error) {
+        const mapped = mapPtoHttpError(error, true) as NonNullable<ReturnType<typeof mapPtoHttpError>>;
+        return res.status(mapped.status).json({ error: mapped.error, code: mapped.code });
+      }
+      if (!quote.eligible) return sendIneligiblePto(res, quote);
+    }
     if (await deps.checkOverlap(context.tutorId, normalized.value.startAt, normalized.value.endAt)) {
       return res.status(409).json({ error: 'Request overlaps an existing pending or approved request' });
     }
@@ -201,16 +250,25 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
     const tutor = await deps.fetchTutor(context.tutorId);
     const fallbackName = String(req.session.auth?.displayName ?? '').trim().split(/\s+/);
     const decisionToken = deps.createDecisionToken(deps.nowIso());
-    const request = await deps.createRequest({
-      franchiseId: context.franchiseId,
-      tutorId: context.tutorId,
-      firstName: tutor?.firstName ?? fallbackName[0] ?? '',
-      lastName: tutor?.lastName ?? fallbackName.slice(1).join(' '),
-      email: tutor?.email ?? '',
-      submission: normalized.value,
-      timezone,
-      decisionToken: { tokenHash: decisionToken.tokenHash, expiresAt: decisionToken.expiresAt }
-    });
+    let request: TimeOffRecord;
+    try {
+      request = await deps.createRequest({
+        franchiseId: context.franchiseId,
+        tutorId: context.tutorId,
+        firstName: tutor?.firstName ?? fallbackName[0] ?? '',
+        lastName: tutor?.lastName ?? fallbackName.slice(1).join(' '),
+        email: tutor?.email ?? '',
+        submission: normalized.value,
+        timezone,
+        decisionToken: { tokenHash: decisionToken.tokenHash, expiresAt: decisionToken.expiresAt }
+      });
+    } catch (error) {
+      if (normalized.value.type === 'pto') {
+        const mapped = mapPtoHttpError(error, true) as NonNullable<ReturnType<typeof mapPtoHttpError>>;
+        return res.status(mapped.status).json({ error: mapped.error, code: mapped.code });
+      }
+      throw error;
+    }
     await deps.appendAudit({
       requestId: request.id,
       action: 'created',
@@ -438,6 +496,19 @@ function sendDecisionResult(res: Response, result: TimeOffDecisionResult) {
       console.error('[timeoff] calendar sync failed', result.error);
       return res.status(502).json({ error: 'Failed to create Google Calendar event; request remains pending' });
   }
+}
+
+function sendIneligiblePto(res: Response, quote: PtoQuote) {
+  const mappings = {
+    center_disabled: ['PTO_CENTER_DISABLED', 'PTO is disabled for this center'],
+    identity_unresolved: ['PTO_IDENTITY_UNRESOLVED', 'PTO identity is unresolved'],
+    no_balance: ['PTO_NO_BALANCE', 'No PTO balance is available'],
+    insufficient_balance: ['PTO_INSUFFICIENT_BALANCE', 'Insufficient PTO balance'],
+    invalid_request: ['PTO_INVALID_REQUEST', 'PTO request is invalid']
+  } as const;
+  const mapped = quote.reason === 'eligible' ? mappings.invalid_request : mappings[quote.reason];
+  return res.status(quote.reason === 'identity_unresolved' || quote.reason === 'invalid_request' ? 422 : 409)
+    .json({ error: mapped[1], code: mapped[0], quote });
 }
 
 function emailLogOnly(): boolean {
