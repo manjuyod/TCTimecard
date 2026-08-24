@@ -4,7 +4,7 @@ A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring 
 
 ## What's included
 - Tutor: dashboard hour totals (week / pay period / month), clock in/out (server-time minute precision) + status widget, calendar view (schedule + time off overlay), manual entry of arrival/departure (supporting break splits) with automatic approval requests on any mismatch to scheduled hours, weekly attestation (hard-blocking next-week entry until signed), submit/cancel time off, one shared PTO balance with active linked centers/aliases, quotes, and alternate PTO emails.
-- Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary comparison table (CRM reported hours vs approved logged hours), tutor drilldown modal by date, persistent default-off cross-center PTO discovery/link previews/profile/audit management, legacy clipboard copy, and grouped pay-period review export in Excel or CSV with spreadsheet-formula neutralization and oversized-export guardrails.
+- Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary comparison table (CRM reported hours vs approved logged hours), tutor drilldown modal by date, maintenance for database-enabled cross-center PTO profiles/discovery/link previews/audits, legacy clipboard copy, and grouped pay-period review export in Excel or CSV with spreadsheet-formula neutralization and oversized-export guardrails.
 - Auth: MSSQL-backed login with optional multi-account selection; cookie sessions (rolling 15 minutes).
 - Data: tutoring schedule + tutor/franchise identity from MSSQL; requests + payroll config from Postgres.
 
@@ -94,7 +94,7 @@ Shared PTO:
 - `GET /api/pto/me`, `POST /api/pto/me/quote`
 - `POST /api/pto/me/emails`, `DELETE /api/pto/me/emails/:emailId`
 - `POST /api/pto/public/quote` (center-scoped bearer token; balance-free response)
-- `GET /api/pto/admin/activation-preview`, `POST /api/pto/admin/activate|deactivate|sync`
+- `POST /api/pto/admin/sync` (enabled centers only; application routes cannot activate or deactivate a center)
 - `GET /api/pto/admin/profiles`, typed profile/account detail, email and membership-scoped adjustment routes, and `GET /api/pto/admin/audit`
 - `POST /api/pto/admin/profiles/:profileId/accounts/:accountId/link-preview` and `.../unlink-preview`
 - `PUT /api/pto/admin/profiles/:profileId/accounts/:accountId/link`, `DELETE` on the same route, and adjustment-provenance assignment
@@ -185,15 +185,17 @@ The preflight also verifies the shared PTO, persistent discovery/decision, adjus
 - `0011_pto_admin_invariants.sql` adds canonical identity administration, roster provenance, and append-only audit support.
 - `0012_pto_routes.sql` adds hashed public center links and the disabled-center request guard.
 - `0013_persistent_pto_profile_links.sql` adds durable discovered accounts, remembered link/exclusion decisions, separate roster/discovery health, adjustment provenance, deterministic legacy backfill, and audited link/unlink functions.
+- `0014_database_controlled_pto_linked_login.sql` adds exact linked-login resolution and lets authenticated requests reserve a sponsored canonical pool while retaining their login-center ownership.
 
 ### Shared cross-center PTO
 
-- PTO is disabled by default and must be previewed and activated per center under `/admin/pto`. Newly discovered cross-center accounts are also default-off.
-- Remembered linked accounts share one balance only while their center memberships are active; dormant links remain ineligible. Excluded decisions survive later syncs.
+- PTO is disabled by default. Only database engineers may change `public.pto_center_settings.enabled`; Center 68 is currently the sole enabled center. Disabled centers do not show PTO navigation or settings, and the application exposes no activation/deactivation route.
+- An authenticated tutor may use the canonical shared pool from any exact, CRM-active account with an explicit `linked` decision when that canonical profile has at least one active membership at an enabled center. The request and approval workflow remain owned by the login center and tutor account; the canonical pool is reserved immediately on submission.
+- Newly discovered accounts remain default-off. Pending and excluded decisions never grant access, and excluded decisions survive later syncs.
 - Account link/unlink confirmation is server-previewed, versioned, idempotent, and audited. Legacy adjustments require center-membership provenance before a split.
-- Admin status reports local roster health separately from global discovery health.
+- Admin maintenance and sync are available only for enabled centers. Status reports local roster health separately from global discovery health.
 - PostgreSQL reserves entitlement on submission, consumes it on approval, and releases it on denial or pending cancellation.
-- Public aliases remain center-scoped even when the person’s balance is shared. The public quote contract never returns balances or profile identifiers. See [public integration](docs/pto-public-integration.md).
+- Public aliases remain center-scoped and require their own center to be enabled even when an authenticated linked login can use the same shared pool from an inactive center. The public quote contract never returns balances or profile identifiers. See [public integration](docs/pto-public-integration.md).
 - Deploy and pilot with the [shared PTO rollout runbook](docs/operations/shared-pto-rollout.md).
 
 ### Franchise automatic clock-out
