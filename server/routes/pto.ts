@@ -7,11 +7,11 @@ import {
   addPtoEmail, adjustPtoBalance, assignPtoAdjustmentProvenance, decidePtoAlias,
   detachPtoMembership, getAdminPtoProfile, linkPtoAccount,
   getPtoCenterStatus, getPtoProgramPolicy, getTutorPtoProfile, listAdminPtoProfiles,
-  listPtoAudit, previewPtoAccountLink, previewPtoAccountUnlink, previewPtoActivation,
+  listPtoAudit, previewPtoAccountLink, previewPtoAccountUnlink,
   removePtoEmail, syncPtoRoster, unlinkPtoAccount
 } from '../services/pto';
 import {
-  authorizePublicPtoCenter, deactivatePtoCenter, getPtoBalanceSummary, quoteAuthenticatedPto, quotePublicPto,
+  authorizePublicPtoCenter, getPtoBalanceSummary, quoteAuthenticatedPto, quotePublicPto,
   type AuthenticatedPtoQuoteInput, type PublicPtoQuoteInput
 } from '../services/pto/routeStore';
 import { mapPtoHttpError } from '../services/pto/errors';
@@ -27,9 +27,7 @@ export interface PtoRouteDeps {
   resolveTimeOffNoticeRequired: (franchiseId: number) => Promise<boolean>;
   getProgramPolicy: typeof getPtoProgramPolicy;
   getCenterStatus: typeof getPtoCenterStatus;
-  previewActivation: typeof previewPtoActivation;
   syncRoster: typeof syncPtoRoster;
-  deactivateCenter: typeof deactivatePtoCenter;
   getTutorProfile: typeof getTutorPtoProfile;
   getBalanceSummary: (profileId: string, balanceDate: string) => Promise<PtoBalanceSummary>;
   authorizePublicCenter: typeof authorizePublicPtoCenter;
@@ -56,9 +54,7 @@ const defaultDeps: PtoRouteDeps = {
   resolveTimeOffNoticeRequired: async (franchiseId) => (await getFranchiseSettings(franchiseId)).timeOffNoticeRequired,
   getProgramPolicy: getPtoProgramPolicy,
   getCenterStatus: getPtoCenterStatus,
-  previewActivation: previewPtoActivation,
   syncRoster: syncPtoRoster,
-  deactivateCenter: deactivatePtoCenter,
   getTutorProfile: getTutorPtoProfile,
   getBalanceSummary: getPtoBalanceSummary,
   authorizePublicCenter: authorizePublicPtoCenter,
@@ -82,6 +78,8 @@ const defaultDeps: PtoRouteDeps = {
 export function createPtoRouter(overrides: Partial<PtoRouteDeps> = {}) {
   const deps = { ...defaultDeps, ...overrides };
   const router = express.Router();
+  const admin = (handler: (req: Request, res: Response, franchiseId: number) => Promise<unknown>) =>
+    activeCenterAdmin(deps, handler);
 
   router.get('/pto/me', requireTutor, asyncHandler(async (req, res) => {
     const context = tutorContext(req);
@@ -159,14 +157,8 @@ export function createPtoRouter(overrides: Partial<PtoRouteDeps> = {}) {
     } catch (error) { return sendPtoError(res, error); }
   }));
 
-  router.get('/pto/admin/activation-preview', requireAdmin, admin(async (req, res, franchiseId) =>
-    res.json({ preview: await deps.previewActivation(franchiseId) })));
-  router.post('/pto/admin/activate', requireAdmin, admin(async (req, res, franchiseId) =>
-    res.json({ sync: await deps.syncRoster({ franchiseId, activate: true, actorId: actor(req) }) })));
-  router.post('/pto/admin/deactivate', requireAdmin, admin(async (req, res, franchiseId) =>
-    res.json({ center: await deps.deactivateCenter({ franchiseId, actorId: actor(req) }) })));
   router.post('/pto/admin/sync', requireAdmin, admin(async (req, res, franchiseId) =>
-    res.json({ sync: await deps.syncRoster({ franchiseId, activate: false, actorId: actor(req) }) })));
+    res.json({ sync: await deps.syncRoster({ franchiseId, actorId: actor(req) }) })));
   router.get('/pto/admin/profiles', requireAdmin, admin(async (req, res, franchiseId) => {
     const pagination = parsePagination(req, res); if (!pagination) return;
     return res.json(await deps.listProfiles({ franchiseId, search: text(req.query.search), ...pagination }));
@@ -310,11 +302,19 @@ async function tutorIdentity(deps: PtoRouteDeps, context: { franchiseId: number;
   return result.profile && membership ? { profileId: result.profile.id, membershipId: String(membership.id) } : null;
 }
 
-function admin(handler: (req: Request, res: Response, franchiseId: number) => Promise<unknown>) {
+function activeCenterAdmin(
+  deps: Pick<PtoRouteDeps, 'getCenterStatus'>,
+  handler: (req: Request, res: Response, franchiseId: number) => Promise<unknown>
+) {
   return asyncHandler(async (req, res) => {
     const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
     if (scope.error || scope.franchiseId === null) return res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
-    try { return await handler(req, res, scope.franchiseId); } catch (error) { return sendPtoError(res, error); }
+    try {
+      if (!(await deps.getCenterStatus(scope.franchiseId)).enabled) {
+        return sendPtoError(res, new Error('PTO_CENTER_DISABLED'));
+      }
+      return await handler(req, res, scope.franchiseId);
+    } catch (error) { return sendPtoError(res, error); }
   });
 }
 

@@ -296,6 +296,10 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
   },
 
   syncRoster: async (input: PtoRosterSyncStoreInput): Promise<PtoRosterSyncSummary> => {
+    const enabledCenter = await queryRows(db, `
+      SELECT enabled FROM public.pto_center_settings WHERE franchiseid = $1
+    `, [input.franchiseId]);
+    if (enabledCenter[0]?.enabled !== true) throw new Error('PTO_CENTER_DISABLED');
     if (!input.tutors.every((tutor) => tutor.franchiseId === input.franchiseId)) {
       throw new Error('CRM roster contained a tutor from another franchise');
     }
@@ -328,13 +332,6 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
         ? null : String(priorCenterRows[0].last_discovery_error),
       activeTutorIds: priorRosterRows.map((row) => number(row.tutor_id))
     };
-    if (input.activate) {
-      await db.query(`
-        INSERT INTO public.pto_center_settings (franchiseid, enabled)
-        VALUES ($1, TRUE)
-        ON CONFLICT (franchiseid) DO UPDATE SET enabled = TRUE
-      `, [input.franchiseId]);
-    }
     let createdProfileCount = 0;
     let activatedMembershipCount = 0;
     let pendingCandidateCount = 0;
@@ -532,26 +529,21 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
     `, [input.franchiseId, activeIds]);
     const discoveryCompletedAt = input.discovery.error ? null : input.discovery.completedAt;
     const syncRows = await queryRows(db, `
-      INSERT INTO public.pto_center_settings
-        (franchiseid, enabled, last_successful_sync_at, last_sync_error,
-         last_successful_roster_sync_at, last_roster_sync_error,
-         last_successful_discovery_at, last_discovery_error)
-      VALUES ($1, $2, NOW(), NULL, NOW(), NULL, $3::TIMESTAMPTZ, $4)
-      ON CONFLICT (franchiseid) DO UPDATE SET
-        enabled = public.pto_center_settings.enabled OR EXCLUDED.enabled,
-        last_successful_sync_at = EXCLUDED.last_successful_sync_at,
+      UPDATE public.pto_center_settings SET
+        last_successful_sync_at = NOW(),
         last_sync_error = NULL,
-        last_successful_roster_sync_at = EXCLUDED.last_successful_roster_sync_at,
+        last_successful_roster_sync_at = NOW(),
         last_roster_sync_error = NULL,
         last_successful_discovery_at = COALESCE(
-          EXCLUDED.last_successful_discovery_at,
+          $2::TIMESTAMPTZ,
           public.pto_center_settings.last_successful_discovery_at
         ),
-        last_discovery_error = EXCLUDED.last_discovery_error
+        last_discovery_error = $3
+      WHERE franchiseid = $1 AND enabled
       RETURNING enabled, first_activated_at, last_successful_sync_at, last_sync_error,
         last_successful_roster_sync_at, last_roster_sync_error,
         last_successful_discovery_at, last_discovery_error
-    `, [input.franchiseId, input.activate, discoveryCompletedAt, input.discovery.error]);
+    `, [input.franchiseId, discoveryCompletedAt, input.discovery.error]);
     const decisionCounts = await queryRows(db, `
       WITH incoming AS (
         SELECT * FROM JSONB_TO_RECORDSET($2::JSONB) AS item(provider TEXT, crm_id TEXT)
@@ -634,8 +626,7 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
       INSERT INTO public.pto_audit_events
         (franchiseid, actor_id, event_type, before_state, after_state, idempotency_key)
       VALUES ($1, $2, $3, $4, $5, $6)
-    `, [input.franchiseId, input.actorId,
-      input.activate ? 'center_activated_and_synced' : 'roster_synced',
+    `, [input.franchiseId, input.actorId, 'roster_synced',
       priorCenter, { ...nextCenter, summary }, `roster-sync:${input.franchiseId}:${randomUUID()}`]);
     return summary;
   },

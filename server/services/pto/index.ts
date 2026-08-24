@@ -35,7 +35,7 @@ export const getPtoCenterStatus = (franchiseId: number) =>
   getDefaultPtoService().getPtoCenterStatus(franchiseId);
 export const previewPtoActivation = (franchiseId: number) =>
   getDefaultPtoService().previewPtoActivation(franchiseId);
-export const syncPtoRoster = (input: { franchiseId: number; activate: boolean; actorId: Id }) =>
+export const syncPtoRoster = (input: { franchiseId: number; actorId: Id }) =>
   getDefaultPtoService().syncPtoRoster(input);
 export const getTutorPtoProfile = (input: { franchiseId: number; tutorId: number }) =>
   getDefaultPtoService().getTutorPtoProfile(input);

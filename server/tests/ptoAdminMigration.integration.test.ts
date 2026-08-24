@@ -80,6 +80,42 @@ beforeEach(async () => {
   if (enabled) await reset();
 });
 
+const enableCenter = async (franchiseId: number): Promise<void> => {
+  assert.ok(pool);
+  await pool.query(`
+    INSERT INTO public.pto_center_settings (franchiseid, enabled)
+    VALUES ($1, TRUE)
+    ON CONFLICT (franchiseid) DO UPDATE SET enabled = TRUE
+  `, [franchiseId]);
+};
+
+const registerLinkedAccount = async (input: {
+  canonicalProfileId: string;
+  identityProfileId: string;
+  franchiseId: number;
+  tutorId: number;
+}): Promise<void> => {
+  assert.ok(pool);
+  await enableCenter(input.franchiseId);
+  const provider = `timecard-center:${input.franchiseId}`;
+  await pool.query(`
+    INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id)
+    VALUES ($1, $2, $3)
+  `, [input.identityProfileId, provider, String(input.tutorId)]);
+  const account = await pool.query<{ id: string }>(`
+    INSERT INTO public.pto_discovered_tutor_accounts
+      (provider, crm_id, franchiseid, tutor_id, normalized_first_name, normalized_last_name,
+       crm_snapshot, crm_active)
+    VALUES ($1, $2, $3, $4, 'linked', 'tutor', '{}', TRUE)
+    RETURNING id
+  `, [provider, String(input.tutorId), input.franchiseId, input.tutorId]);
+  await pool.query(`
+    INSERT INTO public.pto_profile_link_decisions
+      (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
+    VALUES ($1, $2, 'linked', 'db-test', $3, NOW())
+  `, [input.canonicalProfileId, account.rows[0].id, input.franchiseId]);
+};
+
 after(async () => {
   if (!enabled) return;
   await pool?.end();
@@ -122,6 +158,10 @@ test('confirmed merge deduplicates cycle grants while combining adjustments into
   assert.equal(Number(balance.rows[0].available_days), -1);
   assert.equal(Number(balance.rows[0].grant_count), 1);
   assert.equal(memberships.rows.length, 2);
+  await registerLinkedAccount({ canonicalProfileId: merged.rows[0].profile_id,
+    identityProfileId: targetId, franchiseId: 10, tutorId: 100 });
+  await registerLinkedAccount({ canonicalProfileId: merged.rows[0].profile_id,
+    identityProfileId: sourceId, franchiseId: 20, tutorId: 200 });
   const tutorView = await createPostgresPtoStore(pool).getTutorProfile({ franchiseId: 20, tutorId: 200 });
   assert.equal(tutorView.profile?.id, merged.rows[0].profile_id);
   assert.equal(tutorView.memberships.length, 2);
@@ -210,6 +250,12 @@ test('three-way confirmed aliases resolve every center to one canonical grant an
   assert.equal(canonical.rows[0].canonical_id, first);
   assert.equal(redundant.rows[0].profile_id, first);
   assert.deepEqual(current.rows[0], { available_days: '4.00', grant_count: '1' });
+  await registerLinkedAccount({ canonicalProfileId: first, identityProfileId: first,
+    franchiseId: 10, tutorId: 101 });
+  await registerLinkedAccount({ canonicalProfileId: first, identityProfileId: second,
+    franchiseId: 20, tutorId: 202 });
+  await registerLinkedAccount({ canonicalProfileId: first, identityProfileId: third,
+    franchiseId: 30, tutorId: 303 });
   const tutor = await createPostgresPtoStore(pool).getTutorProfile({ franchiseId: 30, tutorId: 303 });
   assert.equal(tutor.profile?.id, first);
 });
@@ -283,8 +329,9 @@ test('PostgreSQL store syncs by stable tutor ID, preserves manual email, and nev
     id: 700, franchiseId: 70, firstName: 'Roster', lastName: 'Tutor',
     email: 'first@example.com', isDeleted: false
   };
+  await enableCenter(70);
   await store.runInTransaction((tx) => tx.syncRoster({
-    franchiseId: 70, activate: true, actorId: 'admin-70', tutors: [tutor], discovery: discovery()
+    franchiseId: 70, actorId: 'admin-70', tutors: [tutor], discovery: discovery()
   }));
   const membership = await pool.query<{ id: string; profile_id: string }>(
     'SELECT id, profile_id FROM public.pto_profile_centers WHERE franchiseid = 70 AND tutor_id = 700'
@@ -295,7 +342,7 @@ test('PostgreSQL store syncs by stable tutor ID, preserves manual email, and nev
     email: 'manual@example.com', actorId: 'admin-70', actorFranchiseId: 70
   }));
   await store.runInTransaction((tx) => tx.syncRoster({
-    franchiseId: 70, activate: false, actorId: 'admin-70',
+    franchiseId: 70, actorId: 'admin-70',
     tutors: [{ ...tutor, email: 'updated@example.com' }], discovery: discovery()
   }));
 
@@ -314,6 +361,23 @@ test('PostgreSQL store syncs by stable tutor ID, preserves manual email, and nev
   assert.equal(grants.rows[0].count, '1');
 });
 
+test('PostgreSQL roster sync cannot create or enable an inactive center', { skip: !enabled }, async () => {
+  assert.ok(pool);
+  const store = createPostgresPtoStore(pool);
+
+  await assert.rejects(store.syncRoster({
+    franchiseId: 199,
+    actorId: 'admin-199',
+    tutors: [],
+    discovery: discovery()
+  }), /PTO_CENTER_DISABLED/);
+
+  const state = await pool.query<{ count: string }>(`
+    SELECT COUNT(*)::TEXT AS count FROM public.pto_center_settings WHERE franchiseid = 199
+  `);
+  assert.equal(state.rows[0].count, '0');
+});
+
 test('discovery sync creates pending decisions without overwriting excluded or linked decisions', { skip: !enabled }, async () => {
   assert.ok(pool);
   const store = createPostgresPtoStore(pool);
@@ -326,9 +390,9 @@ test('discovery sync creates pending decisions without overwriting excluded or l
     email: 'ada@center2.example', isDeleted: false,
     provider: 'timecard-center:2', crmId: '200'
   };
+  await enableCenter(68);
   const sync = () => store.runInTransaction((tx) => tx.syncRoster({
     franchiseId: 68,
-    activate: true,
     actorId: 'admin-68',
     tutors: [localTutor],
     discovery: discovery([remoteAccount])
@@ -380,7 +444,8 @@ test('candidate-owning center reads typed masked accounts and only its activatio
   const remote = { id: 5202, franchiseId: 52, firstName: 'Candidate', lastName: 'Owner',
     email: 'remote@center52.example', isDeleted: false,
     provider: 'timecard-center:52', crmId: '5202' };
-  await store.syncRoster({ franchiseId: 51, activate: true, actorId: 'admin-51',
+  await enableCenter(51);
+  await store.syncRoster({ franchiseId: 51, actorId: 'admin-51',
     tutors: [local], discovery: discovery([remote]) });
   const profile = await pool.query<{ profile_id: string }>(`
     SELECT profile_id FROM public.pto_profile_centers WHERE franchiseid = 51 AND tutor_id = 5101
@@ -419,8 +484,9 @@ test('dormant account link is authorized, idempotent, versioned, and reused by l
     email: 'one@example.com', isDeleted: false };
   const remoteAccount = { id: 202, franchiseId: 2, firstName: 'Dormant', lastName: 'Tutor',
     email: 'two@example.com', isDeleted: false, provider: 'timecard-center:2', crmId: '202' };
+  await enableCenter(1);
   await store.runInTransaction((tx) => tx.syncRoster({
-    franchiseId: 1, activate: true, actorId: 'admin-1', tutors: [localTutor],
+    franchiseId: 1, actorId: 'admin-1', tutors: [localTutor],
     discovery: discovery([remoteAccount])
   }));
   const rows = await pool.query<{ profile_id: string; account_id: string; version: number }>(`
@@ -491,7 +557,7 @@ test('dormant account link is authorized, idempotent, versioned, and reused by l
   assert.deepEqual(dormant.rows[0], { profile_id: rows.rows[0].profile_id, memberships: '0', emails: '0' });
 
   const duplicateRemote = { ...remoteAccount, id: 203, crmId: '203', email: 'duplicate@example.com' };
-  await store.syncRoster({ franchiseId: 1, activate: false, actorId: 'admin-1', tutors: [localTutor],
+  await store.syncRoster({ franchiseId: 1, actorId: 'admin-1', tutors: [localTutor],
     discovery: discovery([remoteAccount, duplicateRemote]) });
   const duplicateDecision = await pool.query<{ account_id: string; version: number }>(`
     SELECT decision.account_id, decision.version
@@ -511,8 +577,9 @@ test('dormant account link is authorized, idempotent, versioned, and reused by l
     /PTO_CENTER_ACCOUNT_CONFLICT|center.*linked account/i
   );
 
+  await enableCenter(2);
   await store.runInTransaction((tx) => tx.syncRoster({
-    franchiseId: 2, activate: true, actorId: 'admin-2', tutors: [{
+    franchiseId: 2, actorId: 'admin-2', tutors: [{
       id: 202, franchiseId: 2, firstName: 'Dormant', lastName: 'Tutor',
       email: 'two@example.com', isDeleted: false
     }], discovery: discovery()
@@ -534,9 +601,11 @@ test('linking active profiles retains one grant and previews a negative merged b
     email: 'first@example.com', isDeleted: false };
   const second = { id: 2002, franchiseId: 20, firstName: 'Active', lastName: 'Merge',
     email: 'second@example.com', isDeleted: false };
-  await store.syncRoster({ franchiseId: 10, activate: true, actorId: 'admin-10',
+  await enableCenter(10);
+  await enableCenter(20);
+  await store.syncRoster({ franchiseId: 10, actorId: 'admin-10',
     tutors: [first], discovery: discovery() });
-  await store.syncRoster({ franchiseId: 20, activate: true, actorId: 'admin-20',
+  await store.syncRoster({ franchiseId: 20, actorId: 'admin-20',
     tutors: [second], discovery: discovery() });
   const profiles = await pool.query<{ profile_id: string; franchiseid: number; membership_id: string }>(`
     SELECT profile_id, franchiseid, id AS membership_id FROM public.pto_profile_centers
@@ -552,7 +621,7 @@ test('linking active profiles retains one grant and previews a negative merged b
     actorFranchiseId: 20
   });
   const remote = { ...second, provider: 'timecard-center:20', crmId: '2002' };
-  await store.syncRoster({ franchiseId: 10, activate: false, actorId: 'admin-10',
+  await store.syncRoster({ franchiseId: 10, actorId: 'admin-10',
     tutors: [first], discovery: discovery([remote]) });
   const decision = await pool.query<{ account_id: string; version: number }>(`
     SELECT decision.account_id, decision.version
@@ -592,7 +661,8 @@ test('adjustment provenance is required for new writes and reconciles legacy spl
   const store = createPostgresPtoStore(pool);
   const tutor = { id: 3030, franchiseId: 30, firstName: 'Provenance', lastName: 'Tutor',
     email: 'provenance@example.com', isDeleted: false };
-  await store.syncRoster({ franchiseId: 30, activate: true, actorId: 'admin-30',
+  await enableCenter(30);
+  await store.syncRoster({ franchiseId: 30, actorId: 'admin-30',
     tutors: [tutor], discovery: discovery() });
   const membership = await pool.query<{ id: string; profile_id: string }>(`
     SELECT id, profile_id FROM public.pto_profile_centers WHERE franchiseid = 30 AND tutor_id = 3030
@@ -681,7 +751,8 @@ test('turning off a dormant linked account excludes it without creating a profil
     email: 'local@example.com', isDeleted: false };
   const remote = { id: 4202, franchiseId: 42, firstName: 'Dormant', lastName: 'Optout',
     email: 'remote@example.com', isDeleted: false, provider: 'timecard-center:42', crmId: '4202' };
-  await store.syncRoster({ franchiseId: 41, activate: true, actorId: 'admin-41',
+  await enableCenter(41);
+  await store.syncRoster({ franchiseId: 41, actorId: 'admin-41',
     tutors: [local], discovery: discovery([remote]) });
   const candidate = await pool.query<{ profile_id: string; account_id: string; version: number }>(`
     SELECT decision.profile_id, decision.account_id, decision.version
@@ -943,7 +1014,8 @@ test('deleted and missing CRM tutors cannot resolve public PTO identity after sy
   const store = createPostgresPtoStore(db);
   const tutor = { id: 404, franchiseId: 40, firstName: 'Inactive', lastName: 'Tutor',
     email: 'inactive@example.com', isDeleted: false };
-  await store.syncRoster({ franchiseId: 40, activate: true, actorId: 'admin-40',
+  await enableCenter(40);
+  await store.syncRoster({ franchiseId: 40, actorId: 'admin-40',
     tutors: [tutor], discovery: discovery() });
   const resolvePublic = () => db.query(`SELECT public.pto_resolve_profile(
     40, NULL, NULL, 'inactive@example.com', 'public', 'Inactive', 'Tutor'
@@ -958,15 +1030,15 @@ test('deleted and missing CRM tutors cannot resolve public PTO identity after sy
   await resolveAuthenticated();
   assert.equal(await membershipIsActive(), true);
 
-  await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40',
+  await store.syncRoster({ franchiseId: 40, actorId: 'admin-40',
     tutors: [{ ...tutor, isDeleted: true }], discovery: discovery() });
   await assert.rejects(resolveAuthenticated, /active CRM membership/i);
   assert.equal(await membershipIsActive(), false);
   await assert.rejects(resolvePublic, /exactly one active profile/);
 
-  await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40',
+  await store.syncRoster({ franchiseId: 40, actorId: 'admin-40',
     tutors: [tutor], discovery: discovery() });
-  await store.syncRoster({ franchiseId: 40, activate: false, actorId: 'admin-40',
+  await store.syncRoster({ franchiseId: 40, actorId: 'admin-40',
     tutors: [], discovery: discovery() });
   const request = await db.query<{ id: string; created_at: Date }>(`
     INSERT INTO public.time_off_requests
@@ -1019,8 +1091,9 @@ test('legacy email provenance and CRM identity follow a detached membership thro
   );
   const detachedId = detached.rows[0].profile_id;
   const store = createPostgresPtoStore(pool);
+  await enableCenter(51);
   await store.runInTransaction((tx) => tx.syncRoster({
-    franchiseId: 51, activate: true, actorId: 'admin-51', tutors: [{
+    franchiseId: 51, actorId: 'admin-51', tutors: [{
       id: 5151, franchiseId: 51, firstName: 'Legacy', lastName: 'Tutor',
       email: 'updated@example.com', isDeleted: false
     }], discovery: discovery()
@@ -1041,8 +1114,9 @@ test('legacy email provenance and CRM identity follow a detached membership thro
 test('manual email survives a CRM collision and ambiguity is checked across every canonical linked center', { skip: !enabled }, async () => {
   assert.ok(pool);
   const store = createPostgresPtoStore(pool);
+  await enableCenter(60);
   await store.runInTransaction((tx) => tx.syncRoster({
-    franchiseId: 60, activate: true, actorId: 'admin-60', tutors: [{
+    franchiseId: 60, actorId: 'admin-60', tutors: [{
       id: 6060, franchiseId: 60, firstName: 'Collision', lastName: 'Tutor',
       email: 'same@example.com', isDeleted: false
     }], discovery: discovery()
@@ -1052,7 +1126,7 @@ test('manual email survives a CRM collision and ambiguity is checked across ever
   );
   await store.addEmail({ profileId: member.rows[0].profile_id, membershipId: member.rows[0].id,
     email: 'same@example.com', actorId: 'admin-60', actorFranchiseId: 60 });
-  await store.syncRoster({ franchiseId: 60, activate: false, actorId: 'admin-60', tutors: [{
+  await store.syncRoster({ franchiseId: 60, actorId: 'admin-60', tutors: [{
     id: 6060, franchiseId: 60, firstName: 'Collision', lastName: 'Tutor',
     email: 'changed@example.com', isDeleted: false
   }], discovery: discovery() });
@@ -1122,6 +1196,10 @@ test('canonical-source admins can mutate and detach while balance components sta
     cycleStart: `${new Date().getUTCFullYear()}-01-01`, deltaDays: -0.5, reason: 'Canonical correction',
     actorId: 'admin-71', actorFranchiseId: 71 });
   assert.equal(adjusted.availableDays, 2.5);
+  await registerLinkedAccount({ canonicalProfileId: target, identityProfileId: target,
+    franchiseId: 70, tutorId: 7070 });
+  await registerLinkedAccount({ canonicalProfileId: target, identityProfileId: source,
+    franchiseId: 71, tutorId: 7171 });
   const view = await store.getTutorProfile({ franchiseId: 71, tutorId: 7171 });
   assert.deepEqual(view.balance, { grantedDays: 5, balanceDays: 3.5, reservedDays: 1, availableDays: 2.5 });
   const audit = await store.listAudit({ franchiseId: 71, profileId: target, page: 1, pageSize: 25 });
@@ -1161,8 +1239,9 @@ test('preview is null-safe and counts only genuine new exact-name candidates', {
 test('activation, sync, email, and adjustment audits contain actual before and after states', { skip: !enabled }, async () => {
   assert.ok(pool);
   const store = createPostgresPtoStore(pool);
+  await enableCenter(90);
   await store.runInTransaction((tx) => tx.syncRoster({
-    franchiseId: 90, activate: true, actorId: 'admin-90', tutors: [{
+    franchiseId: 90, actorId: 'admin-90', tutors: [{
       id: 9090, franchiseId: 90, firstName: 'Audit', lastName: 'Tutor', email: null, isDeleted: false
     }], discovery: discovery()
   }));
@@ -1177,19 +1256,18 @@ test('activation, sync, email, and adjustment audits contain actual before and a
     actorId: 'admin-90', actorFranchiseId: 90 });
   const events = await pool.query<{ event_type: string; before_state: unknown; after_state: unknown }>(`
     SELECT event_type, before_state, after_state FROM public.pto_audit_events
-    WHERE event_type IN ('center_activated_and_synced', 'email_added', 'balance_adjusted') ORDER BY id
+    WHERE event_type IN ('roster_synced', 'email_added', 'balance_adjusted') ORDER BY id
   `);
   assert.equal(events.rows.length, 3);
   for (const event of events.rows) {
     assert.notEqual(event.before_state, null, `${event.event_type} missing before state`);
     assert.notEqual(event.after_state, null, `${event.event_type} missing after state`);
   }
-  assert.deepEqual(events.rows[0].before_state, {
-    enabled: false, firstActivatedAt: null, lastSuccessfulSyncAt: null, lastSyncError: null,
-    lastSuccessfulRosterSyncAt: null, lastRosterSyncError: null,
-    lastSuccessfulDiscoveryAt: null, lastDiscoveryError: null,
-    activeTutorIds: []
-  });
+  const before = events.rows[0].before_state as Record<string, unknown>;
+  assert.equal(before.enabled, true);
+  assert.match(String(before.firstActivatedAt), /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(before.lastSuccessfulSyncAt, null);
+  assert.deepEqual(before.activeTutorIds, []);
 });
 
 test('contradictory alias retries are rejected while same-decision retries report the stored outcome', { skip: !enabled }, async () => {
@@ -1229,15 +1307,15 @@ test('three-center acceptance preserves remembered links activation deductions a
   ];
   const discovered = tutors.map((tutor) => ({ ...tutor,
     provider: `timecard-center:${tutor.franchiseId}`, crmId: String(tutor.id) }));
-  const sync = (franchiseId: number, activate: boolean) => store.runInTransaction((tx) => tx.syncRoster({
+  const sync = (franchiseId: number) => store.runInTransaction((tx) => tx.syncRoster({
     franchiseId,
-    activate,
     actorId: `admin-${franchiseId}`,
     tutors: tutors.filter((tutor) => tutor.franchiseId === franchiseId),
     discovery: discovery(discovered)
   }));
 
-  const firstSync = await sync(1, true);
+  await enableCenter(1);
+  const firstSync = await sync(1);
   assert.deepEqual({ discovered: firstSync.discoveredAccountCount, pending: firstSync.pendingReviewCount },
     { discovered: 3, pending: 2 });
   const profiles = await store.listAdminProfiles({ franchiseId: 1, search: '', page: 1, pageSize: 25 });
@@ -1262,8 +1340,10 @@ test('three-center acceptance preserves remembered links activation deductions a
     }));
   }
 
-  await sync(2, true);
-  await sync(3, true);
+  await enableCenter(2);
+  await enableCenter(3);
+  await sync(2);
+  await sync(3);
   const sharedMemberships = await db.query<{ id: string; franchiseid: number }>(`
     SELECT id, franchiseid FROM public.pto_profile_centers
     WHERE public.pto_canonical_profile_id(profile_id) = $1 AND active ORDER BY franchiseid
@@ -1346,7 +1426,7 @@ test('three-center acceptance preserves remembered links activation deductions a
   assert.equal(balances.rows.find((row) => row.profile_id === canonicalProfileId)?.available_days, '3.00');
   assert.equal(balances.rows.find((row) => row.profile_id === unlinked.detachedProfileId)?.available_days, '5.50');
 
-  await sync(1, false);
+  await sync(1);
   const remembered = await db.query<{ status: string }>(`
     SELECT decision.status
     FROM public.pto_profile_link_decisions decision

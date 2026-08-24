@@ -80,15 +80,9 @@ const baseDeps = (): PtoRouteDeps => ({
   getProgramPolicy: async () => ({ id: '1', effectiveFrom: '1970-01-01', entitlementDays: 5, renewalMonth: 1, renewalDay: 1, carryoverDays: 0 }),
   getCenterStatus: async (franchiseId) => ({ franchiseId, enabled: true,
     firstActivatedAt: '2026-01-01T00:00:00.000Z', ...syncHealth }),
-  previewActivation: async () => ({ activeCrmTutorCount: 1, newMembershipCount: 0, newProfileCount: 0,
-    ...accountCounts, pendingExactNameCandidateCount: 0, ...syncHealth, candidateGroups: [], warnings: [],
-    policy: { id: '1', effectiveFrom: '1970-01-01', entitlementDays: 5,
-      renewalMonth: 1, renewalDay: 1, carryoverDays: 0 } }),
   syncRoster: async () => ({ activeTutorCount: 1, activatedMembershipCount: 1,
     deactivatedMembershipCount: 0, createdProfileCount: 0, ...accountCounts, pendingCandidateCount: 0,
     ...syncHealth, lastSuccessfulSyncAt: '2026-08-16T12:00:00.000Z', warnings: [] }),
-  deactivateCenter: async (input) => ({ franchiseId: input.franchiseId, enabled: false,
-    firstActivatedAt: '2026-01-01T00:00:00.000Z', ...syncHealth }),
   getTutorProfile: async () => profile,
   getBalanceSummary: async () => quote.balance,
   authorizePublicCenter: async () => ({ franchiseId: 6 }),
@@ -261,12 +255,10 @@ test('public quote uses the authorized center timezone, local date, and notice p
   assert.equal(noticeResponse.status, 400);
 });
 
-test('admin PTO routes enforce selected center scope and expose every lifecycle endpoint', async () => {
+test('enabled-center admin PTO routes enforce selected center scope and expose maintenance endpoints', async () => {
   const calls: Array<{ name: string; value: unknown }> = [];
   const deps = baseDeps();
-  deps.previewActivation = async (franchiseId) => { calls.push({ name: 'preview', value: franchiseId }); return baseDeps().previewActivation(franchiseId); };
-  deps.syncRoster = async (input) => { calls.push({ name: input.activate ? 'activate' : 'sync', value: input.franchiseId }); return baseDeps().syncRoster(input); };
-  deps.deactivateCenter = async (input) => { calls.push({ name: 'deactivate', value: input.franchiseId }); return baseDeps().deactivateCenter(input); };
+  deps.syncRoster = async (input) => { calls.push({ name: 'sync', value: input.franchiseId }); return baseDeps().syncRoster(input); };
   deps.listProfiles = async (input) => { calls.push({ name: 'profiles', value: input.franchiseId }); return { items: [], page: 1, pageSize: 25, total: 0 }; };
   deps.getAdminProfile = async (input) => { calls.push({ name: 'profile', value: input.franchiseId }); return adminProfile; };
   deps.decideAlias = async (input) => { calls.push({ name: 'alias', value: input.actorFranchiseId }); return { profileId: '10', decision: input.decision }; };
@@ -277,9 +269,6 @@ test('admin PTO routes enforce selected center scope and expose every lifecycle 
   deps.listAudit = async (input) => { calls.push({ name: 'audit', value: input.franchiseId }); return { items: [], page: 1, pageSize: 25, total: 0 }; };
   const base = await startApp(deps, { accountType: 'ADMIN', accountId: 900, franchiseId: 1 });
   const requests: Array<[string, string, unknown?]> = [
-    ['GET', '/api/pto/admin/activation-preview?franchiseId=77'],
-    ['POST', '/api/pto/admin/activate', { franchiseId: 77 }],
-    ['POST', '/api/pto/admin/deactivate', { franchiseId: 77 }],
     ['POST', '/api/pto/admin/sync', { franchiseId: 77 }],
     ['GET', '/api/pto/admin/profiles?franchiseId=77'],
     ['GET', '/api/pto/admin/profiles/10?franchiseId=77'],
@@ -299,6 +288,54 @@ test('admin PTO routes enforce selected center scope and expose every lifecycle 
     assert.equal(response.status >= 200 && response.status < 300, true, `${method} ${path} returned ${response.status}`);
   }
   assert.equal(calls.every((call) => call.value === 77), true);
+});
+
+test('activation routes are unavailable and inactive-center administration is rejected before work starts', async () => {
+  let syncCalls = 0;
+  let profileCalls = 0;
+  const deps = baseDeps();
+  deps.getCenterStatus = async (franchiseId) => ({
+    franchiseId,
+    enabled: false,
+    firstActivatedAt: null,
+    ...syncHealth
+  });
+  deps.syncRoster = async () => {
+    syncCalls += 1;
+    return baseDeps().syncRoster({ franchiseId: 16, actorId: '900' });
+  };
+  deps.listProfiles = async () => {
+    profileCalls += 1;
+    return { items: [], page: 1, pageSize: 25, total: 0 };
+  };
+  const base = await startApp(deps, { accountType: 'ADMIN', accountId: 900, franchiseId: 16 });
+
+  const removed: Array<[string, string]> = [
+    ['GET', '/api/pto/admin/activation-preview?franchiseId=16'],
+    ['POST', '/api/pto/admin/activate'],
+    ['POST', '/api/pto/admin/deactivate']
+  ];
+  for (const [method, path] of removed) {
+    const response = await fetch(`${base}${path}`, {
+      method,
+      headers: method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
+      body: method === 'POST' ? JSON.stringify({ franchiseId: 16 }) : undefined
+    });
+    assert.equal(response.status, 404, `${method} ${path} remained available`);
+  }
+
+  const sync = await fetch(`${base}/api/pto/admin/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ franchiseId: 16 })
+  });
+  const profiles = await fetch(`${base}/api/pto/admin/profiles?franchiseId=16`);
+
+  assert.equal(sync.status, 409);
+  assert.deepEqual(await sync.json(), { error: 'PTO is disabled for this center', code: 'PTO_CENTER_DISABLED' });
+  assert.equal(profiles.status, 409);
+  assert.equal(syncCalls, 0);
+  assert.equal(profileCalls, 0);
 });
 
 test('admin account link routes validate and forward scoped preview and mutation payloads', async () => {

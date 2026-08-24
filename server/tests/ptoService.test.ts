@@ -28,6 +28,12 @@ const centerStatus = {
   lastDiscoveryError: null
 };
 
+const enabledCenterStatus = {
+  ...centerStatus,
+  enabled: true,
+  firstActivatedAt: '2026-01-01T00:00:00.000Z'
+};
+
 const emptyHealth = {
   lastSuccessfulSyncAt: null,
   lastSyncError: null,
@@ -157,10 +163,36 @@ test('activation preview discovers related accounts from active local tutors', a
   ]);
 });
 
+test('sync rejects an inactive center before reading CRM or opening a transaction', async () => {
+  let rosterReads = 0;
+  let transactions = 0;
+  const service = createPtoService({
+    store: createStore({
+      getCenterStatus: async () => centerStatus,
+      runInTransaction: async () => {
+        transactions += 1;
+        throw new Error('must not transact');
+      }
+    }),
+    rosterSource: roster(async () => {
+      rosterReads += 1;
+      return [];
+    })
+  });
+
+  await assert.rejects(
+    service.syncPtoRoster({ franchiseId: 77, actorId: 'admin-1' }),
+    /PTO_CENTER_DISABLED/
+  );
+  assert.equal(rosterReads, 0);
+  assert.equal(transactions, 0);
+});
+
 test('sync refetches CRM before a single transaction and performs no store writes when CRM fails', async () => {
   let transactions = 0;
   const service = createPtoService({
     store: createStore({
+      getCenterStatus: async () => enabledCenterStatus,
       runInTransaction: async () => {
         transactions += 1;
         throw new Error('must not be reached');
@@ -172,7 +204,7 @@ test('sync refetches CRM before a single transaction and performs no store write
   });
 
   await assert.rejects(
-    service.syncPtoRoster({ franchiseId: 77, activate: true, actorId: 'admin-1' }),
+    service.syncPtoRoster({ franchiseId: 77, actorId: 'admin-1' }),
     /crm unavailable/
   );
   assert.equal(transactions, 0);
@@ -183,7 +215,7 @@ test('sync reconciles active and deleted CRM rows transactionally and returns th
   const syncedAt = '2026-08-16T12:00:00.000Z';
   const transactional = createStore({
     syncRoster: async (input) => {
-      calls.push(`sync:${input.tutors.length}:${input.activate}`);
+      calls.push(`sync:${input.tutors.length}`);
       return {
         activeTutorCount: 1,
         activatedMembershipCount: 1,
@@ -198,6 +230,7 @@ test('sync reconciles active and deleted CRM rows transactionally and returns th
     }
   });
   const store = createStore({
+    getCenterStatus: async () => enabledCenterStatus,
     runInTransaction: async (work) => {
       calls.push('begin');
       const result = await work(transactional);
@@ -216,9 +249,9 @@ test('sync reconciles active and deleted CRM rows transactionally and returns th
     })
   });
 
-  const result = await service.syncPtoRoster({ franchiseId: 77, activate: true, actorId: 'admin-1' });
+  const result = await service.syncPtoRoster({ franchiseId: 77, actorId: 'admin-1' });
 
-  assert.deepEqual(calls, ['crm', 'begin', 'sync:2:true', 'commit']);
+  assert.deepEqual(calls, ['crm', 'begin', 'sync:2', 'commit']);
   assert.equal(result.lastSuccessfulSyncAt, syncedAt);
 });
 
@@ -242,7 +275,10 @@ test('sync preserves a successful local roster when global discovery fails', asy
     }
   });
   const service = createPtoService({
-    store: createStore({ runInTransaction: async (work) => work(transactional) }),
+    store: createStore({
+      getCenterStatus: async () => enabledCenterStatus,
+      runInTransaction: async (work) => work(transactional)
+    }),
     rosterSource: roster(async () => [
       { id: 6801, franchiseId: 68, firstName: 'Ada', lastName: 'Lovelace',
         email: 'ada@example.com', isDeleted: false }
@@ -251,7 +287,7 @@ test('sync preserves a successful local roster when global discovery fails', asy
     })
   });
 
-  const result = await service.syncPtoRoster({ franchiseId: 68, activate: false, actorId: 'admin-68' });
+  const result = await service.syncPtoRoster({ franchiseId: 68, actorId: 'admin-68' });
 
   assert.equal(result.lastSuccessfulSyncAt, syncedAt);
   assert.match(String((capturedDiscovery as { attemptedAt?: unknown })?.attemptedAt), /^\d{4}-\d{2}-\d{2}T/);

@@ -122,7 +122,6 @@ export interface PtoActivationPreview extends PtoActivationPreviewBase {
 
 export interface PtoRosterSyncInput {
   franchiseId: number;
-  activate: boolean;
   actorId: Id;
 }
 

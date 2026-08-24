@@ -58,7 +58,10 @@ export const createPtoService = (dependencies: {
       const preview = await store.previewActivation(franchiseId, activeTutors, discovery);
       return { ...preview, policy };
     },
-    syncPtoRoster: async (input: { franchiseId: number; activate: boolean; actorId: Id }) => {
+    syncPtoRoster: async (input: { franchiseId: number; actorId: Id }) => {
+      if (!(await store.getCenterStatus(input.franchiseId)).enabled) {
+        throw new Error('PTO_CENTER_DISABLED');
+      }
       const tutors = await rosterSource.fetchTutors(input.franchiseId);
       const activeTutors = tutors.filter((tutor) => !tutor.isDeleted);
       const attemptedAt = new Date().toISOString();
