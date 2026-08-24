@@ -11,7 +11,8 @@ const containerName = `timecard-pto-admin-test-${process.pid}`;
 const migrations = [
   '0010_shared_pto.sql',
   '0011_pto_admin_invariants.sql',
-  '0013_persistent_pto_profile_links.sql'
+  '0013_persistent_pto_profile_links.sql',
+  '0014_database_controlled_pto_linked_login.sql'
 ].map((file) =>
   readFileSync(path.resolve(__dirname, `../db/migrations/${file}`), 'utf8')
 );
@@ -894,6 +895,22 @@ test('merged profiles compete for one grant through the actual reservation path'
   `, [first, second]);
   await db.query('SELECT public.pto_admin_decide_alias($1, $2, $3, $4)',
     [candidate.rows[0].id, 'confirm', 'admin-10', 10]);
+  const accounts = await db.query<{ id: string; franchiseid: number }>(`
+    INSERT INTO public.pto_discovered_tutor_accounts
+      (provider, crm_id, franchiseid, tutor_id, normalized_first_name, normalized_last_name,
+       crm_snapshot, crm_active)
+    VALUES
+      ('timecard-center:10', '101', 10, 101, 'reserve', 'shared', '{}', TRUE),
+      ('timecard-center:20', '202', 20, 202, 'reserve', 'shared', '{}', TRUE)
+    RETURNING id, franchiseid
+  `);
+  for (const account of accounts.rows) {
+    await db.query(`
+      INSERT INTO public.pto_profile_link_decisions
+        (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
+      VALUES ($1, $2, 'linked', 'admin-10', 10, NOW())
+    `, [first, account.id]);
+  }
   const requests = await db.query<{ id: string; franchiseid: number; tutorid: string; created_at: Date }>(`
     INSERT INTO public.time_off_requests
       (franchiseid, tutorid, first_name, last_name, email, start_at, end_at, type, status, partial_day, public_metadata)

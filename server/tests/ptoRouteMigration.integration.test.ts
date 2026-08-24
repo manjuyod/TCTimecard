@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { Pool } from 'pg';
@@ -10,6 +10,10 @@ import { createPtoRouteStore } from '../services/pto/routeStore';
 const enabled = process.env.RUN_PTO_POSTGRES_TESTS === '1';
 const containerName = `timecard-pto-route-test-${process.pid}`;
 const migration = (name: string) => readFileSync(path.resolve(__dirname, `../db/migrations/${name}`), 'utf8');
+const linkedEligibilityMigrationPath = path.resolve(
+  __dirname,
+  '../db/migrations/0014_database_controlled_pto_linked_login.sql'
+);
 let pool: Pool | undefined;
 
 const docker = (args: string[], timeout = 120_000) => execFileSync('docker', args, {
@@ -171,3 +175,75 @@ test('a linked-center admin may manage another listed center on the canonical pr
     actorId: 'admin-50', actorFranchiseId: 50 });
   assert.notEqual(detached.detachedProfileId, target);
 });
+
+test('an inactive-center linked login reserves the sponsored canonical pool while retaining request ownership',
+  { skip: !enabled }, async () => {
+    const db = pool;
+    assert.ok(db);
+    if (existsSync(linkedEligibilityMigrationPath)) {
+      await db.query(readFileSync(linkedEligibilityMigrationPath, 'utf8'));
+    }
+
+    await db.query('INSERT INTO public.pto_center_settings (franchiseid, enabled) VALUES (68, TRUE)');
+    const profile = await db.query<{ id: string }>(`
+      INSERT INTO public.pto_profiles (first_name, last_name, identity_status)
+      VALUES ('Shannon', 'Force', 'confirmed') RETURNING id
+    `);
+    const profileId = profile.rows[0].id;
+    await db.query(`
+      INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id)
+      VALUES ($1, 'timecard-center:68', '3937'), ($1, 'timecard-center:16', '3487')
+    `, [profileId]);
+    const sponsor = await db.query<{ id: string }>(`
+      INSERT INTO public.pto_profile_centers (profile_id, franchiseid, tutor_id, active, crm_snapshot)
+      VALUES ($1, 68, 3937, TRUE, '{"firstName":"Shannon","lastName":"Force"}')
+      RETURNING id
+    `, [profileId]);
+    await db.query(`
+      INSERT INTO public.pto_profile_emails
+        (profile_id, franchiseid, email, active, source, source_membership_id)
+      VALUES ($1, 68, 'shannon@center68.example', TRUE, 'crm', $2)
+    `, [profileId, sponsor.rows[0].id]);
+    const account = await db.query<{ id: string }>(`
+      INSERT INTO public.pto_discovered_tutor_accounts
+        (provider, crm_id, franchiseid, tutor_id, normalized_first_name, normalized_last_name,
+         crm_snapshot, crm_active)
+      VALUES ('timecard-center:16', '3487', 16, 3487, 'shannon', 'force',
+        '{"firstName":"Shannon","lastName":"Force","email":"shannon@center16.example"}', TRUE)
+      RETURNING id
+    `);
+    await db.query(`
+      INSERT INTO public.pto_profile_link_decisions
+        (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
+      VALUES ($1, $2, 'linked', 'db-test', 68, NOW())
+    `, [profileId, account.rows[0].id]);
+
+    const request = await db.query<{ id: string; franchiseid: number; tutorid: string }>(`
+      INSERT INTO public.time_off_requests
+        (franchiseid, tutorid, first_name, last_name, email, start_at, end_at, type, status,
+         duration_hours, partial_day, public_metadata)
+      VALUES (16, 3487, 'Shannon', 'Force', 'shannon@center16.example',
+        '2026-09-01T07:00:00Z', '2026-09-02T07:00:00Z', 'pto', 'pending', 24, FALSE,
+        '{"startDate":"2026-09-01","endDate":"2026-09-01","source":"authenticated_timecard_app"}')
+      RETURNING id, franchiseid, tutorid
+    `);
+    const allocation = await db.query<{ charged_days: string; state: string }>(`
+      SELECT charged_days, state FROM public.pto_request_allocations WHERE request_id = $1
+    `, [request.rows[0].id]);
+    const balance = await db.query<{ available_days: string; reserved_days: string }>(`
+      SELECT available_days, reserved_days FROM public.pto_profile_balance($1, '2026-09-01')
+    `, [profileId]);
+
+    assert.equal(request.rows[0].franchiseid, 16);
+    assert.equal(String(request.rows[0].tutorid), '3487');
+    assert.equal(allocation.rows[0].state, 'reserved');
+    assert.equal(Number(allocation.rows[0].charged_days), 1);
+    assert.equal(Number(balance.rows[0].available_days), 4);
+    assert.equal(Number(balance.rows[0].reserved_days), 1);
+
+    await db.query("UPDATE public.time_off_requests SET status = 'approved' WHERE id = $1", [request.rows[0].id]);
+    assert.equal((await db.query<{ state: string }>(
+      'SELECT state FROM public.pto_request_allocations WHERE request_id = $1',
+      [request.rows[0].id]
+    )).rows[0].state, 'consumed');
+  });
