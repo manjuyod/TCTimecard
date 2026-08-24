@@ -12,7 +12,7 @@ const balanceRow = {
 test('authenticated quote resolves the exact membership once and compares every cycle allocation', async () => {
   let identityReads = 0;
   const pool = { query: async (sql: string) => {
-    if (/FROM public\.pto_profile_centers center[\s\S]*pto_profile_crm_ids/i.test(sql)) {
+    if (/pto_authenticated_linked_profile/i.test(sql)) {
       identityReads += 1; return { rowCount: 1, rows: [{ profile_id: '10' }] };
     }
     if (/JSONB_TO_RECORDSET/i.test(sql)) return { rowCount: 1, rows: [{ cycle_start: '2026-01-01', days: '1.00' }] };
@@ -28,6 +28,34 @@ test('authenticated quote resolves the exact membership once and compares every 
   assert.equal(result.eligible, true);
   assert.deepEqual(result.cycleAllocations, [{ cycleStart: '2026-01-01', days: 1 }]);
   assert.equal(result.balance?.renewsOn, '2027-01-01');
+});
+
+test('authenticated quote uses an eligible linked pool without requiring the login center to be enabled', async () => {
+  let sourceCenterReads = 0;
+  const pool = { query: async (sql: string) => {
+    if (/pto_authenticated_linked_profile/i.test(sql)
+      || /FROM public\.pto_profile_centers center[\s\S]*pto_profile_crm_ids/i.test(sql)) {
+      return { rowCount: 1, rows: [{ profile_id: '8' }] };
+    }
+    if (/JSONB_TO_RECORDSET/i.test(sql)) {
+      return { rowCount: 1, rows: [{ cycle_start: '2026-01-01', days: '1.00' }] };
+    }
+    if (/FROM public\.pto_center_settings/i.test(sql)) {
+      sourceCenterReads += 1;
+      return { rowCount: 1, rows: [{ enabled: false }] };
+    }
+    if (/WITH policy AS/i.test(sql)) return { rowCount: 1, rows: [balanceRow] };
+    throw new Error(`Unexpected query: ${sql}`);
+  } };
+
+  const result = await createPtoRouteStore(pool as never).quoteAuthenticated({
+    franchiseId: 16, tutorId: 3487, balanceDate: '2026-08-23', chargeDays: 1,
+    dayCharges: [{ date: '2026-08-24', days: 1 }]
+  });
+
+  assert.equal(result.eligible, true);
+  assert.equal(result.balance?.availableDays, 4);
+  assert.equal(sourceCenterReads, 0);
 });
 
 test('public quote sends only the SHA-256 bearer hash to PostgreSQL and returns no balance', async () => {
@@ -66,7 +94,7 @@ test('inactive or unknown public center tokens fail authorization before identit
 
 test('authenticated quote keeps true cross-January allocations in separate entitlement cycles', async () => {
   const pool = { query: async (sql: string) => {
-    if (/FROM public\.pto_profile_centers center[\s\S]*pto_profile_crm_ids/i.test(sql)) {
+    if (/pto_authenticated_linked_profile/i.test(sql)) {
       return { rowCount: 1, rows: [{ profile_id: '10' }] };
     }
     if (/JSONB_TO_RECORDSET/i.test(sql)) return { rowCount: 2, rows: [
@@ -88,11 +116,11 @@ test('authenticated quote keeps true cross-January allocations in separate entit
 test('two center identities resolve one canonical balance while dormant identities stay unresolved', async () => {
   const balanceProfileIds: string[] = [];
   const pool = { query: async (sql: string, params: unknown[] = []) => {
-    if (/FROM public\.pto_profile_centers center[\s\S]*pto_profile_crm_ids/i.test(sql)) {
+    if (/pto_authenticated_linked_profile/i.test(sql)) {
       const identity = `${params[0]}:${params[1]}`;
       return ['1:101', '2:202'].includes(identity)
         ? { rowCount: 1, rows: [{ profile_id: '10' }] }
-        : { rowCount: 0, rows: [] };
+        : { rowCount: 1, rows: [{ profile_id: null }] };
     }
     if (/FROM public\.pto_profile_emails email/i.test(sql)) {
       const identity = `${params[0]}:${params[1]}`;
@@ -130,6 +158,6 @@ test('two center identities resolve one canonical balance while dormant identiti
   assert.deepEqual(authenticated.map((result) => result.balance?.availableDays), [4, 4]);
   assert.deepEqual(publicQuotes.map((result) => result.eligible), [true, true]);
   assert.deepEqual(balanceProfileIds, ['10', '10', '10', '10', '10', '10']);
-  assert.equal(dormantAuthenticated.reason, 'identity_unresolved');
+  assert.equal(dormantAuthenticated.reason, 'center_disabled');
   assert.equal(dormantPublic.reason, 'identity_unresolved');
 });

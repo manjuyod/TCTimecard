@@ -63,6 +63,9 @@ test('disabled-center guard and deactivation preserve existing PTO lifecycle', {
   `);
   await db.query(migration('0012_pto_routes.sql'));
   await db.query(migration('0013_persistent_pto_profile_links.sql'));
+  if (existsSync(linkedEligibilityMigrationPath)) {
+    await db.query(readFileSync(linkedEligibilityMigrationPath, 'utf8'));
+  }
   assert.equal((await db.query('SELECT COUNT(*)::INTEGER AS count FROM public.time_off_requests WHERE id = $1', [legacy.rows[0].id])).rows[0].count, 1);
 
   const insertDisabled = (source: 'authenticated_timecard_app' | 'public_timeoff_form') => db.query(`
@@ -85,6 +88,18 @@ test('disabled-center guard and deactivation preserve existing PTO lifecycle', {
   await db.query(`INSERT INTO public.pto_profile_emails
     (profile_id, franchiseid, email, active, source, source_membership_id)
     VALUES ($1,44,'active@example.com',TRUE,'crm',$2)`, [profile.rows[0].id, membership.rows[0].id]);
+  const activeAccount = await db.query<{ id: string }>(`
+    INSERT INTO public.pto_discovered_tutor_accounts
+      (provider, crm_id, franchiseid, tutor_id, normalized_first_name, normalized_last_name,
+       crm_snapshot, crm_active)
+    VALUES ('timecard-center:44', '4402', 44, 4402, 'active', 'tutor', '{}', TRUE)
+    RETURNING id
+  `);
+  await db.query(`
+    INSERT INTO public.pto_profile_link_decisions
+      (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
+    VALUES ($1, $2, 'linked', 'db-test', 44, NOW())
+  `, [profile.rows[0].id, activeAccount.rows[0].id]);
   const held = await db.query<{ id: string }>(`
     INSERT INTO public.time_off_requests
       (franchiseid, tutorid, first_name, last_name, email, start_at, end_at, type, status, duration_hours, partial_day, public_metadata)
@@ -217,6 +232,16 @@ test('an inactive-center linked login reserves the sponsored canonical pool whil
         (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
       VALUES ($1, $2, 'linked', 'db-test', 68, NOW())
     `, [profileId, account.rows[0].id]);
+
+    const tutorProfile = await createPostgresPtoStore(db).getTutorProfile({
+      franchiseId: 16,
+      tutorId: 3487
+    });
+    assert.equal(tutorProfile.profile?.id, profileId);
+    assert.deepEqual(tutorProfile.memberships.map((membership) => [membership.franchiseId, membership.tutorId]), [
+      [68, 3937]
+    ]);
+    assert.equal(tutorProfile.unresolvedReason, null);
 
     const request = await db.query<{ id: string; franchiseid: number; tutorid: string }>(`
       INSERT INTO public.time_off_requests

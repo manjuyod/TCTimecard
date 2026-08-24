@@ -57,15 +57,13 @@ const getStatus = async (db: Queryable, franchiseId: number): Promise<PtoCenterS
 };
 
 const resolveAuthenticatedProfile = async (db: Queryable, franchiseId: number, tutorId: number): Promise<string | null> => {
-  const result = await db.query(`
-    SELECT DISTINCT public.pto_canonical_profile_id(center.profile_id) AS profile_id
-    FROM public.pto_profile_centers center
-    JOIN public.pto_profiles profile ON profile.id = public.pto_canonical_profile_id(center.profile_id)
-    JOIN public.pto_profile_crm_ids crm ON crm.profile_id = center.profile_id
-    WHERE center.franchiseid = $1 AND center.tutor_id = $2 AND center.active AND profile.active
-      AND crm.provider = 'timecard-center:' || ($1::INTEGER)::TEXT AND crm.crm_id = ($2::BIGINT)::TEXT
-  `, [franchiseId, tutorId]);
-  return result.rowCount === 1 ? String(result.rows[0].profile_id) : null;
+  const result = await db.query(
+    'SELECT public.pto_authenticated_linked_profile($1, $2) AS profile_id',
+    [franchiseId, tutorId]
+  );
+  return result.rowCount === 1 && result.rows[0]?.profile_id != null
+    ? String(result.rows[0].profile_id)
+    : null;
 };
 
 const resolvePublicCenter = async (db: Queryable, token: string): Promise<{ franchiseId: number } | null> => {
@@ -167,12 +165,15 @@ const buildQuote = async (
   charges: PtoQuoteDayCharge[],
   authenticated: boolean,
   balanceDate: string,
+  checkSourceCenter: boolean,
   missingReason: PtoEligibilityReason = 'identity_unresolved'
 ): Promise<PtoQuote> => {
   const allocations = await cycleAllocations(db, charges);
   if (!context) return { eligible: false, reason: missingReason, chargeDays, cycleAllocations: allocations };
-  const status = await getStatus(db, context.franchiseId);
-  if (!status.enabled) return { eligible: false, reason: 'center_disabled', chargeDays, cycleAllocations: allocations };
+  if (checkSourceCenter) {
+    const status = await getStatus(db, context.franchiseId);
+    if (!status.enabled) return { eligible: false, reason: 'center_disabled', chargeDays, cycleAllocations: allocations };
+  }
   const summaries = await Promise.all(allocations.map((allocation) => balanceSummary(db, context.profileId, allocation.cycleStart)));
   const insufficient = allocations.some((allocation, index) => allocation.days > (summaries[index]?.availableDays ?? 0));
   const noBalance = summaries.length > 0 && summaries.every((summary) => summary.availableDays <= 0);
@@ -186,22 +187,32 @@ export const createPtoRouteStore = (pool: Pool) => ({
   authorizePublicCenter: (token: string) => resolvePublicCenter(pool, token),
   getBalanceSummary: (profileId: string, balanceDate: string) => balanceSummary(pool, profileId, balanceDate),
   getPolicyStatus: async (input: { franchiseId: number; tutorId: number; balanceDate: string }): Promise<PtoPolicyStatus> => {
-    const status = await getStatus(pool, input.franchiseId);
-    if (!status.enabled) return { enabled: false, reason: 'center_disabled' };
     const profileId = await resolveAuthenticatedProfile(pool, input.franchiseId, input.tutorId);
-    if (!profileId) return { enabled: true, reason: 'identity_unresolved' };
+    if (!profileId) {
+      const status = await getStatus(pool, input.franchiseId);
+      return status.enabled
+        ? { enabled: true, reason: 'identity_unresolved' }
+        : { enabled: false, reason: 'center_disabled' };
+    }
     const summary = await balanceSummary(pool, profileId, input.balanceDate);
     return { enabled: true, reason: summary.availableDays > 0 ? 'eligible' : 'no_balance', balance: summary };
   },
   quoteAuthenticated: async (input: AuthenticatedPtoQuoteInput) => {
     const profileId = await resolveAuthenticatedProfile(pool, input.franchiseId, input.tutorId);
+    const missingReason: PtoEligibilityReason = profileId
+      ? 'eligible'
+      : (await getStatus(pool, input.franchiseId)).enabled
+        ? 'identity_unresolved'
+        : 'center_disabled';
     return buildQuote(
       pool,
       profileId ? { franchiseId: input.franchiseId, profileId } : null,
       input.chargeDays,
       input.dayCharges,
       true,
-      input.balanceDate
+      input.balanceDate,
+      false,
+      missingReason
     );
   },
   quotePublic: async (input: PublicPtoQuoteInput) => {
@@ -212,7 +223,8 @@ export const createPtoRouteStore = (pool: Pool) => ({
       input.chargeDays,
       input.dayCharges,
       false,
-      input.balanceDate
+      input.balanceDate,
+      true
     );
   },
   deactivateCenter: async (input: { franchiseId: number; actorId: string }): Promise<PtoCenterStatus> => {
