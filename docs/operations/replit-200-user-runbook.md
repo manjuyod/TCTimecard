@@ -31,8 +31,8 @@ Expected columns: `sid` varchar non-null, `sess` json non-null, `expire` timesta
 ### Automatic clock-out migration
 
 1. Review the additive `server/db/migrations/0007_franchise_auto_clock_out.sql` and apply it through the same approved migration process.
-2. Confirm through `/admin/settings` that every franchise remains disabled after migration and deployment. The new `auto_clock_out_enabled` column defaults to `false`; do not enable it as part of migration.
-3. Use `GET /api/admin/settings?franchiseId=...` and `PATCH /api/admin/settings` only through an authenticated admin session or the Settings UI. Do not put session cookies, database URLs, or credentials in the runbook or deployment logs.
+2. Query `public.franchise_payroll_settings` and confirm every franchise remains disabled after migration and deployment. The new `auto_clock_out_enabled` column defaults to `false`; do not enable it as part of migration.
+3. The Settings UI does not expose automatic clock-out. Only an authorized database operator may update `auto_clock_out_enabled`, and the update must also set `updatedat = NOW()`. Do not put database URLs or credentials in the runbook or deployment logs.
 
 ## Replit publishing
 
@@ -56,16 +56,16 @@ Expected columns: `sid` varchar non-null, `sess` json non-null, `expire` timesta
 The worker checks only UTC minutes `00`-`09` and `50`-`59`. A pass holds one PostgreSQL advisory-lock connection, uses no more than four PostgreSQL connections total, and fetches the latest schedules for all candidates in one MSSQL batch. Missing or malformed schedules are safely counted and skipped.
 
 1. Deploy migration `0007_franchise_auto_clock_out.sql` and the application with all franchise flags left off. Confirm a structured `[auto-clock-out] pass summary` shows zero candidates or only already-enabled canaries; no database credentials are needed to read this Replit log event.
-2. Choose one test franchise. In `/admin/settings`, enable automatic clock-out only for that franchise and leave every other franchise off.
+2. Choose one test franchise. Through approved database access, set `auto_clock_out_enabled = TRUE` and `updatedat = NOW()` only for that verified franchise ID, returning the row to confirm the change. Leave every other franchise off.
 3. Clock in a controlled test tutor whose latest MSSQL schedule has two blocks with a gap, for example `3:00-5:00 PM` and `6:00-8:00 PM`. Keep the session open through the first worker pass after `5:00 PM` and confirm the tutor remains clocked in during the gap.
 4. After the first eligible worker pass following `8:00 PM`, focus or reopen the tutor dashboard. Confirm it shows clocked out and the session ends at exactly `8:00 PM`, not at the worker's later detection time.
 5. In the admin review UI, confirm the resulting status is `approved` when coverage matches or `pending` when it does not, and inspect the displayed latest audit action. Pair that UI record with the single structured run summary (`runId`, `candidates`, `due`, `succeeded`, `alreadyClosed`, `failed`, `skipped`, `durationMs`, and `lockAcquired`) to confirm automatic processing without direct database access.
 6. If the tutor has a valid active break, automatic completion ends it at the same exact final schedule timestamp. Manual clock-out behavior is unchanged and still requires ending an active break first. Automatic completion does not create or waive a weekly attestation; the existing attestation gate still applies to later interactive actions.
-7. Disable the test franchise flag in `/admin/settings` immediately after the canary. On the next eligible pass, confirm candidates from that franchise are absent or counted under `skipped.settingDisabled` if the flag changed after candidate selection.
+7. Through approved database access, set `auto_clock_out_enabled = FALSE` and `updatedat = NOW()` for the test franchise immediately after the canary, returning the row to confirm the change. On the next eligible pass, confirm candidates from that franchise are absent or counted under `skipped.settingDisabled` if the flag changed after candidate selection.
 
 ### Automatic clock-out rollback
 
-Disable `autoClockOutEnabled` for the canary franchise first; this is the immediate rollback and requires no database credential. Preserve migration `0007` because it is additive. If application rollback is also required, republish the last known-good snapshot, then inspect one subsequent structured pass summary for `failed: 0` and no new canary success. Do not drop the column or expose credentials while collecting rollback evidence.
+Set `auto_clock_out_enabled = FALSE` and `updatedat = NOW()` for the verified canary franchise first through approved database access; this is the immediate rollback. Preserve migration `0007` because it is additive. If application rollback is also required, republish the last known-good snapshot, then inspect one subsequent structured pass summary for `failed: 0` and no new canary success. Do not drop the column or expose credentials while collecting rollback evidence.
 
 ## Manual credential preflight
 

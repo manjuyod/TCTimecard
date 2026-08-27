@@ -7,12 +7,10 @@ import { getFranchisePayrollSettings, resolvePayPeriod } from '../payroll/payPer
 import {
   getScheduleSnapshotSigningSecret,
   parseScheduleSnapshotV1,
-  verifyScheduleSnapshot,
-  type ScheduleSnapshotInterval
+  verifyScheduleSnapshot
 } from '../services/scheduleSnapshot';
 import { getFranchiseSettings } from '../services/franchiseSettings';
 import { resolveClockInStartAt } from '../services/clockInTimeSnap';
-import { fetchLatestScheduleSnapshots, scheduleCandidateKey } from '../services/scheduleSource';
 import { enforcePriorWeekAttestation } from '../services/weeklyAttestationGate';
 import {
   ClockOutFinalizationError,
@@ -125,7 +123,7 @@ const buildClockStateResponse = (params: {
 
   return {
     timezone: params.timezone,
-    workDate: params.workDate,
+    workDate: params.day?.work_date ?? params.workDate,
     dayId: params.day?.id ?? null,
     dayStatus: params.day?.status ?? null,
     clockState: authoritativeClockState,
@@ -167,7 +165,26 @@ const fetchDayForUpdate = async (
       FROM public.time_entry_days
       WHERE franchiseid = $1
         AND tutorid = $2
-        AND work_date = $3
+        AND (
+          work_date = $3
+          OR EXISTS (
+            SELECT 1
+            FROM public.time_entry_sessions
+            WHERE entry_day_id = time_entry_days.id
+              AND end_at IS NULL
+          )
+        )
+      ORDER BY
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM public.time_entry_sessions
+            WHERE entry_day_id = time_entry_days.id
+              AND end_at IS NULL
+          ) THEN 0
+          ELSE 1
+        END,
+        work_date DESC
       LIMIT 1
       FOR UPDATE
     `,
@@ -204,7 +221,26 @@ const fetchDay = async (
       FROM public.time_entry_days
       WHERE franchiseid = $1
         AND tutorid = $2
-        AND work_date = $3
+        AND (
+          work_date = $3
+          OR EXISTS (
+            SELECT 1
+            FROM public.time_entry_sessions
+            WHERE entry_day_id = time_entry_days.id
+              AND end_at IS NULL
+          )
+        )
+      ORDER BY
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM public.time_entry_sessions
+            WHERE entry_day_id = time_entry_days.id
+              AND end_at IS NULL
+          ) THEN 0
+          ELSE 1
+        END,
+        work_date DESC
       LIMIT 1
     `,
     [franchiseId, tutorId, workDate]
@@ -297,17 +333,6 @@ router.get(
         return;
       }
 
-      const attestationGate = await enforcePriorWeekAttestation({
-        franchiseId: context.franchiseId,
-        tutorId: context.tutorId,
-        timezone,
-        workDate
-      });
-      if (!attestationGate.ok && 'error' in attestationGate) {
-        res.status(500).json({ error: attestationGate.error });
-        return;
-      }
-
       const day = await fetchDay(context.franchiseId, context.tutorId, workDate);
 
       let openSession: OpenSessionRow | null = null;
@@ -321,6 +346,17 @@ router.get(
         } finally {
           client.release();
         }
+      }
+
+      const attestationGate = await enforcePriorWeekAttestation({
+        franchiseId: context.franchiseId,
+        tutorId: context.tutorId,
+        timezone,
+        workDate: openSession && day ? day.work_date : workDate
+      });
+      if (!attestationGate.ok && 'error' in attestationGate) {
+        res.status(500).json({ error: attestationGate.error });
+        return;
       }
 
       res.status(200).json({
@@ -360,46 +396,10 @@ router.post(
         return;
       }
 
-      const attestationGate = await enforcePriorWeekAttestation({
-        franchiseId: context.franchiseId,
-        tutorId: context.tutorId,
-        timezone,
-        workDate
-      });
-      if (!attestationGate.ok && 'error' in attestationGate) {
-        res.status(500).json({ error: attestationGate.error });
-        return;
-      }
-      if (!attestationGate.ok) {
-        res.status(409).json({
-          error: 'Weekly attestation is required before entering time for the new workweek.',
-          missingWeekEnd: attestationGate.weekEnd
-        });
-        return;
-      }
-
       const settings = await getFranchiseSettings(context.franchiseId);
-      let scheduleIntervals: ScheduleSnapshotInterval[] = [];
-      if (settings.clockInTimeSnapEnabled) {
-        try {
-          const candidate = {
-            franchiseId: context.franchiseId,
-            tutorId: context.tutorId,
-            workDate,
-            timezone
-          };
-          const snapshots = await fetchLatestScheduleSnapshots([candidate], detectedAt);
-          scheduleIntervals = snapshots.get(scheduleCandidateKey(candidate))?.intervals ?? [];
-        } catch (error) {
-          console.error('[clock] Time Snap schedule lookup failed; using the actual clock-in minute.', error);
-        }
-      }
       const clockInTime = resolveClockInStartAt({
         detectedAt,
-        timezone,
-        workDate,
-        enabled: settings.clockInTimeSnapEnabled,
-        intervals: scheduleIntervals
+        enabled: settings.clockInTimeSnapEnabled
       });
 
       const pool = getPostgresPool();
@@ -408,17 +408,44 @@ router.post(
       try {
         await client.query('BEGIN');
 
-        await client.query(
-          `
-            INSERT INTO public.time_entry_days
-              (franchiseid, tutorid, work_date, timezone, status, clock_state, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, 'draft', 1, NOW(), NOW())
-            ON CONFLICT (franchiseid, tutorid, work_date) DO NOTHING
-          `,
-          [context.franchiseId, context.tutorId, workDate, timezone]
-        );
+        let existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+        let openSession = existing ? await fetchOpenSession(client, existing.id, true) : null;
 
-        const existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+        const attestationGate = await enforcePriorWeekAttestation({
+          franchiseId: context.franchiseId,
+          tutorId: context.tutorId,
+          timezone,
+          workDate: openSession && existing ? existing.work_date : workDate,
+          db: client
+        });
+        if (!attestationGate.ok && 'error' in attestationGate) {
+          await client.query('ROLLBACK');
+          res.status(500).json({ error: attestationGate.error });
+          return;
+        }
+        if (!attestationGate.ok && !openSession) {
+          await client.query('ROLLBACK');
+          res.status(409).json({
+            error: 'Weekly attestation is required before entering time for the new workweek.',
+            missingWeekEnd: attestationGate.weekEnd
+          });
+          return;
+        }
+
+        if (!openSession) {
+          await client.query(
+            `
+              INSERT INTO public.time_entry_days
+                (franchiseid, tutorid, work_date, timezone, status, clock_state, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, 'draft', 1, NOW(), NOW())
+              ON CONFLICT (franchiseid, tutorid, work_date) DO NOTHING
+            `,
+            [context.franchiseId, context.tutorId, workDate, timezone]
+          );
+
+          existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+        }
+
         if (!existing) {
           await client.query('ROLLBACK');
           res.status(500).json({ error: 'Unable to create or fetch entry day' });
@@ -480,7 +507,7 @@ router.post(
           day = updatedDay;
         }
 
-        const openSession = await fetchOpenSession(client, day.id, true);
+        openSession ??= await fetchOpenSession(client, day.id, true);
         if (openSession) {
           if (normalizeClockState(day.clock_state) !== 1) {
             const updated = await client.query<TimeEntryDayRow>(
@@ -583,7 +610,7 @@ router.post(
             detectedAt: clockInTime.detectedAt,
             startedAt: new Date(session.start_at).toISOString(),
             timeSnapApplied: clockInTime.timeSnapApplied,
-            matchedScheduledStartAt: clockInTime.matchedScheduledStartAt,
+            snapTargetAt: clockInTime.snapTargetAt,
             previousClockState,
             newClockState: 1
           }
@@ -632,30 +659,33 @@ router.post(
         return;
       }
 
-      const attestationGate = await enforcePriorWeekAttestation({
-        franchiseId: context.franchiseId,
-        tutorId: context.tutorId,
-        timezone,
-        workDate
-      });
-      if (!attestationGate.ok && 'error' in attestationGate) {
-        res.status(500).json({ error: attestationGate.error });
-        return;
-      }
-      if (!attestationGate.ok) {
-        res.status(409).json({
-          error: 'Weekly attestation is required before entering time for the new workweek.',
-          missingWeekEnd: attestationGate.weekEnd
-        });
-        return;
-      }
-
       const pool = getPostgresPool();
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
 
         const day = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+        const attestationGate = await enforcePriorWeekAttestation({
+          franchiseId: context.franchiseId,
+          tutorId: context.tutorId,
+          timezone,
+          workDate: day?.work_date ?? workDate,
+          db: client
+        });
+        if (!attestationGate.ok && 'error' in attestationGate) {
+          await client.query('ROLLBACK');
+          res.status(500).json({ error: attestationGate.error });
+          return;
+        }
+        if (!attestationGate.ok) {
+          await client.query('ROLLBACK');
+          res.status(409).json({
+            error: 'Weekly attestation is required before entering time for the new workweek.',
+            missingWeekEnd: attestationGate.weekEnd
+          });
+          return;
+        }
+
         if (!day) {
           await client.query('ROLLBACK');
           res.status(409).json({ error: 'You must be clocked in before starting a break.' });
@@ -738,7 +768,7 @@ router.post(
           actorAccountId: context.tutorId,
           previousStatus: day.status,
           newStatus: day.status,
-          metadata: { workDate, break: mapBreakRowToResponse(breakRow) }
+          metadata: { workDate: day.work_date, break: mapBreakRowToResponse(breakRow) }
         });
 
         await client.query('COMMIT');
@@ -778,23 +808,25 @@ router.post(
         return;
       }
 
-      const attestationGate = await enforcePriorWeekAttestation({
-        franchiseId: context.franchiseId,
-        tutorId: context.tutorId,
-        timezone,
-        workDate
-      });
-      if (!attestationGate.ok && 'error' in attestationGate) {
-        res.status(500).json({ error: attestationGate.error });
-        return;
-      }
-
       const pool = getPostgresPool();
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
 
         const day = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+        const attestationGate = await enforcePriorWeekAttestation({
+          franchiseId: context.franchiseId,
+          tutorId: context.tutorId,
+          timezone,
+          workDate: day?.work_date ?? workDate,
+          db: client
+        });
+        if (!attestationGate.ok && 'error' in attestationGate) {
+          await client.query('ROLLBACK');
+          res.status(500).json({ error: attestationGate.error });
+          return;
+        }
+
         if (!day) {
           await client.query('ROLLBACK');
           res.status(409).json({ error: 'No active break was found.' });
@@ -857,7 +889,7 @@ router.post(
           actorAccountId: context.tutorId,
           previousStatus: day.status,
           newStatus: day.status,
-          metadata: { workDate, break: mapBreakRowToResponse(breakRow) }
+          metadata: { workDate: day.work_date, break: mapBreakRowToResponse(breakRow) }
         });
 
         await client.query('COMMIT');
@@ -899,24 +931,6 @@ router.post(
         return;
       }
 
-      const attestationGate = await enforcePriorWeekAttestation({
-        franchiseId: context.franchiseId,
-        tutorId: context.tutorId,
-        timezone,
-        workDate
-      });
-      if (!attestationGate.ok && 'error' in attestationGate) {
-        res.status(500).json({ error: attestationGate.error });
-        return;
-      }
-      if (!attestationGate.ok) {
-        res.status(409).json({
-          error: 'Weekly attestation is required before entering time for the new workweek.',
-          missingWeekEnd: attestationGate.weekEnd
-        });
-        return;
-      }
-
       const pool = getPostgresPool();
       const client = await pool.connect();
 
@@ -924,6 +938,28 @@ router.post(
         await client.query('BEGIN');
 
         const existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+        const openSession = existing ? await fetchOpenSession(client, existing.id, true) : null;
+        const attestationGate = await enforcePriorWeekAttestation({
+          franchiseId: context.franchiseId,
+          tutorId: context.tutorId,
+          timezone,
+          workDate: openSession && existing ? existing.work_date : workDate,
+          db: client
+        });
+        if (!attestationGate.ok && 'error' in attestationGate) {
+          await client.query('ROLLBACK');
+          res.status(500).json({ error: attestationGate.error });
+          return;
+        }
+        if (!attestationGate.ok) {
+          await client.query('ROLLBACK');
+          res.status(409).json({
+            error: 'Weekly attestation is required before entering time for the new workweek.',
+            missingWeekEnd: attestationGate.weekEnd
+          });
+          return;
+        }
+
         if (!existing) {
           await client.query('ROLLBACK');
           res.status(200).json({
@@ -940,8 +976,8 @@ router.post(
 
         const previousClockState = normalizeClockState(existing.clock_state);
         let day: TimeEntryDayRow = { ...existing, timezone };
+        const entryWorkDate = day.work_date;
 
-        const openSession = await fetchOpenSession(client, day.id, true);
         const activeBreak = await fetchActiveBreak(client, day.id, true);
         if (activeBreak) {
           await client.query('ROLLBACK');
@@ -985,7 +1021,7 @@ router.post(
           storedSnapshot &&
           storedSnapshot.franchiseId === context.franchiseId &&
           storedSnapshot.tutorId === context.tutorId &&
-          storedSnapshot.workDate === workDate
+          storedSnapshot.workDate === entryWorkDate
             ? storedSnapshot
             : null;
 
@@ -1007,9 +1043,9 @@ router.post(
             return;
           }
 
-          if (parsed.workDate !== workDate) {
+          if (parsed.workDate !== entryWorkDate) {
             await client.query('ROLLBACK');
-            res.status(400).json({ error: 'scheduleSnapshot.workDate must match today in franchise timezone' });
+            res.status(400).json({ error: 'scheduleSnapshot.workDate must match the open time entry work date' });
             return;
           }
 

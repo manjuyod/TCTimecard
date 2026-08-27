@@ -1,6 +1,9 @@
 import { DateTime } from 'luxon';
+import type { Pool, PoolClient } from 'pg';
 import { getPostgresPool } from '../db/postgres';
 import { computeLastClosedWorkweek, computeSundayWeekStart } from './workweek';
+
+type Queryable = Pick<Pool | PoolClient, 'query'>;
 
 export type WeeklyAttestationGateResult =
   | { ok: true }
@@ -12,6 +15,7 @@ export const enforcePriorWeekAttestation = async (params: {
   tutorId: number;
   timezone: string;
   workDate: string;
+  db?: Queryable;
 }): Promise<WeeklyAttestationGateResult> => {
   const workLocal = DateTime.fromISO(params.workDate, { zone: params.timezone, setZone: true }).startOf('day');
   if (!workLocal.isValid) {
@@ -41,9 +45,9 @@ export const enforcePriorWeekAttestation = async (params: {
     return { ok: false, error: message };
   }
 
-  const pool = getPostgresPool();
+  const db = params.db ?? getPostgresPool();
   try {
-    const result = await pool.query(
+    const result = await db.query(
       `
         SELECT 1
         FROM public.weekly_attestations

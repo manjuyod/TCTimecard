@@ -63,7 +63,7 @@ const payrollSettingsRow = (clockInTimeSnapEnabled: boolean) => ({
 
 const createClockInHarness = (options: {
   clockInTimeSnapEnabled: boolean;
-  scheduleFailure?: boolean;
+  missingAttestationWeekEnd?: string;
 }) => {
   const workDate = '2026-08-01';
   let day: TimeEntryDayRow = {
@@ -84,21 +84,41 @@ const createClockInHarness = (options: {
     updated_at: '2026-08-01T15:00:00.000Z'
   };
   let insertedStartAt: string | null = null;
+  let openSession: { id: number; start_at: string } | null = null;
   let auditMetadata: Record<string, unknown> | null = null;
   let scheduleQueries = 0;
+  let dayInserts = 0;
+  let clientAttestationQueries = 0;
+  let poolAttestationQueries = 0;
 
   const client = {
     async query(sqlText: string, params: unknown[] = []) {
       if (sqlText === 'BEGIN' || sqlText === 'COMMIT' || sqlText === 'ROLLBACK') {
         return { rowCount: 0, rows: [] };
       }
+      if (sqlText.includes('FROM public.weekly_attestations')) {
+        clientAttestationQueries += 1;
+        return params[2] === options.missingAttestationWeekEnd
+          ? { rowCount: 0, rows: [] }
+          : { rowCount: 1, rows: [{ exists: 1 }] };
+      }
       if (sqlText.includes('INSERT INTO public.time_entry_days')) {
+        dayInserts += 1;
         return { rowCount: 0, rows: [] };
       }
       if (sqlText.includes('FROM public.time_entry_days') && sqlText.includes('FOR UPDATE')) {
-        return { rowCount: 1, rows: [{ ...day }] };
+        const matchesCurrentDate = params[2] === day.work_date;
+        const selectsOpenDay = sqlText.includes('end_at IS NULL') && openSession !== null;
+        return matchesCurrentDate || selectsOpenDay
+          ? { rowCount: 1, rows: [{ ...day }] }
+          : { rowCount: 0, rows: [] };
       }
       if (sqlText.includes('FROM public.time_entry_sessions') && sqlText.includes('end_at IS NULL')) {
+        return openSession
+          ? { rowCount: 1, rows: [{ ...openSession }] }
+          : { rowCount: 0, rows: [] };
+      }
+      if (sqlText.includes('FROM public.time_entry_breaks') && sqlText.includes('ANY($1::int[])')) {
         return { rowCount: 0, rows: [] };
       }
       if (sqlText.includes('MAX(sort_order)')) {
@@ -107,7 +127,8 @@ const createClockInHarness = (options: {
       if (sqlText.includes('INSERT INTO public.time_entry_sessions')) {
         insertedStartAt = params.find((value) => typeof value === 'string' && value.includes('T')) as string
           ?? '2026-08-01T15:52:00.000Z';
-        return { rowCount: 1, rows: [{ id: 99, start_at: insertedStartAt }] };
+        openSession = { id: 99, start_at: insertedStartAt };
+        return { rowCount: 1, rows: [{ ...openSession }] };
       }
       if (sqlText.includes('UPDATE public.time_entry_days') && sqlText.includes('SET clock_state = 1')) {
         day = { ...day, clock_state: 1 };
@@ -125,7 +146,7 @@ const createClockInHarness = (options: {
   };
 
   setPostgresPoolOverride({
-    async query(sqlText: string) {
+    async query(sqlText: string, params: unknown[] = []) {
       if (sqlText.includes('franchise_payroll_settings')) {
         return { rowCount: 1, rows: [payrollSettingsRow(options.clockInTimeSnapEnabled)] };
       }
@@ -133,7 +154,17 @@ const createClockInHarness = (options: {
         return { rowCount: 0, rows: [] };
       }
       if (sqlText.includes('FROM public.weekly_attestations')) {
-        return { rowCount: 1, rows: [{ exists: 1 }] };
+        poolAttestationQueries += 1;
+        return params[2] === options.missingAttestationWeekEnd
+          ? { rowCount: 0, rows: [] }
+          : { rowCount: 1, rows: [{ exists: 1 }] };
+      }
+      if (sqlText.includes('FROM public.time_entry_days')) {
+        const matchesCurrentDate = params[2] === day.work_date;
+        const selectsOpenDay = sqlText.includes('end_at IS NULL') && openSession !== null;
+        return matchesCurrentDate || selectsOpenDay
+          ? { rowCount: 1, rows: [{ ...day }] }
+          : { rowCount: 0, rows: [] };
       }
       throw new Error(`Unexpected pool query: ${sqlText}`);
     },
@@ -150,7 +181,6 @@ const createClockInHarness = (options: {
         },
         async query() {
           scheduleQueries += 1;
-          if (options.scheduleFailure) throw new Error('schedule database unavailable');
           return {
             recordset: [{
               FranchiseID: 7,
@@ -169,12 +199,15 @@ const createClockInHarness = (options: {
     app: createApp(),
     insertedStartAt: () => insertedStartAt,
     auditMetadata: () => auditMetadata,
-    scheduleQueries: () => scheduleQueries
+    scheduleQueries: () => scheduleQueries,
+    dayInserts: () => dayInserts,
+    clientAttestationQueries: () => clientAttestationQueries,
+    poolAttestationQueries: () => poolAttestationQueries
   };
 };
 
-test('enabled Time Snap hard-records the scheduled hour and audit details', async (t) => {
-  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-01T15:52:45.000Z') });
+test('enabled Time Snap records the nearest quarter-hour with auditable detected time', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-01T15:53:45.000Z') });
   const harness = createClockInHarness({ clockInTimeSnapEnabled: true });
 
   await withServer(harness.app, async (baseUrl) => {
@@ -185,32 +218,69 @@ test('enabled Time Snap hard-records the scheduled hour and audit details', asyn
   });
 
   assert.equal(harness.insertedStartAt(), '2026-08-01T16:00:00.000Z');
-  assert.equal(harness.scheduleQueries(), 1);
-  assert.equal(harness.auditMetadata()?.detectedAt, '2026-08-01T15:52:00.000Z');
+  assert.equal(harness.scheduleQueries(), 0);
+  assert.equal(harness.auditMetadata()?.detectedAt, '2026-08-01T15:53:00.000Z');
   assert.equal(harness.auditMetadata()?.startedAt, '2026-08-01T16:00:00.000Z');
   assert.equal(harness.auditMetadata()?.timeSnapApplied, true);
-  assert.equal(harness.auditMetadata()?.matchedScheduledStartAt, '2026-08-01T16:00:00.000Z');
+  assert.equal(harness.auditMetadata()?.snapTargetAt, '2026-08-01T16:00:00.000Z');
+  assert.equal(harness.clientAttestationQueries(), 1);
+  assert.equal(harness.poolAttestationQueries(), 0);
 });
 
-test('schedule failure records the actual minute without failing clock-in', async (t) => {
-  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-01T15:52:45.000Z') });
-  const harness = createClockInHarness({ clockInTimeSnapEnabled: true, scheduleFailure: true });
-  const originalError = console.error;
-  console.error = () => undefined;
-  try {
-    await withServer(harness.app, async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/clock/me/in`, { method: 'POST' });
-      const body = await response.json() as { state?: { startedAt?: string } };
-      assert.equal(response.status, 201, JSON.stringify(body));
-      assert.equal(body.state?.startedAt, '2026-08-01T15:52:00.000Z');
-    });
-  } finally {
-    console.error = originalError;
-  }
+test('enabled Time Snap uses quarter-hours without requiring a matching schedule start', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-01T16:08:45.000Z') });
+  const harness = createClockInHarness({ clockInTimeSnapEnabled: true });
 
-  assert.equal(harness.scheduleQueries(), 1);
-  assert.equal(harness.auditMetadata()?.timeSnapApplied, false);
-  assert.equal(harness.auditMetadata()?.matchedScheduledStartAt, null);
+  await withServer(harness.app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/clock/me/in`, { method: 'POST' });
+    const body = await response.json() as { state?: { startedAt?: string } };
+    assert.equal(response.status, 201, JSON.stringify(body));
+    assert.equal(body.state?.startedAt, '2026-08-01T16:15:00.000Z');
+  });
+
+  assert.equal(harness.insertedStartAt(), '2026-08-01T16:15:00.000Z');
+  assert.equal(harness.scheduleQueries(), 0);
+  assert.equal(harness.auditMetadata()?.snapTargetAt, '2026-08-01T16:15:00.000Z');
+});
+
+test('a clock-in snapped across local midnight remains the active entry day after midnight', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-02T06:53:45.000Z') });
+  const harness = createClockInHarness({
+    clockInTimeSnapEnabled: true,
+    missingAttestationWeekEnd: '2026-08-01'
+  });
+
+  await withServer(harness.app, async (baseUrl) => {
+    const clockIn = await fetch(`${baseUrl}/api/clock/me/in`, { method: 'POST' });
+    assert.equal(clockIn.status, 201, JSON.stringify(await clockIn.json()));
+    assert.equal(harness.insertedStartAt(), '2026-08-02T07:00:00.000Z');
+
+    t.mock.timers.setTime(new Date('2026-08-02T07:01:00.000Z').getTime());
+    const stateResponse = await fetch(`${baseUrl}/api/clock/me/state`);
+    const body = await stateResponse.json() as {
+      state?: {
+        workDate?: string;
+        clockState?: number;
+        openSessionId?: number;
+        startedAt?: string;
+        attestationBlocking?: boolean;
+      };
+    };
+
+    assert.equal(stateResponse.status, 200, JSON.stringify(body));
+    assert.equal(body.state?.workDate, '2026-08-01');
+    assert.equal(body.state?.clockState, 1);
+    assert.equal(body.state?.openSessionId, 99);
+    assert.equal(body.state?.startedAt, '2026-08-02T07:00:00.000Z');
+    assert.equal(body.state?.attestationBlocking, false);
+
+    const duplicateClockIn = await fetch(`${baseUrl}/api/clock/me/in`, { method: 'POST' });
+    const duplicateBody = await duplicateClockIn.json() as { state?: { workDate?: string; openSessionId?: number } };
+    assert.equal(duplicateClockIn.status, 200, JSON.stringify(duplicateBody));
+    assert.equal(duplicateBody.state?.workDate, '2026-08-01');
+    assert.equal(duplicateBody.state?.openSessionId, 99);
+    assert.equal(harness.dayInserts(), 1);
+  });
 });
 
 test('disabled Time Snap records the actual minute without querying schedules', async (t) => {
@@ -226,6 +296,46 @@ test('disabled Time Snap records the actual minute without querying schedules', 
 
   assert.equal(harness.scheduleQueries(), 0);
   assert.equal(harness.auditMetadata()?.timeSnapApplied, false);
+});
+
+test('a new-workweek break start without an open entry remains attestation-blocked', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-02T07:01:00.000Z') });
+  const harness = createClockInHarness({
+    clockInTimeSnapEnabled: true,
+    missingAttestationWeekEnd: '2026-08-01'
+  });
+
+  await withServer(harness.app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/clock/me/break/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ breakType: 'lunch' })
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: 'Weekly attestation is required before entering time for the new workweek.',
+      missingWeekEnd: '2026-08-01'
+    });
+  });
+});
+
+test('a new-workweek clock-in without an open entry remains attestation-blocked', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-02T07:01:00.000Z') });
+  const harness = createClockInHarness({
+    clockInTimeSnapEnabled: true,
+    missingAttestationWeekEnd: '2026-08-01'
+  });
+
+  await withServer(harness.app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/clock/me/in`, { method: 'POST' });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: 'Weekly attestation is required before entering time for the new workweek.',
+      missingWeekEnd: '2026-08-01'
+    });
+  });
+
+  assert.equal(harness.dayInserts(), 0);
 });
 
 test('break start before a future snapped session is rejected without mutation', async (t) => {
@@ -252,6 +362,9 @@ test('break start before a future snapped session is rejected without mutation',
       if (sqlText === 'BEGIN' || sqlText === 'COMMIT' || sqlText === 'ROLLBACK') {
         transactions.push(sqlText);
         return { rowCount: 0, rows: [] };
+      }
+      if (sqlText.includes('FROM public.weekly_attestations')) {
+        return { rowCount: 1, rows: [{ exists: 1 }] };
       }
       if (sqlText.includes('FROM public.time_entry_days') && sqlText.includes('FOR UPDATE')) {
         return { rowCount: 1, rows: [dayRow] };
