@@ -1,5 +1,7 @@
-import { Pool } from 'pg';
+import { Pool, types } from 'pg';
 import { getPostgresConfig } from '../config/env';
+
+types.setTypeParser(types.builtins.DATE, (value) => value);
 
 let pool: Pool | undefined;
 let poolOverride: Pool | undefined;
