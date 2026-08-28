@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test, { afterEach } from 'node:test';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
+import { types } from 'pg';
 import { setMssqlPoolOverride } from '../db/mssql';
 import { setPostgresPoolOverride } from '../db/postgres';
 import clockRoutes from '../routes/clock';
@@ -64,13 +65,17 @@ const payrollSettingsRow = (clockInTimeSnapEnabled: boolean) => ({
 const createClockInHarness = (options: {
   clockInTimeSnapEnabled: boolean;
   missingAttestationWeekEnd?: string;
+  usePostgresDateParser?: boolean;
 }) => {
   const workDate = '2026-08-01';
+  const databaseWorkDate = options.usePostgresDateParser
+    ? types.getTypeParser(types.builtins.DATE)(workDate)
+    : workDate;
   let day: TimeEntryDayRow = {
     id: 55,
     franchiseid: 7,
     tutorid: 42,
-    work_date: workDate,
+    work_date: databaseWorkDate,
     timezone: 'America/Los_Angeles',
     status: 'draft',
     clock_state: 0,
@@ -107,7 +112,7 @@ const createClockInHarness = (options: {
         return { rowCount: 0, rows: [] };
       }
       if (sqlText.includes('FROM public.time_entry_days') && sqlText.includes('FOR UPDATE')) {
-        const matchesCurrentDate = params[2] === day.work_date;
+        const matchesCurrentDate = params[2] === workDate;
         const selectsOpenDay = sqlText.includes('end_at IS NULL') && openSession !== null;
         return matchesCurrentDate || selectsOpenDay
           ? { rowCount: 1, rows: [{ ...day }] }
@@ -160,7 +165,7 @@ const createClockInHarness = (options: {
           : { rowCount: 1, rows: [{ exists: 1 }] };
       }
       if (sqlText.includes('FROM public.time_entry_days')) {
-        const matchesCurrentDate = params[2] === day.work_date;
+        const matchesCurrentDate = params[2] === workDate;
         const selectsOpenDay = sqlText.includes('end_at IS NULL') && openSession !== null;
         return matchesCurrentDate || selectsOpenDay
           ? { rowCount: 1, rows: [{ ...day }] }
@@ -280,6 +285,32 @@ test('a clock-in snapped across local midnight remains the active entry day afte
     assert.equal(duplicateBody.state?.workDate, '2026-08-01');
     assert.equal(duplicateBody.state?.openSessionId, 99);
     assert.equal(harness.dayInserts(), 1);
+  });
+});
+
+test('clock state accepts PostgreSQL DATE parser output for an active entry day', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-02T06:53:45.000Z') });
+  const harness = createClockInHarness({
+    clockInTimeSnapEnabled: true,
+    missingAttestationWeekEnd: '2026-08-01',
+    usePostgresDateParser: true
+  });
+
+  await withServer(harness.app, async (baseUrl) => {
+    const clockInResponse = await fetch(`${baseUrl}/api/clock/me/in`, { method: 'POST' });
+    assert.equal(clockInResponse.status, 201, JSON.stringify(await clockInResponse.json()));
+
+    t.mock.timers.setTime(new Date('2026-08-02T07:01:00.000Z').getTime());
+    const stateResponse = await fetch(`${baseUrl}/api/clock/me/state`);
+    const body = await stateResponse.json() as {
+      error?: string;
+      state?: { workDate?: string; clockState?: number; openSessionId?: number };
+    };
+
+    assert.equal(stateResponse.status, 200, body.error);
+    assert.equal(body.state?.workDate, '2026-08-01');
+    assert.equal(body.state?.clockState, 1);
+    assert.equal(body.state?.openSessionId, 99);
   });
 });
 
