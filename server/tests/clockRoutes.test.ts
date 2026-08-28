@@ -58,11 +58,14 @@ type ClockOutHarnessOptions = {
   invalidClosedSession?: boolean;
   loseCloseRace?: boolean;
   futureSession?: boolean;
+  timezone?: string;
+  workDate?: string;
+  missingAttestationWeekEnd?: string;
 };
 
 const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
-  const timezone = 'UTC';
-  const workDate = DateTime.now().setZone(timezone).toISODate();
+  const timezone = options.timezone ?? 'UTC';
+  const workDate = options.workDate ?? DateTime.now().setZone(timezone).toISODate();
   assert.ok(workDate);
   const targetEndAt = `${workDate}T14:00:00.000Z`;
   const sessionStart = options.futureSession
@@ -124,6 +127,11 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
         transactions.push(sqlText);
         return { rowCount: 0, rows: [] };
       }
+      if (sqlText.includes('FROM public.weekly_attestations')) {
+        return params[2] === options.missingAttestationWeekEnd
+          ? { rowCount: 0, rows: [] }
+          : { rowCount: 1, rows: [{ exists: 1 }] };
+      }
       if (/^(UPDATE|INSERT)/.test(sqlText.trim())) mutations.push(sqlText);
       if (sqlText.includes('FROM public.time_entry_days') && sqlText.includes('FOR UPDATE')) {
         return { rowCount: 1, rows: [{ ...day }] };
@@ -184,7 +192,7 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
   };
 
   setPostgresPoolOverride({
-    async query(sqlText: string) {
+    async query(sqlText: string, params: unknown[] = []) {
       queries.push(sqlText);
       if (sqlText.includes('FROM franchise_payroll_settings')) {
         return {
@@ -203,7 +211,11 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
         };
       }
       if (sqlText.includes('FROM franchise_pay_period_overrides')) return { rowCount: 0, rows: [] };
-      if (sqlText.includes('FROM public.weekly_attestations')) return { rowCount: 1, rows: [{ exists: 1 }] };
+      if (sqlText.includes('FROM public.weekly_attestations')) {
+        return params[2] === options.missingAttestationWeekEnd
+          ? { rowCount: 0, rows: [] }
+          : { rowCount: 1, rows: [{ exists: 1 }] };
+      }
       throw new Error(`Unexpected pool query: ${sqlText}`);
     },
     async connect() {
@@ -307,6 +319,9 @@ test('clock out leaves a six-hour day fully paid when the tutor records no lunch
 
       if (sqlText === 'BEGIN' || sqlText === 'COMMIT' || sqlText === 'ROLLBACK') {
         return { rowCount: 0, rows: [] };
+      }
+      if (sqlText.includes('FROM public.weekly_attestations')) {
+        return { rowCount: 1, rows: [{ exists: 1 }] };
       }
       if (sqlText.includes('FROM public.time_entry_days') && sqlText.includes('FOR UPDATE')) {
         return { rowCount: 1, rows: [{ ...baseDay }] };
@@ -501,6 +516,25 @@ test('no open session repairs stale clock state without requiring a snapshot', a
       missingWeekEnd: null
     });
   });
+  assert.equal(harness.transactions[harness.transactions.length - 1], 'COMMIT');
+});
+
+test('clock out after local midnight uses the open entry day and its stored schedule snapshot', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-02T07:01:00.000Z') });
+  const harness = createClockOutHarness({
+    timezone: 'America/Los_Angeles',
+    workDate: '2026-08-01',
+    missingAttestationWeekEnd: '2026-08-01'
+  });
+
+  await withServer(harness.app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/clock/me/out`, { method: 'POST' });
+    const body = await response.json() as { error?: string; state?: { workDate?: string; clockState?: number } };
+    assert.equal(response.status, 200, body.error);
+    assert.equal(body.state?.workDate, '2026-08-01');
+    assert.equal(body.state?.clockState, 0);
+  });
+
   assert.equal(harness.transactions[harness.transactions.length - 1], 'COMMIT');
 });
 

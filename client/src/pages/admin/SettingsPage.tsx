@@ -41,7 +41,6 @@ export function SettingsPage(): JSX.Element {
   const [generalAppliedFranchiseId, setGeneralAppliedFranchiseId] = useState<number | null>(null);
   const [payrollAppliedFranchiseId, setPayrollAppliedFranchiseId] = useState<number | null>(null);
   const loadVersionRef = useRef(0);
-  const [autoClockOutEnabled, setAutoClockOutEnabled] = useState(false);
   const [clockInTimeSnapEnabled, setClockInTimeSnapEnabled] = useState(false);
   const [timeOffNoticeRequired, setTimeOffNoticeRequired] = useState(true);
   const [ptoEnabled, setPtoEnabled] = useState(false);
@@ -92,7 +91,6 @@ export function SettingsPage(): JSX.Element {
     const generalLoad = fetchFranchiseSettings(franchiseId)
       .then((general) => {
         if (loadVersionRef.current !== loadVersion) return;
-        setAutoClockOutEnabled(general.autoClockOutEnabled);
         setClockInTimeSnapEnabled(general.clockInTimeSnapEnabled);
         setTimeOffNoticeRequired(general.timeOffNoticeRequired);
         setPtoEnabled(general.ptoEnabled);
@@ -159,7 +157,7 @@ export function SettingsPage(): JSX.Element {
     }
   };
 
-  const saveAutomaticTimekeeping = async () => {
+  const saveTimeSnapSettings = async () => {
     const franchiseId = generalAppliedFranchiseId;
     if (franchiseId === null || selectedFranchiseId !== franchiseId) {
       setAutoError('Apply a valid Franchise ID before saving.');
@@ -171,14 +169,12 @@ export function SettingsPage(): JSX.Element {
     try {
       const settings = await updateFranchiseSettings({
         franchiseId,
-        autoClockOutEnabled,
         clockInTimeSnapEnabled
       });
-      setAutoClockOutEnabled(settings.autoClockOutEnabled);
       setClockInTimeSnapEnabled(settings.clockInTimeSnapEnabled);
-      toast.success('Automatic timekeeping updated');
+      toast.success('Time Snap updated');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to update automatic timekeeping';
+      const message = err instanceof Error ? err.message : 'Unable to update Time Snap';
       setAutoError(message);
       toast.error(message);
     } finally {
@@ -268,27 +264,20 @@ export function SettingsPage(): JSX.Element {
 
       <Card>
         <CardHeader>
-          <CardTitle>Automatic timekeeping</CardTitle>
-          <CardDescription>Configure schedule-based clock behavior for every tutor in this franchise.</CardDescription>
+          <CardTitle>Time Snap</CardTitle>
+          <CardDescription>Configure neutral quarter-hour clock-in rounding for every tutor in this franchise.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <label className="flex items-center justify-between gap-4 rounded-lg border p-4">
             <span>
-              <span className="block text-sm font-semibold">Auto clock-out</span>
-              <span className="block text-sm text-muted-foreground">Applies to every tutor in this franchise.</span>
-            </span>
-            <input type="checkbox" role="switch" aria-label="Auto clock-out" checked={autoClockOutEnabled} onChange={(event) => setAutoClockOutEnabled(event.target.checked)} disabled={autoLoading || autoSaving} />
-          </label>
-          <label className="flex items-center justify-between gap-4 rounded-lg border p-4">
-            <span>
               <span className="block text-sm font-semibold">Time Snap</span>
-              <span className="block text-sm text-muted-foreground">For shifts scheduled on the hour, clock-ins from 8 minutes early through 2 minutes late are recorded at the scheduled start.</span>
+              <span className="block text-sm text-muted-foreground">Clock-ins round to the nearest quarter-hour: minutes 0–7 round down and minutes 8–14 round up.</span>
             </span>
             <input type="checkbox" role="switch" aria-label="Time Snap" checked={clockInTimeSnapEnabled} onChange={(event) => setClockInTimeSnapEnabled(event.target.checked)} disabled={autoLoading || autoSaving} />
           </label>
           <InlineError message={autoError} />
           <div className="flex justify-end">
-            <Button onClick={() => void saveAutomaticTimekeeping()} disabled={autoLoading || autoSaving || !generalSettingsScopeApplied}>{autoSaving ? 'Saving...' : 'Save automatic timekeeping'}</Button>
+            <Button onClick={() => void saveTimeSnapSettings()} disabled={autoLoading || autoSaving || !generalSettingsScopeApplied}>{autoSaving ? 'Saving...' : 'Save Time Snap'}</Button>
           </div>
         </CardContent>
       </Card>

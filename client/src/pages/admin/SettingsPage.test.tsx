@@ -78,17 +78,16 @@ describe('admin settings page', () => {
 
     await waitFor(() => {
       expect(calls.filter((call) => call.init?.method === undefined)).toHaveLength(2);
-      expect(screen.getByRole('switch', { name: /auto clock-out/i })).toBeChecked();
+      expect(screen.queryByRole('switch', { name: /auto clock-out/i })).not.toBeInTheDocument();
       expect(screen.getByRole('switch', { name: /time snap/i })).toBeChecked();
       expect(screen.getByRole('switch', { name: /require 14 days/i })).toBeChecked();
       expect(screen.getByRole('combobox')).toHaveTextContent('Weekly');
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /save automatic timekeeping/i }));
+    fireEvent.click(screen.getByRole('button', { name: /save time snap/i }));
     await waitFor(() => expect(calls.some((call) => call.init?.method === 'PATCH')).toBe(true));
     expect(JSON.parse(String(calls.find((call) => call.init?.method === 'PATCH')?.init?.body))).toEqual({
       franchiseId: 1,
-      autoClockOutEnabled: true,
       clockInTimeSnapEnabled: true
     });
   });
@@ -114,34 +113,31 @@ describe('admin settings page', () => {
     });
   });
 
-  it('loads and saves both franchise-wide automatic timekeeping switches', async () => {
+  it('hides Auto clock-out and saves Time Snap independently', async () => {
     const calls = installSettingsFetch();
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
 
-    const switchControl = await screen.findByRole('switch', { name: /auto clock-out/i });
-    const timeSnapControl = screen.getByRole('switch', { name: /time snap/i });
-    expect(switchControl).not.toBeChecked();
+    const timeSnapControl = await screen.findByRole('switch', { name: /time snap/i });
+    expect(screen.queryByRole('switch', { name: /auto clock-out/i })).not.toBeInTheDocument();
     expect(timeSnapControl).not.toBeChecked();
-    fireEvent.click(switchControl);
     fireEvent.click(timeSnapControl);
-    fireEvent.click(screen.getByRole('button', { name: /save automatic timekeeping/i }));
+    fireEvent.click(screen.getByRole('button', { name: /save time snap/i }));
 
     await waitFor(() => expect(calls.some((call) => call.init?.method === 'PATCH')).toBe(true));
     const patch = calls.find((call) => call.init?.method === 'PATCH');
     expect(JSON.parse(String(patch?.init?.body))).toEqual({
       franchiseId: 1,
-      autoClockOutEnabled: true,
       clockInTimeSnapEnabled: true
     });
-    expect(screen.getByText(/8 minutes early through 2 minutes late/i)).toBeInTheDocument();
+    expect(screen.getByText(/nearest quarter-hour/i)).toBeInTheDocument();
     expect(screen.getByText(/choose how recurring pay periods/i)).toBeInTheDocument();
   });
 
-  it('does not save automatic timekeeping under an unapplied franchise ID', async () => {
+  it('does not save Time Snap under an unapplied franchise ID', async () => {
     const calls = installSettingsFetch({ autoClockOutEnabled: true });
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
 
-    const save = screen.getByRole('button', { name: /save automatic timekeeping/i });
+    const save = screen.getByRole('button', { name: /save time snap/i });
     await waitFor(() => expect(save).toBeEnabled());
     fireEvent.change(screen.getByLabelText(/franchise id/i), { target: { value: '88' } });
 

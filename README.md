@@ -200,7 +200,7 @@ The preflight also verifies the shared PTO, persistent discovery/decision, adjus
 
 ### Franchise automatic clock-out
 
-- The feature is off by default. An admin enables it for one franchise at a time under `/admin/settings`; the UI uses `GET/PATCH /api/admin/settings`.
+- The feature is off by default and is not exposed in the Settings UI. An authorized database operator enables or disables one franchise at a time through `public.franchise_payroll_settings.auto_clock_out_enabled`.
 - The Reserved VM worker runs only during UTC minutes `00`-`09` and `50`-`59`. Each pass reads eligible PostgreSQL rows under one advisory lock, fetches the latest MSSQL schedules in one batch, and uses no more than four PostgreSQL connections total (including the lock connection).
 - Split schedules close only after the final valid interval. The open session and any valid active break are backdated to that exact final `endAt`, not the later worker detection time. A missing or malformed schedule is counted and skipped without changing tutor time.
 - Automatic completion may finish an already-open session without presenting the interactive weekly-attestation gate; it does not sign an attestation, relax the attestation policy, or unblock later tutor actions. Manual clock-out still requires the tutor to end an active break first; the automatic worker closes a valid active break at the same exact scheduled target.
@@ -208,9 +208,8 @@ The preflight also verifies the shared PTO, persistent discovery/decision, adjus
 ### Franchise Time Snap
 
 - Time Snap is off by default and is enabled per franchise under `/admin/settings`.
-- For schedule intervals that start exactly on the hour, a clock-in from 8 minutes before through 2 minutes after the scheduled start is stored at that scheduled hour. The boundaries are inclusive.
-- Each new clock-in session is evaluated independently. Non-hour starts, missing or malformed schedules, and MSSQL schedule lookup failures use the actual server minute instead; the existing clock-out comparison then routes any mismatch through normal director approval.
-- The snapped hour is the official `time_entry_sessions.start_at`. Audit metadata retains the server-detected minute and whether Time Snap was applied. Breaks cannot start before a future snapped start, and clock-out must be at least one minute after it.
+- Each clock-in is rounded to the nearest quarter-hour using the neutral minute rule: offsets `0` through `7` round down and offsets `8` through `14` round up. The rule applies at `:00`, `:15`, `:30`, and `:45` without consulting the MSSQL schedule.
+- The snapped quarter-hour is the official `time_entry_sessions.start_at`. Audit metadata retains the server-detected minute, whether Time Snap changed it, and the snap target. Breaks cannot start before a future snapped start, and clock-out must be at least one minute after it.
 
 Clock state model (Postgres):
 - `public.time_entry_days.clock_state`: `0 = clocked out`, `1 = clocked in` (default `0`).
@@ -241,7 +240,7 @@ MSSQL tables/fields referenced by the API:
 
 ## How to test (manual QA)
 Clock in/out:
-1. Tutor dashboard → Clock → `Clock In` (creates an open session with server time truncated to the minute; when Time Snap is enabled, an eligible top-of-hour start is stored at the scheduled hour).
+1. Tutor dashboard → Clock → `Clock In` (creates an open session with server time truncated to the minute; when Time Snap is enabled, the start is rounded to the nearest quarter-hour).
 2. `Clock Out` (closes the open session with server time truncated to the minute).
 3. If the day still has scheduled blocks remaining, choose:
    - **Break** (do not finalize), or
