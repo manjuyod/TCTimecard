@@ -147,7 +147,7 @@ export function TutorCalendarPage(): JSX.Element {
     setEntryDate(workDate);
     const existing = findDay(workDate);
     const entryZone = browserTimeZone;
-    if (existing?.sessions?.length) {
+    if (existing?.status !== 'voided' && existing?.sessions?.length) {
       setEntryDraftSessions(
         existing.sessions
           .slice()
@@ -228,6 +228,11 @@ export function TutorCalendarPage(): JSX.Element {
     if (!entryDate) return;
     const workDate = entryDate;
     const current = findDay(workDate);
+    if (current?.status === 'voided') {
+      if (!current.voidedAuditId) { toast.error('Reload this voided day before replacing its time.'); return; }
+      const confirmed = window.confirm('Replace this voided day with the new time you enter? The old sessions and breaks will stay excluded and be preserved in history. The replacement starts pending and uses the normal approval checks when submitted.');
+      if (!confirmed) return;
+    }
     if (current?.status === 'approved') {
       const confirmed = window.confirm('This day is approved. Editing will reset it to pending and require re-approval. Continue?');
       if (!confirmed) return;
@@ -241,12 +246,13 @@ export function TutorCalendarPage(): JSX.Element {
 
     setEntrySaving(true);
     try {
-      const saved = await saveTimeEntryDay({ workDate, sessions: payload.sessions });
+      const saved = await saveTimeEntryDay({ workDate, sessions: payload.sessions,
+        ...(current?.status === 'voided' ? { reopenVoidedAuditId: current.voidedAuditId! } : {}) });
       updateDay(saved);
       setSubmitReviewAck(false);
       setSubmitReviewOpen(true);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof ApiError && err.status === 409 && /attestation/i.test(err.message)) {
         requestOpenWeeklyAttestation();
       }
       const message = err instanceof Error ? err.message : 'Unable to save day';
@@ -281,7 +287,7 @@ export function TutorCalendarPage(): JSX.Element {
       setSubmitReviewOpen(false);
       setSubmitReviewAck(false);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof ApiError && err.status === 409 && /attestation/i.test(err.message)) {
         requestOpenWeeklyAttestation();
       }
       const message = err instanceof Error ? err.message : 'Unable to submit day';
@@ -394,7 +400,7 @@ export function TutorCalendarPage(): JSX.Element {
   const activeSnapshot = entryDate ? snapshotsByDate[entryDate] : null;
   const activeSnapshotIntervals = parseSnapshotIntervals(activeSnapshot);
   const activeComparison = parseTimeEntryComparison(activeDay?.comparison);
-  const entryBusy = entrySaving || entrySubmitting;
+  const entryBusy = entrySaving || entrySubmitting || (activeDay?.status === 'voided' && !activeDay.voidedAuditId);
 
   return (
     <div className="space-y-4">
@@ -521,6 +527,14 @@ export function TutorCalendarPage(): JSX.Element {
               </div>
             </div>
 
+            {activeDay?.status === 'voided' ? (
+              <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                Voided by admin — excluded from totals. Enter replacement sessions below; the old sessions and breaks
+                will not be carried over. They remain in audit history. Saving reopens this day as pending, then
+                submission uses the normal automatic approval checks.
+              </div>
+            ) : null}
+
             {activeDay?.status === 'pending' ? (
               <div className="rounded-lg border border-amber-300/60 bg-amber-50 p-3 text-sm text-amber-900">
                 Pending days do not count toward payroll until approved.
@@ -591,7 +605,7 @@ export function TutorCalendarPage(): JSX.Element {
             </div>
 
             <div className="rounded-lg border bg-white p-4 text-sm">
-              <p className="font-semibold text-slate-900">Breaks</p>
+              <p className="font-semibold text-slate-900">{activeDay?.status === 'voided' ? 'Previous breaks — excluded from replacement' : 'Breaks'}</p>
               <div className="mt-3 grid gap-2 md:grid-cols-4">
                 <div>
                   <p className="text-xs text-muted-foreground">Gross time</p>

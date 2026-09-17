@@ -4,7 +4,7 @@ A Vite + React (TypeScript) client and an Express (TypeScript) API for tutoring 
 
 ## What's included
 - Tutor: dashboard hour totals (week / pay period / month), clock in/out (server-time minute precision) + status widget, calendar view (schedule + time off overlay), manual entry of arrival/departure (supporting break splits) with automatic approval requests on any mismatch to scheduled hours, weekly attestation (hard-blocking next-week entry until signed), submit/cancel time off, one shared PTO balance with active linked centers/aliases, quotes, and alternate PTO emails.
-- Admin: approvals inbox (hour variance requests + time off), current pay period display, pay period summary comparison table (CRM reported hours vs approved logged hours), tutor drilldown modal by date, maintenance for database-enabled cross-center PTO profiles/discovery/link previews/audits, legacy clipboard copy, and grouped pay-period review export in Excel or CSV with spreadsheet-formula neutralization and oversized-export guardrails.
+- Admin: approvals inbox (hour variance requests + time off), staged time corrections with immediate approval (including edits that keep completed approved days approved), reversible void/restore of erroneous approved days with audit history, current pay period display, pay period summary comparison table (CRM reported hours vs approved logged hours), tutor drilldown modal by date, maintenance for database-enabled cross-center PTO profiles/discovery/link previews/audits, legacy clipboard copy, and grouped pay-period review export in Excel or CSV with spreadsheet-formula neutralization and oversized-export guardrails.
 - Auth: MSSQL-backed login with optional multi-account selection; cookie sessions (rolling 15 minutes).
 - Data: tutoring schedule + tutor/franchise identity from MSSQL; requests + payroll config from Postgres.
 
@@ -76,7 +76,15 @@ Manual time entry + approvals:
 - `POST /api/time-entry/me/day/:workDate/submit` (requires `scheduleSnapshot` from the calendar API (month/day snapshot endpoints); matching minute totals auto-approve, otherwise pending)
 - `GET /api/time-entry/admin/pending?franchiseId=...&limit=...`
 - `POST /api/time-entry/admin/day/:id/decide` (body: `decision=approve|deny`, `reason` required for `deny`, min 5 chars)
-- `PUT /api/time-entry/admin/day/:id` (admin fixes time errors; requires `reason` (min 5 chars); resets to pending)
+- `GET /api/time-entry/admin/tutors`, `/days`, `/tutor/:tutorId/day/:workDate`, `/day/:id/history` (center-scoped discovery, complete entries and audit history)
+- `POST /api/time-entry/admin/corrections/preview`, `/day/:id/void/preview`, `/day/:id/restore/preview` (read-only signed review, reason required)
+- `POST /api/time-entry/admin/operations` (body: `{ franchiseId, operationId, previewToken }`; atomic, idempotent correction/approval or void/restore)
+- `GET /api/time-entry/admin/operations/:operationId` (recover the current admin's committed operation)
+- Legacy immediate admin session/break edit routes return `409 ADMIN_CORRECTION_REQUIRED`; reload into the staged editor.
+
+Open **Approvals → Time entries → Manage time entries** to correct or remove a whole work date. See [admin correction operations and rollout](docs/operations/admin-time-entry-corrections.md). Migration `0015` and voided-state writer guards must ship together; old binaries must not write after voided records exist.
+
+Tutors can explicitly replace a voided date from their calendar or confirm a fresh clock-in today. The same day returns to pending; original sessions/breaks remain archived in audit history and do not count toward replacement hours. Normal schedule auto-approval still applies on submission/clock-out. Ordinary or stale requests cannot silently undo a void.
 
 Weekly attestation:
 - `GET /api/attestation/me/status` (last closed workweek)

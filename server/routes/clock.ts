@@ -1,3 +1,6 @@
+import type { TimeEntryStatus } from '../types/timeEntry';
+import { assertDayNotVoided } from '../services/timeEntryMutationGuard';
+import { appendTutorReopenAudit, parseReopenVoidedAuditId, prepareTutorReopen, tutorReopenErrorHandler } from '../services/tutorTimeEntryReopen';
 import express, { NextFunction, Request, Response } from 'express';
 import type { PoolClient } from 'pg';
 import { DateTime } from 'luxon';
@@ -27,7 +30,6 @@ import {
   type TimeEntryBreakRow
 } from '../services/timeEntryBreaks';
 
-type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
 type ClockStateValue = 0 | 1; // 0 = clocked out, 1 = clocked in
 
 type OpenSessionRow = { id: number; start_at: string };
@@ -37,6 +39,7 @@ type ClockStateResponse = {
   workDate: string;
   dayId: number | null;
   dayStatus: TimeEntryStatus | null;
+  voidedAuditId: number | null;
   clockState: ClockStateValue;
   persistedClockState: ClockStateValue;
   openSessionId: number | null;
@@ -104,7 +107,7 @@ const appendAudit = async (client: PoolClient, entry: {
 const buildClockStateResponse = (params: {
   timezone: string;
   workDate: string;
-  day: TimeEntryDayRow | null;
+  day: (TimeEntryDayRow & { voided_audit_id?: number | null }) | null;
   openSession: OpenSessionRow | null;
   breaks?: TimeEntryBreakRow[];
   attestationGate: { ok: true } | { ok: false; weekEnd: string };
@@ -126,6 +129,7 @@ const buildClockStateResponse = (params: {
     workDate: params.day?.work_date ?? params.workDate,
     dayId: params.day?.id ?? null,
     dayStatus: params.day?.status ?? null,
+    voidedAuditId: params.day?.status === 'voided' ? params.day.voided_audit_id ?? null : null,
     clockState: authoritativeClockState,
     persistedClockState,
     openSessionId: params.openSession?.id ?? null,
@@ -142,7 +146,8 @@ const fetchDayForUpdate = async (
   client: PoolClient,
   franchiseId: number,
   tutorId: number,
-  workDate: string
+  workDate: string,
+  allowVoided = false
 ): Promise<TimeEntryDayRow | null> => {
   const result = await client.query<TimeEntryDayRow>(
     `
@@ -191,7 +196,9 @@ const fetchDayForUpdate = async (
     [franchiseId, tutorId, workDate]
   );
 
-  return result.rowCount ? result.rows[0] : null;
+  const day = result.rowCount ? result.rows[0] : null;
+  if (!allowVoided) assertDayNotVoided(day);
+  return day;
 };
 
 const fetchDay = async (
@@ -217,7 +224,9 @@ const fetchDay = async (
         decided_at,
         decision_reason,
         created_at,
-        updated_at
+        updated_at,
+        (SELECT MAX(a.id) FROM public.time_entry_audit a
+          WHERE a.entry_day_id=time_entry_days.id AND a.action='admin_voided') AS voided_audit_id
       FROM public.time_entry_days
       WHERE franchiseid = $1
         AND tutorid = $2
@@ -388,6 +397,7 @@ router.post(
     const detectedAt = new Date();
 
     try {
+      const reopenVoidedAuditId = parseReopenVoidedAuditId((req.body as Record<string, unknown>)?.reopenVoidedAuditId);
       const payPeriod = await resolvePayPeriod(context.franchiseId, null);
       const timezone = payPeriod.timezone;
       const workDate = DateTime.fromJSDate(detectedAt, { zone: 'utc' }).setZone(timezone).toISODate();
@@ -408,8 +418,8 @@ router.post(
       try {
         await client.query('BEGIN');
 
-        let existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
-        let openSession = existing ? await fetchOpenSession(client, existing.id, true) : null;
+        let existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate, reopenVoidedAuditId !== null);
+        let openSession = existing && existing.status !== 'voided' ? await fetchOpenSession(client, existing.id, true) : null;
 
         const attestationGate = await enforcePriorWeekAttestation({
           franchiseId: context.franchiseId,
@@ -432,8 +442,16 @@ router.post(
           return;
         }
 
+        const reopening = reopenVoidedAuditId !== null ? await prepareTutorReopen(client, {
+          ...context, workDate, dayId: existing?.id ?? 0, voidAuditId: reopenVoidedAuditId
+        }) : null;
+        if (reopening) {
+          existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
+          openSession = null;
+        }
+
         if (!openSession) {
-          await client.query(
+          const inserted = await client.query(
             `
               INSERT INTO public.time_entry_days
                 (franchiseid, tutorid, work_date, timezone, status, clock_state, created_at, updated_at)
@@ -442,6 +460,12 @@ router.post(
             `,
             [context.franchiseId, context.tutorId, workDate, timezone]
           );
+
+          if (!existing && !inserted.rowCount) {
+            await client.query('ROLLBACK');
+            res.status(409).json({ error: 'This entry was created while you were clocking in; reload the entry.', code: 'ENTRY_CHANGED' });
+            return;
+          }
 
           existing = await fetchDayForUpdate(client, context.franchiseId, context.tutorId, workDate);
         }
@@ -615,6 +639,8 @@ router.post(
             newClockState: 1
           }
         });
+
+        if (reopening) await appendTutorReopenAudit(client, reopening, 'clock_in');
 
         await client.query('COMMIT');
 
@@ -1003,13 +1029,21 @@ router.post(
           return;
         }
 
-        const targetEndAt = await transaction.resolveTargetEndAt();
+        const detectedEndAt = await transaction.resolveTargetEndAt();
+        const settings = await getFranchiseSettings(context.franchiseId, client);
+        // Clock-out uses the same quarter-hour rule as clock-in.
+        const clockOutTime = resolveClockInStartAt({
+          detectedAt: new Date(detectedEndAt),
+          enabled: settings.clockInTimeSnapEnabled
+        });
+        const targetEndAt = clockOutTime.startAt;
         const targetEndEpoch = new Date(targetEndAt).getTime();
+        const detectedEndEpoch = new Date(detectedEndAt).getTime();
         const sessionStartEpoch = new Date(openSession.start_at).getTime();
         if (
           Number.isFinite(targetEndEpoch) &&
           Number.isFinite(sessionStartEpoch) &&
-          targetEndEpoch <= sessionStartEpoch
+          (targetEndEpoch <= sessionStartEpoch || detectedEndEpoch <= sessionStartEpoch)
         ) {
           await client.query('ROLLBACK');
           res.status(409).json({ error: 'Clock-out must be after your recorded clock-in time.' });
@@ -1075,7 +1109,11 @@ router.post(
           openSession,
           activeBreak,
           targetEndAt,
-          detectedAt: new Date().toISOString(),
+          detectedAt: clockOutTime.detectedAt,
+          timeSnap: {
+            timeSnapApplied: clockOutTime.timeSnapApplied,
+            snapTargetAt: clockOutTime.snapTargetAt
+          },
           snapshot,
           source: 'clock_out',
           actor: { accountType: 'TUTOR', accountId: context.tutorId },
@@ -1130,4 +1168,5 @@ router.post(
   }
 );
 
+router.use(tutorReopenErrorHandler);
 export default router;
