@@ -2,7 +2,8 @@ import type { ScheduleSnapshotV1 } from './scheduleSnapshot';
 import type { TimeEntryComparisonV2 } from './timeEntryComparison';
 import type { ClockOutSource } from './clockOutFinalization';
 
-export type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
+import type { TimeEntryStatus } from '../types/timeEntry';
+export type { TimeEntryStatus } from '../types/timeEntry';
 
 export type ClockSubmissionDecision = {
   nextStatus: 'pending' | 'approved';

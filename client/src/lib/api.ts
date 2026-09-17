@@ -379,7 +379,7 @@ export interface CalendarEntry {
   timeLabel: string;
 }
 
-export type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
+export type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied' | 'voided';
 
 export interface TimeEntrySession {
   startAt: string;
@@ -424,6 +424,7 @@ export interface ClockState {
   workDate: string;
   dayId: number | null;
   dayStatus: TimeEntryStatus | null;
+  voidedAuditId?: number | null;
   clockState: ClockStateValue;
   persistedClockState: ClockStateValue;
   openSessionId: number | null;
@@ -456,6 +457,7 @@ export interface TimeEntryDay {
   workDate: string;
   timezone: string;
   status: TimeEntryStatus;
+  voidedAuditId?: number | null;
   scheduleSnapshot: unknown | null;
   comparison: unknown | null;
   submittedAt: string | null;
@@ -1149,8 +1151,10 @@ export const fetchClockState = async (): Promise<ClockState> => {
   return result.state;
 };
 
-export const clockIn = async (): Promise<ClockState> => {
-  const result = await apiFetch<{ state: ClockState }>('/api/clock/me/in', { method: 'POST' });
+export const clockIn = async (args?: { reopenVoidedAuditId: number }): Promise<ClockState> => {
+  const result = await apiFetch<{ state: ClockState }>('/api/clock/me/in', {
+    method: 'POST', ...(args ? { body: JSON.stringify(args) } : {})
+  });
   return result.state;
 };
 
@@ -1177,10 +1181,10 @@ export const endClockBreak = async (): Promise<ClockState> => {
   return result.state;
 };
 
-export const saveTimeEntryDay = async (args: { workDate: string; sessions: Array<{ startAt: string; endAt: string }> }) => {
+export const saveTimeEntryDay = async (args: { workDate: string; sessions: Array<{ startAt: string; endAt: string }>; reopenVoidedAuditId?: number }) => {
   const result = await apiFetch<{ day: TimeEntryDay }>(`/api/time-entry/me/day/${encodeURIComponent(args.workDate)}`, {
     method: 'PUT',
-    body: JSON.stringify({ sessions: args.sessions })
+    body: JSON.stringify({ sessions: args.sessions, reopenVoidedAuditId: args.reopenVoidedAuditId })
   });
   return result.day;
 };

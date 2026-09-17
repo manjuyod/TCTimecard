@@ -16,6 +16,9 @@ dist
 Thumbs.db
 specs/
 specs/*
+!docs/superpowers/specs/
+docs/superpowers/specs/*
+!docs/superpowers/specs/2026-09-16-admin-time-entry-corrections-design.md
 .gitnexus
 .worktrees/
 .claude/

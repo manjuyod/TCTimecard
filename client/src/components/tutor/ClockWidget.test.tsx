@@ -43,6 +43,49 @@ const jsonResponse = (body: unknown, status = 200): Response => new Response(JSO
 
 const clockResponse = (clockState: ClockState): Response => jsonResponse({ state: clockState });
 
+it('shows an admin-voided day without offering a new clock action', async () => {
+  globalThis.fetch = async () => clockResponse(state(0, { dayStatus: 'voided' }));
+  render(<ClockWidget />);
+  await screen.findByText('Voided');
+  expect(screen.getByRole('button', { name: /clock in/i })).toBeDisabled();
+  expect(screen.getByText(/voided by an admin/i)).toBeInTheDocument();
+});
+
+it('reopening a voided day requires confirmation and cancel sends no clock-in request', async () => {
+  let writes = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'POST') writes++;
+    return clockResponse(state(0, { dayStatus: 'voided', voidedAuditId: 7 }));
+  };
+  render(<ClockWidget />);
+  await screen.findByText('Voided');
+  fireEvent.click(screen.getByRole('button', { name: 'Clock In' }));
+  await screen.findByRole('dialog', { name: /replacement session/i });
+  expect(writes).toBe(0);
+  fireEvent.click(screen.getByRole('button', { name: 'Keep voided' }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(writes).toBe(0);
+});
+
+it('confirmed replacement sends the observed void identity and starts a pending session', async () => {
+  const requests: unknown[] = [];
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === '/api/clock/me/in') {
+      requests.push(JSON.parse(String(init?.body)));
+      return clockResponse(state(1, { dayStatus: 'pending' }));
+    }
+    if (String(input).includes('/snapshot')) return jsonResponse({ snapshot: null });
+    return clockResponse(state(0, { dayStatus: 'voided', voidedAuditId: 7 }));
+  };
+  render(<ClockWidget />);
+  await screen.findByText('Voided');
+  fireEvent.click(screen.getByRole('button', { name: 'Clock In' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Start new session' }));
+  await screen.findByText('Clocked in');
+  expect(screen.getByText('Pending Approval')).toBeInTheDocument();
+  expect(requests).toEqual([{ reopenVoidedAuditId: 7 }]);
+});
+
 const snapshotResponse = (endAt = '2026-07-31T20:00:00.000-07:00'): Response => jsonResponse({
   snapshot: {
     version: 1,

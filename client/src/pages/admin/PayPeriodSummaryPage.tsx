@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AdminLegacySummaryRow,
   AdminSummaryDetailRow,
@@ -58,6 +58,8 @@ export function PayPeriodSummaryPage(): JSX.Element {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const summaryRequest = useRef(0);
+  const summaryBusy = useRef(false);
 
   const validateFranchise = (): number | null => {
     if (!selectorAllowed) return sessionFranchiseId;
@@ -98,30 +100,36 @@ export function PayPeriodSummaryPage(): JSX.Element {
   };
 
   const load = async (forcedFranchiseId?: number | null) => {
-    const selection = await resolveSelection(forcedFranchiseId);
-    if (!selection) return;
-
-    setFranchiseId(selection.franchiseId);
+    const request = ++summaryRequest.current;
+    summaryBusy.current = true;
     setLoading(true);
     setError(null);
-    setSelectedTutor(null);
-    setDetailError(null);
-    setDetailCache({});
 
     try {
+      const selection = await resolveSelection(forcedFranchiseId);
+      if (!selection || request !== summaryRequest.current) return;
+      setFranchiseId(selection.franchiseId);
+      setSelectedTutor(null);
+      setDetailError(null);
+      setDetailCache({});
       const result = await fetchPayPeriodSummary({
         franchiseId: selection.franchiseId,
         forDate: selection.forDate
       });
+      if (request !== summaryRequest.current) return;
       setRows(result.rows);
       setPayPeriod(result.payPeriod);
       setActiveSelection(selection);
     } catch (err) {
+      if (request !== summaryRequest.current) return;
       const message = err instanceof Error ? err.message : 'Unable to load pay period summary';
       setError(message);
       toast.error(message);
     } finally {
-      setLoading(false);
+      if (request === summaryRequest.current) {
+        summaryBusy.current = false;
+        setLoading(false);
+      }
     }
   };
 
@@ -155,6 +163,37 @@ export function PayPeriodSummaryPage(): JSX.Element {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectorAllowed, sessionFranchiseId]);
+
+  // Corrections can be made in another tab. Refresh the applied scope, not unapplied filters.
+  useEffect(() => {
+    if (!activeSelection) return;
+    let cancelled = false;
+    const refreshOnFocus = async () => {
+      if (summaryBusy.current) return;
+      const request = ++summaryRequest.current;
+      summaryBusy.current = true;
+      setLoading(true);
+      try {
+        const result = await fetchPayPeriodSummary(activeSelection);
+        if (cancelled || request !== summaryRequest.current) return;
+        setRows(result.rows);
+        setPayPeriod(result.payPeriod);
+        setDetailCache({});
+        setDetailError(null);
+        setError(null);
+      } catch (err) {
+        if (cancelled || request !== summaryRequest.current) return;
+        setError(err instanceof Error ? err.message : 'Unable to refresh pay period summary');
+      } finally {
+        if (request === summaryRequest.current) {
+          summaryBusy.current = false;
+          if (!cancelled) setLoading(false);
+        }
+      }
+    };
+    window.addEventListener('focus', refreshOnFocus);
+    return () => { cancelled = true; window.removeEventListener('focus', refreshOnFocus); };
+  }, [activeSelection]);
 
   const detailCacheKey =
     selectedTutor && payPeriod && activeSelection

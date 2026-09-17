@@ -1,3 +1,4 @@
+import { assertDayNotVoided } from './timeEntryMutationGuard';
 import type { PoolClient } from 'pg';
 import { resolveClockOutSubmission, shouldInvalidateClockDayStatus, type TimeEntryStatus } from './clockSubmission';
 import type { ScheduleSnapshotV1 } from './scheduleSnapshot';
@@ -69,6 +70,7 @@ export type FinalizeClockOutInTransaction = (params: {
   activeBreak: TimeEntryBreakRow | null;
   targetEndAt?: string;
   detectedAt: string;
+  timeSnap?: { timeSnapApplied: boolean; snapTargetAt: string | null };
   snapshot: ScheduleSnapshotV1;
   source: ClockOutSource;
   actor: { accountType: 'TUTOR' | 'SYSTEM'; accountId: number | null };
@@ -188,6 +190,7 @@ const parseEpoch = (value: string | Date | null): number | null => {
 };
 
 export const finalizeClockOutInTransaction: FinalizeClockOutInTransaction = async (params) => {
+  assertDayNotVoided(params.day);
   const timezone = params.source === 'auto_clock_out' ? params.snapshot.timezone : params.day.timezone;
   let currentDay: TimeEntryDayRow = { ...params.day, timezone };
   const previousClockState = Number(params.day.clock_state) === 1 ? 1 : 0;
@@ -257,7 +260,8 @@ export const finalizeClockOutInTransaction: FinalizeClockOutInTransaction = asyn
       previousClockState,
       newClockState: 0,
       source: params.source,
-      detectedAt: params.detectedAt
+      detectedAt: params.detectedAt,
+      ...params.timeSnap
     }
   });
 

@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import App from './App';
 import './index.css';
 import { AuthProvider } from './providers/AuthProvider';
@@ -12,13 +12,9 @@ if (!rootElement) {
   throw new Error('Root element not found');
 }
 
+// Keep existing routes/providers intact while enabling supported draft-navigation blocking.
+const router = createBrowserRouter([{ path: '*', element: <AuthProvider><App /><AppToaster /></AuthProvider> }]);
+
 ReactDOM.createRoot(rootElement).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <AuthProvider>
-        <App />
-        <AppToaster />
-      </AuthProvider>
-    </BrowserRouter>
-  </React.StrictMode>
+  <React.StrictMode><RouterProvider router={router} /></React.StrictMode>
 );

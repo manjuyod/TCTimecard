@@ -265,13 +265,13 @@ export function SettingsPage(): JSX.Element {
       <Card>
         <CardHeader>
           <CardTitle>Time Snap</CardTitle>
-          <CardDescription>Configure neutral quarter-hour clock-in rounding for every tutor in this franchise.</CardDescription>
+          <CardDescription>Configure neutral quarter-hour clock-in and clock-out rounding for every tutor in this franchise.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <label className="flex items-center justify-between gap-4 rounded-lg border p-4">
             <span>
               <span className="block text-sm font-semibold">Time Snap</span>
-              <span className="block text-sm text-muted-foreground">Clock-ins round to the nearest quarter-hour: minutes 0–7 round down and minutes 8–14 round up.</span>
+              <span className="block text-sm text-muted-foreground">Clock-ins and clock-outs round to the nearest quarter-hour: minutes 0–7 round down and minutes 8–14 round up.</span>
             </span>
             <input type="checkbox" role="switch" aria-label="Time Snap" checked={clockInTimeSnapEnabled} onChange={(event) => setClockInTimeSnapEnabled(event.target.checked)} disabled={autoLoading || autoSaving} />
           </label>

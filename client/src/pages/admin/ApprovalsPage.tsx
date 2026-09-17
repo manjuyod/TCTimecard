@@ -1,19 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { TimeEntryManagementPanel } from './time-entry/TimeEntryManagementPanel';
+import { TimeEntryReviewDialog } from './time-entry/TimeEntryReviewDialog';
+import { TimeEntryCorrectionDialog, CorrectionDialogTarget } from './time-entry/TimeEntryCorrectionDialog';
+import { getAdminTimeEntryDetail } from '../../lib/adminTimeEntryApi';
+import type { AdminTimeEntryDetail, AdminOperationResult } from '../../lib/adminTimeEntry';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import {
   AdminAttestationTutor,
   ExtraHoursRequest,
-  TimeEntryBreak,
   TimeEntryDay,
-  TimeEntryBreakPayTreatment,
-  TimeEntryBreakType,
   TimeOffRequest,
   TimeOffNotificationFailure,
-  adminCreateTimeEntryBreak,
-  adminEditTimeEntryDay,
-  adminUpdateTimeEntryBreak,
-  adminVoidTimeEntryBreak,
   decideTimeEntryDay,
   decideExtraHours,
   decideTimeOff,
@@ -58,41 +56,7 @@ type DenyContext =
   | { type: 'timeoff'; request: TimeOffRequest }
   | { type: 'timeentry'; day: TimeEntryDay };
 
-type BreakDraft = {
-  breakType: TimeEntryBreakType;
-  payTreatment: TimeEntryBreakPayTreatment;
-  start: string;
-  end: string;
-  duration: string;
-  note: string;
-};
-
-const createEmptyBreakDraft = (): BreakDraft => ({
-  breakType: 'lunch',
-  payTreatment: 'unpaid',
-  start: '',
-  end: '',
-  duration: '30',
-  note: ''
-});
-
 const toComparisonTotals = (day: TimeEntryDay) => parseTimeEntryComparison(day.comparison);
-
-const parseSnapshotIntervals = (snapshot: unknown): Array<{ startAt: string; endAt: string }> => {
-  if (!snapshot || typeof snapshot !== 'object') return [];
-  const record = snapshot as Record<string, unknown>;
-  const intervalsRaw = record.intervals;
-  if (!Array.isArray(intervalsRaw)) return [];
-  return intervalsRaw
-    .map((raw) => {
-      if (!raw || typeof raw !== 'object') return null;
-      const r = raw as Record<string, unknown>;
-      const startAt = typeof r.startAt === 'string' ? r.startAt : '';
-      const endAt = typeof r.endAt === 'string' ? r.endAt : '';
-      return startAt && endAt ? { startAt, endAt } : null;
-    })
-    .filter(Boolean) as Array<{ startAt: string; endAt: string }>;
-};
 
 const browserTimeZone = DateTime.local().zoneName ?? 'UTC';
 
@@ -111,28 +75,6 @@ const formatMinutes = (minutes: number): string => {
   if (hours) return `${hours}h`;
   return `${remainder}m`;
 };
-
-const formatBreakSource = (source: string): string => {
-  if (source === 'auto_rule') return 'Auto-applied';
-  if (source === 'manager') return 'Manager-entered';
-  if (source === 'employee') return 'Employee-entered';
-  return 'Imported';
-};
-
-const formatBreakDraftTime = (value: string | null): string => {
-  if (!value) return '';
-  const parsed = DateTime.fromISO(value, { setZone: true }).setZone(browserTimeZone);
-  return parsed.isValid ? parsed.toFormat('HH:mm') : '';
-};
-
-const toBreakDraft = (item: TimeEntryBreak): BreakDraft => ({
-  breakType: item.breakType,
-  payTreatment: item.payTreatment,
-  start: formatBreakDraftTime(item.startTime),
-  end: formatBreakDraftTime(item.endTime),
-  duration: String(item.durationMinutes || 30),
-  note: item.note ?? ''
-});
 
 function AttestationExportCard({
   franchiseId,
@@ -281,6 +223,20 @@ function AttestationExportCard({
 export function ApprovalsPage(): JSX.Element {
   const { session } = useAuth();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const manageEntries = searchParams.get('tab') === 'timeentry' && searchParams.get('view') === 'manage';
+  const [reviewDetail, setReviewDetail] = useState<AdminTimeEntryDetail | null>(null);
+  const [correctionTarget, setCorrectionTarget] = useState<CorrectionDialogTarget | null>(null);
+  const [correctionDirty, setCorrectionDirty] = useState(false);
+  const [entryRefreshKey, setEntryRefreshKey] = useState(0);
+  const entryRequest = useRef(0);
+  const entryFocusTarget = useRef<HTMLElement | null>(null);
+  const restoreEntryFocus = () => {
+    const target = entryFocusTarget.current;
+    if (target?.isConnected && !target.hasAttribute('disabled')) target.focus();
+    else (document.getElementById('entry-exact-date') ?? document.getElementById('manage-time-entries'))?.focus();
+  };
+  const activeFranchise = useRef<number | null>(null);
   const sessionFranchiseId = getSessionFranchiseId(session);
   const selectorAllowed = isSelectorAllowed(session);
   const [activeTab, setActiveTab] = useState<'extra' | 'timeoff' | 'timeentry'>('timeentry');
@@ -288,6 +244,9 @@ export function ApprovalsPage(): JSX.Element {
     sessionFranchiseId !== null ? String(sessionFranchiseId) : ''
   );
   const [franchiseId, setFranchiseId] = useState<number | null>(sessionFranchiseId);
+  activeFranchise.current = franchiseId;
+  useEffect(() => { entryRequest.current++; setReviewDetail(null); setCorrectionTarget(null); }, [franchiseId]);
+  useEffect(() => { if (manageEntries) setActiveTab('timeentry'); }, [manageEntries]);
   const [extraRequests, setExtraRequests] = useState<
     Array<ExtraHoursRequest & { tutorName?: string; tutorEmail?: string; tutorId?: number }>
   >([]);
@@ -305,14 +264,6 @@ export function ApprovalsPage(): JSX.Element {
   const [denyDialog, setDenyDialog] = useState<DenyContext | null>(null);
   const [denyReason, setDenyReason] = useState('');
   const [actingId, setActingId] = useState<number | null>(null);
-  const [selectedDay, setSelectedDay] = useState<TimeEntryDay | null>(null);
-  const [fixDay, setFixDay] = useState<TimeEntryDay | null>(null);
-  const [fixSessions, setFixSessions] = useState<Array<{ start: string; end: string }>>([{ start: '', end: '' }]);
-  const [fixReason, setFixReason] = useState('');
-  const [fixError, setFixError] = useState<string | null>(null);
-  const [breakDraft, setBreakDraft] = useState<BreakDraft>(() => createEmptyBreakDraft());
-  const [editingBreakId, setEditingBreakId] = useState<number | null>(null);
-
   useEffect(() => {
     if (!selectorAllowed) {
       setError(null);
@@ -341,6 +292,10 @@ export function ApprovalsPage(): JSX.Element {
     if (!selectorAllowed) return;
     const parsed = validateFranchise();
     if (parsed !== null) {
+      if (correctionTarget) return;
+      if (parsed !== franchiseId) setSearchParams(prev => {
+        const next = new URLSearchParams(prev); next.delete('tutorId'); next.delete('workDate'); return next;
+      });
       setFranchiseId(parsed);
       setError(null);
     }
@@ -404,6 +359,23 @@ export function ApprovalsPage(): JSX.Element {
   }, [franchiseId]);
 
   const timeOffDeepLink = useMemo(() => parseAdminTimeOffDeepLink(location.search), [location.search]);
+
+  useEffect(() => {
+    if (!reviewDetail) return;
+    const { franchiseId: center, tutor, workDate } = reviewDetail;
+    let active = true;
+    const refreshReview = async () => {
+      const request = ++entryRequest.current;
+      try {
+        const next = await getAdminTimeEntryDetail({ franchiseId: center, tutorId: tutor.tutorId, workDate });
+        if (active && request === entryRequest.current && activeFranchise.current === center) setReviewDetail(next);
+      } catch (err) {
+        if (active && request === entryRequest.current) toast.error(err instanceof Error ? err.message : 'Unable to refresh entry');
+      }
+    };
+    window.addEventListener('focus', refreshReview);
+    return () => { active = false; window.removeEventListener('focus', refreshReview); };
+  }, [reviewDetail?.franchiseId, reviewDetail?.tutor.tutorId, reviewDetail?.workDate]);
 
   useEffect(() => {
     if (!timeOffDeepLink) return;
@@ -507,7 +479,7 @@ export function ApprovalsPage(): JSX.Element {
           franchiseId: targetFranchiseId
         });
         setTimeEntryDays((prev) => prev.filter((item) => item.id !== denyDialog.day.id));
-        setSelectedDay((prev) => (prev?.id === denyDialog.day.id ? null : prev));
+        setReviewDetail((prev) => (prev?.day?.id === denyDialog.day.id ? null : prev));
       }
       toast.success('Request denied');
       setDenyDialog(null);
@@ -595,7 +567,7 @@ export function ApprovalsPage(): JSX.Element {
 
       await decideTimeEntryDay({ id: day.id, decision: 'approve', franchiseId: targetFranchiseId });
       setTimeEntryDays((prev) => prev.filter((item) => item.id !== day.id));
-      setSelectedDay((prev) => (prev?.id === day.id ? null : prev));
+      setReviewDetail((prev) => (prev?.day?.id === day.id ? null : prev));
       toast.success('Time entry approved');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to approve time entry';
@@ -605,259 +577,34 @@ export function ApprovalsPage(): JSX.Element {
     }
   };
 
-  const openFixDialog = (day: TimeEntryDay) => {
-    setFixDay(day);
-    setFixError(null);
-    setFixReason('');
-    setEditingBreakId(null);
-    setBreakDraft(createEmptyBreakDraft());
-
-    if (day.sessions?.length) {
-      setFixSessions(
-        day.sessions.map((s) => ({
-          start: DateTime.fromISO(s.startAt, { setZone: true }).setZone(browserTimeZone).toFormat('HH:mm'),
-          end: DateTime.fromISO(s.endAt, { setZone: true }).setZone(browserTimeZone).toFormat('HH:mm')
-        }))
-      );
-      return;
-    }
-
-    setFixSessions([{ start: '', end: '' }]);
+  const setEntryView = (manage: boolean) => {
+    if (correctionTarget) return;
+    setSearchParams(prev => { const next = new URLSearchParams(prev); next.set('tab', 'timeentry');
+      if (manage) next.set('view', 'manage'); else next.delete('view'); return next; });
   };
-
-  const buildFixSessionsPayload = (): { ok: true; sessions: Array<{ startAt: string; endAt: string }> } | { ok: false; error: string } => {
-    if (!fixDay) return { ok: false, error: 'No day selected' };
-
-    const baseDate = DateTime.fromISO(fixDay.workDate, { zone: browserTimeZone, setZone: true }).startOf('day');
-    if (!baseDate.isValid) return { ok: false, error: 'Invalid work date/timezone' };
-
-    const parseTime = (value: string): { hour: number; minute: number } | null => {
-      const match = value.trim().match(/^(\d{2}):(\d{2})$/);
-      if (!match) return null;
-      const hour = Number(match[1]);
-      const minute = Number(match[2]);
-      if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
-      if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
-      return { hour, minute };
-    };
-
-    const normalized = fixSessions
-      .map((row) => {
-        const start = parseTime(row.start);
-        const end = parseTime(row.end);
-        if (!start || !end) return null;
-
-        const startLocal = baseDate.set({ hour: start.hour, minute: start.minute, second: 0, millisecond: 0 });
-        const endLocal = baseDate.set({ hour: end.hour, minute: end.minute, second: 0, millisecond: 0 });
-
-        if (!startLocal.isValid || !endLocal.isValid) return null;
-        if (endLocal <= startLocal) return null;
-
-        const startAt = startLocal.toUTC().toISO({ suppressMilliseconds: true }) ?? '';
-        const endAt = endLocal.toUTC().toISO({ suppressMilliseconds: true }) ?? '';
-        if (!startAt || !endAt) return null;
-
-        const startMinute = Math.floor(startLocal.toUTC().toMillis() / 60000);
-        const endMinute = Math.floor(endLocal.toUTC().toMillis() / 60000);
-        if (!Number.isFinite(startMinute) || !Number.isFinite(endMinute) || endMinute <= startMinute) return null;
-
-        return { startAt, endAt, startMinute, endMinute };
-      })
-      .filter(Boolean) as Array<{ startAt: string; endAt: string; startMinute: number; endMinute: number }>;
-
-    if (normalized.length !== fixSessions.length) {
-      return { ok: false, error: 'Each session must include start/end times (HH:mm), with end after start.' };
-    }
-
-    const sorted = normalized.slice().sort((a, b) => a.startMinute - b.startMinute || a.endMinute - b.endMinute);
-    for (let idx = 1; idx < sorted.length; idx += 1) {
-      if (sorted[idx].startMinute < sorted[idx - 1].endMinute) {
-        return { ok: false, error: 'Sessions must not overlap.' };
-      }
-    }
-
-    return { ok: true, sessions: normalized.map((s) => ({ startAt: s.startAt, endAt: s.endAt })) };
-  };
-
-  const saveFix = async () => {
-    if (!fixDay) return;
-
-    const targetFranchiseId = franchiseId ?? sessionFranchiseId;
-    if (targetFranchiseId === null) {
-      toast.error('Franchise ID required');
-      return;
-    }
-
-    const reason = fixReason.trim();
-    if (reason.length < 5) {
-      setFixError('Reason is required (min 5 characters).');
-      return;
-    }
-
-    const payload = buildFixSessionsPayload();
-    if (!payload.ok) {
-      setFixError(payload.error);
-      return;
-    }
-
-    setFixError(null);
-    setActingId(fixDay.id);
-    try {
-      const updated = await adminEditTimeEntryDay({
-        franchiseId: targetFranchiseId,
-        id: fixDay.id,
-        sessions: payload.sessions,
-        reason
-      });
-
-      setTimeEntryDays((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      setFixDay(null);
-      setSelectedDay(updated);
-      toast.success('Time entry updated. Routed to pending approval.');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to save time entry fix';
-      toast.error(message);
-      setFixError(message);
-    } finally {
-      setActingId(null);
-    }
-  };
-
-  const buildBreakWindowPayload = (): { ok: true; startTime?: string; endTime?: string; durationMinutes?: number } | { ok: false; error: string } => {
-    if (!fixDay) return { ok: false, error: 'No day selected' };
-    const hasWindow = Boolean(breakDraft.start.trim() || breakDraft.end.trim());
-    if (!hasWindow) {
-      const durationMinutes = Number(breakDraft.duration);
-      if (!Number.isInteger(durationMinutes) || durationMinutes <= 0) {
-        return { ok: false, error: 'Duration must be a positive number of minutes.' };
-      }
-      return { ok: true, durationMinutes };
-    }
-
-    const parseTime = (value: string): { hour: number; minute: number } | null => {
-      const match = value.trim().match(/^(\d{2}):(\d{2})$/);
-      if (!match) return null;
-      const hour = Number(match[1]);
-      const minute = Number(match[2]);
-      if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
-      if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
-      return { hour, minute };
-    };
-
-    const start = parseTime(breakDraft.start);
-    const end = parseTime(breakDraft.end);
-    if (!start || !end) {
-      return { ok: false, error: 'Break start/end must both be HH:mm values, or leave both blank for duration-only.' };
-    }
-
-    const baseDate = DateTime.fromISO(fixDay.workDate, { zone: browserTimeZone, setZone: true }).startOf('day');
-    const startLocal = baseDate.set({ hour: start.hour, minute: start.minute, second: 0, millisecond: 0 });
-    const endLocal = baseDate.set({ hour: end.hour, minute: end.minute, second: 0, millisecond: 0 });
-    if (!startLocal.isValid || !endLocal.isValid || endLocal <= startLocal) {
-      return { ok: false, error: 'Break end must be after break start.' };
-    }
-
-    return {
-      ok: true,
-      startTime: startLocal.toUTC().toISO({ suppressMilliseconds: true }) ?? '',
-      endTime: endLocal.toUTC().toISO({ suppressMilliseconds: true }) ?? ''
-    };
-  };
-
-  const startManagerBreakEdit = (day: TimeEntryDay, item: TimeEntryBreak, options?: { closeReview?: boolean }) => {
-    if (item.status !== 'completed') return;
-    if (fixDay?.id !== day.id) {
-      openFixDialog(day);
-    } else {
-      setFixError(null);
-    }
-    setBreakDraft(toBreakDraft(item));
-    setEditingBreakId(item.id);
-    if (options?.closeReview) setSelectedDay(null);
-  };
-
-  const resetBreakEditor = () => {
-    setBreakDraft(createEmptyBreakDraft());
-    setEditingBreakId(null);
-  };
-
-  const saveManagerBreak = async () => {
-    if (!fixDay) return;
-    const targetFranchiseId = franchiseId ?? sessionFranchiseId;
-    if (targetFranchiseId === null) {
-      toast.error('Franchise ID required');
-      return;
-    }
-
-    const payload = buildBreakWindowPayload();
-    if (!payload.ok) {
-      setFixError(payload.error);
-      return;
-    }
-
-    setActingId(fixDay.id);
-    setFixError(null);
-    try {
-      const commonPayload = {
-        franchiseId: targetFranchiseId,
-        dayId: fixDay.id,
-        breakType: breakDraft.breakType,
-        payTreatment: breakDraft.payTreatment,
-        startTime: payload.startTime ?? null,
-        endTime: payload.endTime ?? null,
-        durationMinutes: payload.durationMinutes ?? null,
-        note: breakDraft.note || null
-      };
-      const updated =
-        editingBreakId === null
-          ? await adminCreateTimeEntryBreak({
-              ...commonPayload,
-              reason: fixReason || null
-            })
-          : await adminUpdateTimeEntryBreak({
-              ...commonPayload,
-              breakId: editingBreakId
-            });
-      setTimeEntryDays((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      setFixDay(updated);
-      setSelectedDay((prev) => (prev?.id === updated.id ? updated : prev));
-      resetBreakEditor();
-      toast.success(editingBreakId === null ? 'Break added.' : 'Break updated.');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : editingBreakId === null ? 'Unable to add break' : 'Unable to update break';
-      toast.error(message);
-      setFixError(message);
-    } finally {
-      setActingId(null);
-    }
-  };
-
-  const voidManagerBreak = async (day: TimeEntryDay, breakId: number) => {
-    const targetFranchiseId = franchiseId ?? sessionFranchiseId;
-    if (targetFranchiseId === null) {
-      toast.error('Franchise ID required');
-      return;
-    }
-
+  const openAdminEntry = async (day: TimeEntryDay, adjust = false) => {
+    const selectedFranchise = franchiseId;
+    if (selectedFranchise === null) return;
+    const generation = ++entryRequest.current;
     setActingId(day.id);
     try {
-      const updated = await adminVoidTimeEntryBreak({
-        franchiseId: targetFranchiseId,
-        dayId: day.id,
-        breakId,
-        note: 'Voided by manager'
-      });
-      setTimeEntryDays((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      setFixDay((prev) => (prev?.id === updated.id ? updated : prev));
-      setSelectedDay((prev) => (prev?.id === updated.id ? updated : prev));
-      if (editingBreakId === breakId) resetBreakEditor();
-      toast.success('Break voided.');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to void break';
-      toast.error(message);
-    } finally {
-      setActingId(null);
-    }
+      const detail = await getAdminTimeEntryDetail({ franchiseId: selectedFranchise, tutorId: day.tutorId, workDate: day.workDate });
+      if (generation !== entryRequest.current || activeFranchise.current !== selectedFranchise) return;
+      if (adjust && detail.allowedActions.includes('correct')) setCorrectionTarget({ action: 'correct', detail });
+      else setReviewDetail(detail);
+    } catch (err) { if (generation === entryRequest.current) toast.error(err instanceof Error ? err.message : 'Unable to load time entry'); }
+    finally { if (generation === entryRequest.current) setActingId(null); }
+  };
+  const onEntryCommitted = (result: AdminOperationResult) => {
+    const target = correctionTarget;
+    setCorrectionTarget(null); setCorrectionDirty(false); setEntryRefreshKey(value => value + 1);
+    toast.success(result.action === 'correct' ? 'Time entry corrected and approved.' : result.action === 'void' ? 'Entry voided. Removed from approved totals.' : 'Entry restored and approved.');
+    if (franchiseId !== null) void loadTimeEntries(franchiseId);
+    if (!target) return;
+    const generation = ++entryRequest.current;
+    void getAdminTimeEntryDetail({ franchiseId: target.detail.franchiseId, tutorId: target.detail.tutor.tutorId, workDate: target.detail.workDate })
+      .then(detail => { if (generation === entryRequest.current && activeFranchise.current === detail.franchiseId) setReviewDetail(detail); })
+      .catch(() => toast.info('Saved successfully. Refresh the list to view the current entry.'));
   };
 
   const extraContent = useMemo(() => {
@@ -1071,7 +818,7 @@ export function ApprovalsPage(): JSX.Element {
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex justify-end gap-2">
-                    <Button size="sm" variant="outline" onClick={() => setSelectedDay(day)}>
+                    <Button size="sm" variant="outline" onClick={() => void openAdminEntry(day)}>
                       Review
                     </Button>
                     <Button size="sm" onClick={() => void handleApproveTimeEntry(day)} disabled={actingId === day.id}>
@@ -1099,7 +846,11 @@ export function ApprovalsPage(): JSX.Element {
   }, [actingId, loadingTimeEntry, timeEntryDays]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" onClickCapture={event => {
+      if (reviewDetail || correctionTarget || !(event.target instanceof Element)) return;
+      const button = event.target.closest('button');
+      if (button) entryFocusTarget.current = button;
+    }}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Approvals Inbox</h1>
@@ -1141,7 +892,7 @@ export function ApprovalsPage(): JSX.Element {
               />
               <InlineError message={error} />
             </div>
-            <Button onClick={applyFranchise} disabled={loadingExtra || loadingTimeOff}>
+            <Button onClick={applyFranchise} disabled={loadingExtra || loadingTimeOff || Boolean(correctionTarget)}>
               Apply
             </Button>
             <Badge variant="muted">Session: {session?.franchiseId ?? 'N/A'}</Badge>
@@ -1151,7 +902,7 @@ export function ApprovalsPage(): JSX.Element {
 
       <AttestationExportCard franchiseId={franchiseId} sessionFranchiseId={sessionFranchiseId} />
 
-      <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val as 'extra' | 'timeoff' | 'timeentry')}>
+      <Tabs value={activeTab} onValueChange={(val) => { if (!correctionTarget) setActiveTab(val as 'extra' | 'timeoff' | 'timeentry'); }}>
         <TabsList>
           <TabsTrigger value="extra">Extra Hours</TabsTrigger>
           <TabsTrigger value="timeentry">Time Entry Variances</TabsTrigger>
@@ -1172,16 +923,15 @@ export function ApprovalsPage(): JSX.Element {
         </TabsContent>
 
         <TabsContent value="timeentry" className="mt-4">
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between gap-2">
-              <div>
-                <CardTitle>Time Entry Variances</CardTitle>
-                <CardDescription>Review and approve or deny mismatched manual time entries.</CardDescription>
-              </div>
-              <StatusBadge status="pending" />
-            </CardHeader>
-            <CardContent>{timeEntryContent}</CardContent>
-          </Card>
+          {manageEntries && franchiseId !== null ? <TimeEntryManagementPanel key={franchiseId} franchiseId={franchiseId}
+            refreshKey={entryRefreshKey} onBackToPending={() => setEntryView(false)} onSelectEntry={setReviewDetail} /> :
+            <Card>
+              <CardHeader className="flex flex-wrap flex-row items-center justify-between gap-3">
+                <div><CardTitle>Time Entry Variances</CardTitle><CardDescription>Review and approve or deny mismatched manual time entries.</CardDescription></div>
+                <Button id="manage-time-entries" variant="outline" onClick={() => setEntryView(true)} disabled={franchiseId === null}>Manage time entries</Button>
+              </CardHeader>
+              <CardContent>{timeEntryContent}</CardContent>
+            </Card>}
         </TabsContent>
 
         <TabsContent value="timeoff" className="mt-4">
@@ -1294,467 +1044,11 @@ export function ApprovalsPage(): JSX.Element {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(selectedDay)} onOpenChange={(open) => !open && setSelectedDay(null)}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto">
-          {selectedDay ? (
-            <>
-              <DialogHeader>
-                <DialogTitle>Time Entry Variance – {formatWorkDate(selectedDay.workDate)}</DialogTitle>
-                <DialogDescription>
-                  {selectedDay.tutorName || `Tutor #${selectedDay.tutorId}`} · {selectedDay.tutorEmail || 'Email unavailable'}
-                </DialogDescription>
-              </DialogHeader>
-
-              <div className="space-y-4 text-sm">
-                <div className="flex flex-wrap gap-2">
-                  {selectedDay.history?.wasEverApproved ? <Badge variant="warning">Edited after approval</Badge> : null}
-                  {selectedDay.history?.lastAudit?.action ? (
-                    <Badge variant="muted">
-                      Last audit: {selectedDay.history.lastAudit.action} ·{' '}
-                      {DateTime.fromISO(selectedDay.history.lastAudit.at).toFormat('MMM d, h:mm a')}
-                    </Badge>
-                  ) : null}
-                </div>
-
-                <div className="rounded-lg border bg-white p-4">
-                  <p className="font-semibold text-slate-900">Variance totals</p>
-                  {(() => {
-                    const totals = toComparisonTotals(selectedDay);
-                    return (
-                      <>
-                        <div className="mt-2 grid gap-2 md:grid-cols-4">
-                          <div>
-                            <p className="text-xs text-muted-foreground">Scheduled</p>
-                            <p className="font-semibold text-slate-900">
-                              {totals ? `${totals.scheduledMinutes} min` : 'n/a'}
-                            </p>
-                          </div>
-                          <div>
-                            <p className="text-xs text-muted-foreground">Covered</p>
-                            <p className="font-semibold text-slate-900">
-                              {totals ? `${totals.coveredMinutes} min` : 'n/a'}
-                            </p>
-                          </div>
-                          <div>
-                            <p className="text-xs text-muted-foreground">Delta</p>
-                            <p className="font-semibold text-slate-900">
-                              {totals ? `${totals.deltaMinutes} min` : 'n/a'}
-                            </p>
-                          </div>
-                          <div>
-                            <p className="text-xs text-muted-foreground">Payable extra</p>
-                            <p className="font-semibold text-slate-900">
-                              {totals ? `${totals.payableExtraMinutes} min` : 'n/a'}
-                            </p>
-                          </div>
-                        </div>
-                        {totals && totals.matches !== null ? (
-                          <p className="mt-2 text-xs text-muted-foreground">
-                            Meets automatic approval criteria: {totals.matches ? 'Yes' : 'No'}
-                          </p>
-                        ) : null}
-                        {totals &&
-                        (totals.scheduledBreakOverlapMinutes > 0 ||
-                          totals.outsideSessionMinutes > 0 ||
-                          totals.unpositionedMinutes > 0) ? (
-                          <div className="mt-3 rounded-lg border border-amber-300/70 bg-amber-50 p-3 text-xs text-amber-950">
-                            <p className="font-semibold">Break placement warnings</p>
-                            <ul className="mt-1 list-disc space-y-1 pl-4">
-                              {totals.scheduledBreakOverlapMinutes > 0 ? (
-                                <li>{totals.scheduledBreakOverlapMinutes} min overlaps scheduled tutoring.</li>
-                              ) : null}
-                              {totals.outsideSessionMinutes > 0 ? (
-                                <li>{totals.outsideSessionMinutes} min falls outside recorded sessions and was not deducted.</li>
-                              ) : null}
-                              {totals.unpositionedMinutes > 0 ? (
-                                <li>{totals.unpositionedMinutes} min has no start/end time and was not deducted.</li>
-                              ) : null}
-                            </ul>
-                          </div>
-                        ) : null}
-                      </>
-                    );
-                  })()}
-                </div>
-
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-lg border bg-white p-4">
-                    <p className="font-semibold text-slate-900">Scheduled blocks</p>
-                    <div className="mt-2 space-y-2">
-                      {parseSnapshotIntervals(selectedDay.scheduleSnapshot).length ? (
-                        parseSnapshotIntervals(selectedDay.scheduleSnapshot).map((i) => (
-                          <Badge key={`${i.startAt}-${i.endAt}`} variant="secondary">
-                            {DateTime.fromISO(i.startAt, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')} -{' '}
-                            {DateTime.fromISO(i.endAt, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')}
-                          </Badge>
-                        ))
-                      ) : (
-                        <p className="text-xs text-muted-foreground">No schedule snapshot available.</p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border bg-white p-4">
-                    <p className="font-semibold text-slate-900">Entered sessions</p>
-                    <div className="mt-2 space-y-2">
-                      {selectedDay.sessions?.length ? (
-                        selectedDay.sessions.map((s) => (
-                          <Badge key={`${s.startAt}-${s.endAt}-${s.sortOrder}`} variant="muted">
-                            {DateTime.fromISO(s.startAt, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')} -{' '}
-                            {DateTime.fromISO(s.endAt, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')}
-                          </Badge>
-                        ))
-                      ) : (
-                        <p className="text-xs text-muted-foreground">No sessions found.</p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-white p-4">
-                  <p className="font-semibold text-slate-900">Breaks</p>
-                  <div className="mt-3 grid gap-2 md:grid-cols-4">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Gross time</p>
-                      <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.grossMinutes ?? 0)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Paid break overlap</p>
-                      <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.paidBreakMinutes ?? 0)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Unpaid break overlap</p>
-                      <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Paid time</p>
-                      <p className="font-semibold text-slate-900">{formatMinutes(selectedDay.breakSummary?.paidMinutes ?? 0)}</p>
-                    </div>
-                  </div>
-                  <div className="mt-3 space-y-2">
-                    {selectedDay.breaks?.length ? (
-                      selectedDay.breaks.map((item) => (
-                        <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 p-3">
-                          <div>
-                            <p className="font-medium capitalize text-slate-900">{item.breakType.replace('_', ' ')}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {item.startTime && item.endTime
-                                ? `${DateTime.fromISO(item.startTime, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')} - ${DateTime.fromISO(item.endTime, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')}`
-                                : 'Duration-only'}{' '}
-                              · {formatBreakSource(item.source)}
-                            </p>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant={item.payTreatment === 'paid' ? 'success' : 'warning'}>{item.payTreatment}</Badge>
-                            <Badge variant={item.status === 'voided' ? 'muted' : item.status === 'active' ? 'warning' : 'secondary'}>
-                              {item.status}
-                            </Badge>
-                            <span className="font-semibold text-slate-900">{formatMinutes(item.durationMinutes)}</span>
-                            {item.status === 'completed' ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => startManagerBreakEdit(selectedDay, item, { closeReview: true })}
-                                disabled={actingId === selectedDay.id}
-                              >
-                                Edit
-                              </Button>
-                            ) : null}
-                            {item.status !== 'voided' ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => void voidManagerBreak(selectedDay, item.id)}
-                                disabled={actingId === selectedDay.id}
-                              >
-                                Void
-                              </Button>
-                            ) : null}
-                          </div>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-xs text-muted-foreground">No breaks recorded.</p>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap justify-end gap-2">
-                  <Button variant="outline" onClick={() => setSelectedDay(null)}>
-                    Close
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      openFixDialog(selectedDay);
-                      setSelectedDay(null);
-                    }}
-                    disabled={actingId === selectedDay.id}
-                  >
-                    Fix time errors
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setDenyDialog({ type: 'timeentry', day: selectedDay });
-                      setDenyReason('');
-                    }}
-                    disabled={actingId === selectedDay.id}
-                  >
-                    Deny
-                  </Button>
-                  <Button onClick={() => void handleApproveTimeEntry(selectedDay)} disabled={actingId === selectedDay.id}>
-                    Approve
-                  </Button>
-                </div>
-              </div>
-            </>
-          ) : null}
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={Boolean(fixDay)}
-        onOpenChange={(open) => {
-          if (!open) {
-            setFixDay(null);
-            resetBreakEditor();
-          }
-        }}
-      >
-        <DialogContent className="max-h-[85vh] overflow-y-auto">
-          {fixDay ? (
-            <>
-              <DialogHeader>
-                <DialogTitle>Fix time errors – {formatWorkDate(fixDay.workDate)}</DialogTitle>
-                <DialogDescription>
-                  Adjust session times and provide a reason. Saving routes the day to pending approval.
-                </DialogDescription>
-              </DialogHeader>
-
-              <div className="space-y-4 text-sm">
-                {fixError ? <InlineError message={fixError} /> : null}
-
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm font-semibold text-slate-900">Sessions</p>
-                    <Badge variant="muted">Local time ({browserTimeZone})</Badge>
-                  </div>
-                  {fixSessions.map((row, idx) => (
-                    <div key={idx} className="flex flex-wrap items-end gap-2 rounded-lg border bg-white p-3">
-                      <div className="flex-1 min-w-[140px] space-y-2">
-                        <Label>Start</Label>
-                        <Input
-                          type="time"
-                          value={row.start}
-                          onChange={(e) =>
-                            setFixSessions((prev) => prev.map((s, i) => (i === idx ? { ...s, start: e.target.value } : s)))
-                          }
-                        />
-                      </div>
-                      <div className="flex-1 min-w-[140px] space-y-2">
-                        <Label>End</Label>
-                        <Input
-                          type="time"
-                          value={row.end}
-                          onChange={(e) =>
-                            setFixSessions((prev) => prev.map((s, i) => (i === idx ? { ...s, end: e.target.value } : s)))
-                          }
-                        />
-                      </div>
-                      <Button
-                        variant="outline"
-                        onClick={() => setFixSessions((prev) => prev.filter((_, i) => i !== idx))}
-                        disabled={fixSessions.length <= 1}
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  ))}
-                  <Button variant="outline" onClick={() => setFixSessions((prev) => [...prev, { start: '', end: '' }])}>
-                    Add segment
-                  </Button>
-                </div>
-
-                <div className="space-y-3 rounded-lg border bg-white p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm font-semibold text-slate-900">Breaks</p>
-                    <Badge variant="muted">
-                      Paid time {formatMinutes(fixDay.breakSummary?.paidMinutes ?? 0)}
-                    </Badge>
-                  </div>
-                  <div className="grid gap-2 md:grid-cols-4">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Gross time</p>
-                      <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.grossMinutes ?? 0)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Paid break overlap</p>
-                      <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.paidBreakMinutes ?? 0)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Unpaid break overlap</p>
-                      <p className="font-semibold text-slate-900">{formatMinutes(fixDay.breakSummary?.unpaidBreakMinutes ?? 0)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Break events</p>
-                      <p className="font-semibold text-slate-900">{fixDay.breaks?.length ?? 0}</p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    {fixDay.breaks?.length ? (
-                      fixDay.breaks.map((item) => (
-                        <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 p-3">
-                          <div>
-                            <p className="font-medium capitalize text-slate-900">{item.breakType.replace('_', ' ')}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {item.startTime && item.endTime
-                                ? `${DateTime.fromISO(item.startTime, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')} - ${DateTime.fromISO(item.endTime, { setZone: true }).setZone(browserTimeZone).toFormat('h:mm a')}`
-                                : 'Duration-only'}{' '}
-                              · {formatBreakSource(item.source)}
-                            </p>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant={item.payTreatment === 'paid' ? 'success' : 'warning'}>{item.payTreatment}</Badge>
-                            <Badge variant={item.status === 'voided' ? 'muted' : item.status === 'active' ? 'warning' : 'secondary'}>
-                              {item.status}
-                            </Badge>
-                            <span className="font-semibold text-slate-900">{formatMinutes(item.durationMinutes)}</span>
-                            {item.status === 'completed' ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => startManagerBreakEdit(fixDay, item)}
-                                disabled={actingId === fixDay.id}
-                              >
-                                Edit
-                              </Button>
-                            ) : null}
-                            {item.status !== 'voided' ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => void voidManagerBreak(fixDay, item.id)}
-                                disabled={actingId === fixDay.id}
-                              >
-                                Void
-                              </Button>
-                            ) : null}
-                          </div>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-xs text-muted-foreground">No breaks recorded.</p>
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm font-semibold text-slate-900">
-                      {editingBreakId === null ? 'Add break' : 'Edit break'}
-                    </p>
-                    {editingBreakId !== null ? <Badge variant="muted">Break #{editingBreakId}</Badge> : null}
-                  </div>
-
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label>Type</Label>
-                      <select
-                        value={breakDraft.breakType}
-                        onChange={(e) =>
-                          setBreakDraft((prev) => ({ ...prev, breakType: e.target.value as TimeEntryBreakType }))
-                        }
-                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm"
-                      >
-                        <option value="lunch">Lunch</option>
-                        <option value="rest_break">Rest break</option>
-                        <option value="personal">Personal</option>
-                        <option value="training">Training</option>
-                        <option value="travel">Travel</option>
-                        <option value="other">Other</option>
-                      </select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Pay</Label>
-                      <select
-                        value={breakDraft.payTreatment}
-                        onChange={(e) =>
-                          setBreakDraft((prev) => ({ ...prev, payTreatment: e.target.value as TimeEntryBreakPayTreatment }))
-                        }
-                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm"
-                      >
-                        <option value="unpaid">Unpaid</option>
-                        <option value="paid">Paid</option>
-                      </select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Start</Label>
-                      <Input
-                        type="time"
-                        value={breakDraft.start}
-                        onChange={(e) => setBreakDraft((prev) => ({ ...prev, start: e.target.value }))}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>End</Label>
-                      <Input
-                        type="time"
-                        value={breakDraft.end}
-                        onChange={(e) => setBreakDraft((prev) => ({ ...prev, end: e.target.value }))}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Duration minutes</Label>
-                      <Input
-                        inputMode="numeric"
-                        value={breakDraft.duration}
-                        onChange={(e) => setBreakDraft((prev) => ({ ...prev, duration: e.target.value }))}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Note</Label>
-                      <Input
-                        value={breakDraft.note}
-                        onChange={(e) => setBreakDraft((prev) => ({ ...prev, note: e.target.value }))}
-                      />
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" onClick={() => void saveManagerBreak()} disabled={actingId === fixDay.id}>
-                      {editingBreakId === null ? 'Add Break' : 'Save Break'}
-                    </Button>
-                    {editingBreakId !== null ? (
-                      <Button variant="ghost" onClick={resetBreakEditor} disabled={actingId === fixDay.id}>
-                        Cancel Edit
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label requiredMark>Reason</Label>
-                  <Textarea
-                    placeholder="Why are you changing this day? (required)"
-                    value={fixReason}
-                    onChange={(e) => setFixReason(e.target.value)}
-                    className="min-h-[100px]"
-                  />
-                  <p className="text-xs text-muted-foreground">Minimum 5 characters.</p>
-                </div>
-
-                <div className="flex flex-wrap justify-end gap-2">
-                  <Button variant="outline" onClick={() => setFixDay(null)} disabled={actingId === fixDay.id}>
-                    Cancel
-                  </Button>
-                  <Button onClick={() => void saveFix()} disabled={actingId === fixDay.id}>
-                    {actingId === fixDay.id ? 'Saving…' : 'Save fix'}
-                  </Button>
-                </div>
-              </div>
-            </>
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      {reviewDetail && <TimeEntryReviewDialog key={reviewDetail.revision} detail={reviewDetail} onClose={() => setReviewDetail(null)} onReturnFocus={restoreEntryFocus}
+        onAction={action => { setCorrectionTarget({ action, detail: reviewDetail }); setReviewDetail(null); }} />}
+      <TimeEntryCorrectionDialog target={correctionTarget} onClose={() => { setCorrectionTarget(null); setCorrectionDirty(false); }}
+        onCommitted={onEntryCommitted} onDirtyChange={setCorrectionDirty} onReturnFocus={restoreEntryFocus} />
+      {correctionDirty && <span className="sr-only" aria-live="polite">Time entry has unsaved changes.</span>}
     </div>
   );
 }

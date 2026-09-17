@@ -286,7 +286,7 @@ export const acquireProductionLockAndCandidates = async (pool: Pool): Promise<{
       JOIN public.franchise_payroll_settings settings
         ON settings.franchiseid = day.franchiseid
        AND settings.auto_clock_out_enabled = TRUE
-      WHERE day.clock_state = 1
+      WHERE day.clock_state = 1 AND day.status <> 'voided'
         AND day.work_date IN (
           (NOW() AT TIME ZONE settings.timezone)::date,
           ((NOW() AT TIME ZONE settings.timezone)::date - 1)
@@ -369,7 +369,7 @@ const normalizeDayRow = (row: RuntimeRow): TimeEntryDayRow => {
   const timezone = typeof row.timezone === 'string' ? row.timezone.trim() : '';
   const status = row.status;
   if (!id || !franchiseid || !tutorid || !workDate || !timezone) throw new Error('invalid_day');
-  if (status !== 'draft' && status !== 'pending' && status !== 'approved' && status !== 'denied') {
+  if (status !== 'draft' && status !== 'pending' && status !== 'approved' && status !== 'denied' && status !== 'voided') {
     throw new Error('invalid_day_status');
   }
   return {
@@ -460,6 +460,10 @@ export const finalizeProductionCandidate = async (
       return { kind: 'setting_disabled' };
     }
     const day = normalizeDayRow(dayRow);
+    if (day.status === 'voided') {
+      await client.query('ROLLBACK');
+      return { kind: 'already_closed' };
+    }
 
     const sessionResult = await client.query<RuntimeRow>(
       `SELECT id, start_at

@@ -75,6 +75,7 @@ export function ClockWidget(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
+  const [reopenConfirmation, setReopenConfirmation] = useState<{ auditId: number; workDate: string } | null>(null);
   const [breakType, setBreakType] = useState<TimeEntryBreakType>('lunch');
   const mountedRef = useRef(true);
   const stateGenerationRef = useRef(0);
@@ -199,7 +200,9 @@ export function ClockWidget(): JSX.Element {
           ? 'Pending Approval'
           : state.dayStatus === 'denied'
             ? 'Denied'
-            : 'Draft';
+            : state.dayStatus === 'voided'
+              ? 'Voided'
+              : 'Draft';
     return (
       <Badge variant={variant}>
         {label}
@@ -207,11 +210,22 @@ export function ClockWidget(): JSX.Element {
     );
   }, [state?.dayStatus]);
 
-  const toggle = async () => {
-    if (!state) return;
+  const toggle = async (reopenVoidedAuditId?: number) => {
+    if (!state || acting) return;
 
     if (state.attestationBlocking) {
       requestOpenWeeklyAttestation();
+      return;
+    }
+
+    if (state.dayStatus === 'voided' && reopenVoidedAuditId === undefined) {
+      if (state.voidedAuditId) setReopenConfirmation({ auditId: state.voidedAuditId, workDate: state.workDate });
+      return;
+    }
+    if (reopenVoidedAuditId !== undefined && (state.dayStatus !== 'voided' || state.voidedAuditId !== reopenVoidedAuditId)) {
+      setReopenConfirmation(null);
+      toast.error('This day changed. Reload it before starting a replacement session.');
+      await load();
       return;
     }
 
@@ -219,7 +233,7 @@ export function ClockWidget(): JSX.Element {
     setActing(true);
     try {
       if (state.clockState === 0) {
-        const next = await clockIn();
+        const next = await clockIn(reopenVoidedAuditId === undefined ? undefined : { reopenVoidedAuditId });
         replaceState(next);
         toast.success('Clocked in.');
         return;
@@ -258,6 +272,7 @@ export function ClockWidget(): JSX.Element {
       }
       await load();
     } finally {
+      setReopenConfirmation(null);
       setActing(false);
     }
   };
@@ -346,6 +361,12 @@ export function ClockWidget(): JSX.Element {
                   This time was automatically submitted for director approval because it falls outside scheduled hours.
                 </p>
               ) : null}
+              {state?.dayStatus === 'voided' ? (
+                <p className="mt-1 text-sm text-muted-foreground">
+                  This entry was voided by an admin and is excluded from totals. You can start a replacement session;
+                  the old hours stay excluded and are kept in history.
+                </p>
+              ) : null}
             </div>
 
             <div className="flex flex-wrap gap-2">
@@ -355,13 +376,13 @@ export function ClockWidget(): JSX.Element {
                 </Button>
               ) : null}
 
-              <Button onClick={() => void toggle()} disabled={loading || acting || !state || state.attestationBlocking}>
+              <Button onClick={() => void toggle()} disabled={loading || acting || !state || state.attestationBlocking || (state.dayStatus === 'voided' && !state.voidedAuditId)}>
                 {acting ? 'Working…' : state?.clockState === 1 ? 'Clock Out' : 'Clock In'}
               </Button>
             </div>
           </div>
 
-          {state?.clockState === 1 ? (
+          {state?.clockState === 1 && state.dayStatus !== 'voided' ? (
             <div className="rounded-lg border bg-muted/30 p-3">
               <div className="flex flex-col gap-2 md:flex-row md:items-end">
                 <div className="min-w-[180px] flex-1 space-y-1">
@@ -435,6 +456,25 @@ export function ClockWidget(): JSX.Element {
           ) : null}
         </CardContent>
       </Card>
+
+      <Dialog open={Boolean(reopenConfirmation)} onOpenChange={open => { if (!open && !acting) setReopenConfirmation(null); }}>
+        <DialogContent onOpenAutoFocus={event => { event.preventDefault(); document.getElementById('keep-voided-time')?.focus(); }}>
+          <DialogHeader>
+            <DialogTitle>Start a replacement session?</DialogTitle>
+            <DialogDescription>
+              This replaces the voided time for {reopenConfirmation?.workDate}. The old sessions and breaks stay
+              excluded from totals and are preserved in audit history. Your new session starts pending and uses
+              the normal approval checks when you clock out.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button id="keep-voided-time" variant="outline" disabled={acting} onClick={() => setReopenConfirmation(null)}>Keep voided</Button>
+            <Button disabled={acting || !reopenConfirmation} onClick={() => {
+              if (reopenConfirmation) void toggle(reopenConfirmation.auditId);
+            }}>{acting ? 'Starting…' : 'Start new session'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={promptOpen} onOpenChange={setPromptOpen}>
         <DialogContent>

@@ -61,16 +61,19 @@ type ClockOutHarnessOptions = {
   timezone?: string;
   workDate?: string;
   missingAttestationWeekEnd?: string;
+  clockInTimeSnapEnabled?: boolean;
+  detectedEndAt?: string;
+  sessionStart?: string;
 };
 
 const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
   const timezone = options.timezone ?? 'UTC';
   const workDate = options.workDate ?? DateTime.now().setZone(timezone).toISODate();
   assert.ok(workDate);
-  const targetEndAt = `${workDate}T14:00:00.000Z`;
-  const sessionStart = options.futureSession
+  const targetEndAt = options.detectedEndAt ?? `${workDate}T14:00:00.000Z`;
+  const sessionStart = options.sessionStart ?? (options.futureSession
     ? `${workDate}T14:01:00.000Z`
-    : `${workDate}T08:00:00.000Z`;
+    : `${workDate}T08:00:00.000Z`);
   const scheduleSnapshot = {
     version: 1 as const,
     franchiseId: 7,
@@ -119,6 +122,8 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
   const queries: string[] = [];
   const transactions: string[] = [];
   const mutations: string[] = [];
+  let savedEndAt: string | null = null;
+  const clockOutAudits: Array<Record<string, unknown>> = [];
 
   const client = {
     async query(sqlText: string, params: unknown[] = []) {
@@ -126,6 +131,14 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
       if (sqlText === 'BEGIN' || sqlText === 'COMMIT' || sqlText === 'ROLLBACK') {
         transactions.push(sqlText);
         return { rowCount: 0, rows: [] };
+      }
+      if (sqlText.includes('FROM public.franchise_payroll_settings')) {
+        assert.deepEqual(params, [7]);
+        return { rowCount: 1, rows: [{
+          franchiseid: 7, auto_clock_out_enabled: false,
+          clock_in_time_snap_enabled: options.clockInTimeSnapEnabled ?? false,
+          time_off_notice_required: true
+        }] };
       }
       if (sqlText.includes('FROM public.weekly_attestations')) {
         return params[2] === options.missingAttestationWeekEnd
@@ -147,6 +160,7 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
       }
       if (sqlText.includes('UPDATE public.time_entry_sessions')) {
         if (options.loseCloseRace) return { rowCount: 0, rows: [] };
+        savedEndAt = String(params[0]);
         return { rowCount: 1, rows: [{ id: openSession?.id, start_at: sessionStart, end_at: params[0] }] };
       }
       if (sqlText.includes('UPDATE public.time_entry_days') && sqlText.includes('SET clock_state = 0')) {
@@ -159,7 +173,7 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
           rows: [{
             id: openSession?.id ?? 66,
             start_at: sessionStart,
-            end_at: options.invalidClosedSession ? `${workDate}T07:59:00.000Z` : targetEndAt,
+            end_at: options.invalidClosedSession ? `${workDate}T07:59:00.000Z` : savedEndAt ?? targetEndAt,
             sort_order: 0
           }]
         };
@@ -182,6 +196,7 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
         return { rowCount: 1, rows: [{ ...day }] };
       }
       if (sqlText.includes('INSERT INTO public.time_entry_audit')) {
+        if (params[1] === 'clock_out') clockOutAudits.push(params[6] as Record<string, unknown>);
         return { rowCount: 1, rows: [] };
       }
       throw new Error(`Unexpected client query: ${sqlText}`);
@@ -223,7 +238,10 @@ const createClockOutHarness = (options: ClockOutHarnessOptions = {}) => {
     }
   } as never);
 
-  return { app: createApp(), queries, transactions, mutations, timezone, workDate, dayId: day.id };
+  return {
+    app: createApp(), queries, transactions, mutations, timezone, workDate, dayId: day.id,
+    savedEndAt: () => savedEndAt, clockOutAudits, savedComparison: () => day.comparison
+  };
 };
 
 test('clock state resolves timezone without querying pay-period overrides', async () => {
@@ -319,6 +337,12 @@ test('clock out leaves a six-hour day fully paid when the tutor records no lunch
 
       if (sqlText === 'BEGIN' || sqlText === 'COMMIT' || sqlText === 'ROLLBACK') {
         return { rowCount: 0, rows: [] };
+      }
+      if (sqlText.includes('FROM public.franchise_payroll_settings')) {
+        return { rowCount: 1, rows: [{
+          franchiseid: 7, auto_clock_out_enabled: false,
+          clock_in_time_snap_enabled: false, time_off_notice_required: true
+        }] };
       }
       if (sqlText.includes('FROM public.weekly_attestations')) {
         return { rowCount: 1, rows: [{ exists: 1 }] };
@@ -446,6 +470,7 @@ test('clock out leaves a six-hour day fully paid when the tutor records no lunch
       workDate,
       dayId: baseDay.id,
       dayStatus: 'approved',
+      voidedAuditId: null,
       clockState: 0,
       persistedClockState: 0,
       openSessionId: null,
@@ -469,6 +494,91 @@ test('clock out leaves a six-hour day fully paid when the tutor records no lunch
   assert.equal(auditActions.includes('auto_break_applied'), false);
   assert.equal(clockOutAuditMetadata[0]?.source, 'clock_out');
   assert.equal(typeof clockOutAuditMetadata[0]?.detectedAt, 'string');
+});
+
+test('Time Snap applies quarter-hour rounding to saved clock-outs, totals, and audit metadata', async (t) => {
+  const cases = [
+    ['14:00', '14:00', 360, false],
+    ['14:07', '14:00', 360, true],
+    ['14:08', '14:15', 375, true],
+    ['14:22', '14:15', 375, true],
+    ['14:23', '14:30', 390, true],
+    ['14:37', '14:30', 390, true],
+    ['14:38', '14:45', 405, true],
+    ['14:52', '14:45', 405, true],
+    ['14:53', '15:00', 420, true]
+  ] as const;
+
+  for (const [detected, rounded, minutes, applied] of cases) {
+    await t.test(`${detected} becomes ${rounded}`, async () => {
+      const detectedEndAt = `2026-09-15T${detected}:00.000Z`;
+      const expectedEndAt = `2026-09-15T${rounded}:00.000Z`;
+      const harness = createClockOutHarness({
+        workDate: '2026-09-15', clockInTimeSnapEnabled: true, detectedEndAt
+      });
+      await withServer(harness.app, async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/api/clock/me/out`, { method: 'POST' });
+        assert.equal(response.status, 200, JSON.stringify(await response.json()));
+      });
+      assert.equal(harness.savedEndAt(), expectedEndAt);
+      const comparison = harness.savedComparison() as { manual: { paidMinutes: number } };
+      assert.equal(comparison.manual.paidMinutes, minutes);
+      assert.equal(harness.clockOutAudits[0]?.detectedAt, detectedEndAt);
+      assert.equal(harness.clockOutAudits[0]?.endedAt, expectedEndAt);
+      assert.equal(harness.clockOutAudits[0]?.timeSnapApplied, applied);
+      assert.equal(harness.clockOutAudits[0]?.snapTargetAt, applied ? expectedEndAt : null);
+      assert.equal(harness.transactions[harness.transactions.length - 1], 'COMMIT');
+    });
+  }
+});
+
+test('disabled Time Snap preserves the actual clock-out minute and total', async () => {
+  const harness = createClockOutHarness({
+    workDate: '2026-09-15', clockInTimeSnapEnabled: false,
+    detectedEndAt: '2026-09-15T14:08:00.000Z'
+  });
+  await withServer(harness.app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/clock/me/out`, { method: 'POST' });
+    assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  });
+  assert.equal(harness.savedEndAt(), '2026-09-15T14:08:00.000Z');
+  const comparison = harness.savedComparison() as { manual: { paidMinutes: number } };
+  assert.equal(comparison.manual.paidMinutes, 368);
+  assert.equal(harness.clockOutAudits[0]?.timeSnapApplied, false);
+  assert.equal(harness.clockOutAudits[0]?.snapTargetAt, null);
+});
+
+test('clock-out snapping across local midnight keeps the original entry day', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-09-16T06:53:45.000Z') });
+  const harness = createClockOutHarness({
+    workDate: '2026-09-15', timezone: 'America/Los_Angeles', clockInTimeSnapEnabled: true,
+    detectedEndAt: '2026-09-16T06:53:00.000Z'
+  });
+  await withServer(harness.app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/clock/me/out`, { method: 'POST' });
+    const body = await response.json() as { state?: { workDate?: string }; error?: string };
+    assert.equal(response.status, 200, body.error);
+    assert.equal(body.state?.workDate, '2026-09-15');
+  });
+  assert.equal(harness.savedEndAt(), '2026-09-16T07:00:00.000Z');
+});
+
+test('snapping cannot close a zero-length session or permit clock-out before the actual start', async (t) => {
+  for (const [detected, start] of [['14:02', '14:00'], ['14:02', '14:01'], ['14:08', '14:10']] as const) {
+    await t.test(`detected ${detected}, start ${start}`, async () => {
+      const harness = createClockOutHarness({
+        workDate: '2026-09-15', clockInTimeSnapEnabled: true,
+        detectedEndAt: `2026-09-15T${detected}:00.000Z`,
+        sessionStart: `2026-09-15T${start}:00.000Z`
+      });
+      await withServer(harness.app, async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/api/clock/me/out`, { method: 'POST' });
+        assert.equal(response.status, 409);
+      });
+      assert.deepEqual(harness.mutations, []);
+      assert.equal(harness.transactions[harness.transactions.length - 1], 'ROLLBACK');
+    });
+  }
 });
 
 test('manual active break takes precedence over a missing snapshot without mutation', async () => {
@@ -505,6 +615,7 @@ test('no open session repairs stale clock state without requiring a snapshot', a
       workDate: harness.workDate,
       dayId: harness.dayId,
       dayStatus: 'draft',
+      voidedAuditId: null,
       clockState: 0,
       persistedClockState: 0,
       openSessionId: null,

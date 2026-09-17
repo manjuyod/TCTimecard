@@ -1,3 +1,6 @@
+import type { TimeEntryStatus } from '../types/timeEntry';
+import { assertDayNotVoided } from '../services/timeEntryMutationGuard';
+import { appendTutorReopenAudit, parseReopenVoidedAuditId, prepareTutorReopen, tutorReopenErrorHandler } from '../services/tutorTimeEntryReopen';
 import express, { NextFunction, Request, Response } from 'express';
 import type { PoolClient } from 'pg';
 import { DateTime } from 'luxon';
@@ -28,7 +31,6 @@ import {
 } from '../services/timeEntryBreaks';
 import { computeTimeAllocation } from '../services/timeAllocation';
 
-type TimeEntryStatus = 'draft' | 'pending' | 'approved' | 'denied';
 
 type TimeEntryDayRow = {
   id: number;
@@ -37,6 +39,7 @@ type TimeEntryDayRow = {
   work_date: string;
   timezone: string;
   status: TimeEntryStatus;
+  voided_audit_id?: number | null;
   schedule_snapshot: unknown | null;
   comparison: unknown | null;
   submitted_at: string | null;
@@ -182,7 +185,9 @@ const fetchDayByWorkDate = async (
   client: PoolClient,
   franchiseId: number,
   tutorId: number,
-  workDate: string
+  workDate: string,
+  lock = false,
+  allowVoided = false
 ): Promise<TimeEntryDayRow | null> => {
   const result = await client.query<TimeEntryDayRow>(
     `
@@ -206,11 +211,14 @@ const fetchDayByWorkDate = async (
         AND tutorid = $2
         AND work_date = $3
       LIMIT 1
+      ${lock ? 'FOR UPDATE' : ''}
     `,
     [franchiseId, tutorId, workDate]
   );
 
-  return result.rowCount ? result.rows[0] : null;
+  const day = result.rowCount ? result.rows[0] : null;
+  if (lock && !allowVoided) assertDayNotVoided(day);
+  return day;
 };
 
 const fetchSessionsByDayId = async (client: PoolClient, dayId: number): Promise<TimeEntrySessionRow[]> => {
@@ -346,6 +354,7 @@ const mapDayRowToResponse = (
   workDate: normalizeWorkDate(day.work_date) ?? String(day.work_date ?? ''),
   timezone: day.timezone,
   status: day.status,
+  voidedAuditId: day.status === 'voided' ? day.voided_audit_id ?? null : null,
   scheduleSnapshot: day.schedule_snapshot,
   comparison: computeComparisonForDay(day, sessions, breaks) ?? day.comparison,
   submittedAt: day.submitted_at ? new Date(day.submitted_at).toISOString() : null,
@@ -520,41 +529,6 @@ const insertBreak = async (
   return inserted.rows[0];
 };
 
-const fetchBreakForDay = async (
-  client: PoolClient,
-  dayId: number,
-  breakId: number
-): Promise<TimeEntryBreakRow | null> => {
-  const result = await client.query<TimeEntryBreakRow>(
-    `
-      SELECT
-        id,
-        entry_day_id,
-        time_entry_session_id,
-        franchiseid,
-        tutorid,
-        break_type,
-        pay_treatment,
-        start_time,
-        end_time,
-        duration_minutes,
-        source,
-        status,
-        note,
-        created_at,
-        updated_at
-      FROM public.time_entry_breaks
-      WHERE id = $1
-        AND entry_day_id = $2
-      LIMIT 1
-      FOR UPDATE
-    `,
-    [breakId, dayId]
-  );
-
-  return result.rowCount ? result.rows[0] : null;
-};
-
 const updateDayAfterBreakMutation = async (
   client: PoolClient,
   day: TimeEntryDayRow,
@@ -654,7 +628,9 @@ router.get(
             decided_at,
             decision_reason,
             created_at,
-            updated_at
+            updated_at,
+            (SELECT MAX(a.id) FROM public.time_entry_audit a
+              WHERE a.entry_day_id=time_entry_days.id AND a.action='admin_voided') AS voided_audit_id
           FROM public.time_entry_days
           WHERE franchiseid = $1
             AND tutorid = $2
@@ -728,6 +704,11 @@ router.put(
     }
 
     try {
+      const reopenVoidedAuditId = parseReopenVoidedAuditId((req.body as Record<string, unknown>)?.reopenVoidedAuditId);
+      if (reopenVoidedAuditId !== null && sessionsRaw.length === 0) {
+        res.status(400).json({ error: 'Enter replacement sessions before reopening this day.', code: 'INVALID_INPUT' });
+        return;
+      }
       const payPeriod = await resolvePayPeriod(context.franchiseId, workDate);
       const timezone = payPeriod.timezone;
 
@@ -804,7 +785,11 @@ router.put(
       try {
         await client.query('BEGIN');
 
-        const existing = await fetchDayByWorkDate(client, context.franchiseId, context.tutorId, workDate);
+        let existing = await fetchDayByWorkDate(client, context.franchiseId, context.tutorId, workDate, true, reopenVoidedAuditId !== null);
+        const reopening = reopenVoidedAuditId !== null ? await prepareTutorReopen(client, {
+          ...context, workDate, dayId: existing?.id ?? 0, voidAuditId: reopenVoidedAuditId
+        }) : null;
+        if (reopening) existing = await fetchDayByWorkDate(client, context.franchiseId, context.tutorId, workDate, true);
         const previousSessions = existing ? await fetchSessionsByDayId(client, existing.id) : [];
         const existingBreaks = existing ? await fetchBreaksByDayId(client, existing.id) : [];
 
@@ -846,6 +831,7 @@ router.put(
               INSERT INTO public.time_entry_days
                 (franchiseid, tutorid, work_date, timezone, status, created_at, updated_at)
               VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+              ON CONFLICT (franchiseid, tutorid, work_date) DO NOTHING
               RETURNING
                 id,
                 franchiseid,
@@ -864,6 +850,11 @@ router.put(
             `,
             [context.franchiseId, context.tutorId, workDate, timezone, newStatus]
           );
+          if (!inserted.rowCount) {
+            await client.query('ROLLBACK');
+            res.status(409).json({ error: 'This entry was created while you were editing; reload the entry.', code: 'ENTRY_CHANGED' });
+            return;
+          }
           day = inserted.rows[0];
         } else {
           const updated = await client.query<TimeEntryDayRow>(
@@ -930,6 +921,8 @@ router.put(
             sessions: normalizedSessions.map((s) => ({ startAt: s.startAt, endAt: s.endAt, sortOrder: s.sortOrder }))
           }
         });
+
+        if (reopening) await appendTutorReopenAudit(client, reopening, 'manual_entry');
 
         await client.query('COMMIT');
 
@@ -1018,7 +1011,7 @@ router.post(
       try {
         await client.query('BEGIN');
 
-        const existing = await fetchDayByWorkDate(client, context.franchiseId, context.tutorId, workDate);
+        const existing = await fetchDayByWorkDate(client, context.franchiseId, context.tutorId, workDate, true);
         if (!existing) {
           await client.query('ROLLBACK');
           notFound(res);
@@ -1161,7 +1154,7 @@ router.post(
       try {
         await client.query('BEGIN');
 
-        const day = await fetchDayByWorkDate(client, context.franchiseId, context.tutorId, workDate);
+        const day = await fetchDayByWorkDate(client, context.franchiseId, context.tutorId, workDate, true);
         if (!day) {
           await client.query('ROLLBACK');
           notFound(res);
@@ -1215,455 +1208,20 @@ router.post(
   }
 );
 
-router.post(
-  '/time-entry/admin/day/:id/breaks',
-  requireAdmin,
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const admin = getAdminContext(req);
-    if (!admin) {
-      res.status(401).json({ error: 'Not authenticated' });
-      return;
-    }
-
-    const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
-    if (scope.error || scope.franchiseId === null) {
-      res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
-      return;
-    }
-
-    const dayId = parseIdParam((req.params as Record<string, unknown>).id);
-    if (!dayId) {
-      res.status(400).json({ error: 'id must be a positive integer' });
-      return;
-    }
-
-    const parsed = parseBreakPayload((req.body as Record<string, unknown>) ?? {}, { requireWindowOrDuration: true });
-    if (!parsed.ok) {
-      res.status(400).json({ error: parsed.error });
-      return;
-    }
-
-    try {
-      const pool = getPostgresPool();
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-
-        const existingResult = await client.query<TimeEntryDayRow>(
-          `
-            SELECT
-              id,
-              franchiseid,
-              tutorid,
-              work_date,
-              timezone,
-              status,
-              schedule_snapshot,
-              comparison,
-              submitted_at,
-              decided_by,
-              decided_at,
-              decision_reason,
-              created_at,
-              updated_at
-            FROM public.time_entry_days
-            WHERE id = $1
-              AND franchiseid = $2
-            LIMIT 1
-            FOR UPDATE
-          `,
-          [dayId, scope.franchiseId]
-        );
-
-        if (!existingResult.rowCount) {
-          await client.query('ROLLBACK');
-          notFound(res);
-          return;
-        }
-
-        const day = existingResult.rows[0];
-        const sessions = await fetchSessionsByDayId(client, day.id);
-        const existingBreaks = await fetchBreaksByDayId(client, day.id);
-
-        let sessionId: number | null = null;
-        let durationMinutes: number;
-        if (parsed.payload.startTime && parsed.payload.endTime) {
-          const resolved = resolveBreakSession(sessions, parsed.payload, existingBreaks);
-          if (!resolved.ok) {
-            await client.query('ROLLBACK');
-            res.status(400).json({ error: resolved.error });
-            return;
-          }
-          sessionId = resolved.session.id;
-          durationMinutes = resolved.durationMinutes;
-        } else {
-          durationMinutes = parsed.payload.durationMinutes ?? 0;
-          if (durationMinutes <= 0) {
-            await client.query('ROLLBACK');
-            res.status(400).json({ error: 'durationMinutes is required for duration-only breaks.' });
-            return;
-          }
-        }
-
-        const inserted = await insertBreak(client, {
-          day,
-          sessionId,
-          payload: parsed.payload,
-          durationMinutes,
-          source: 'manager'
-        });
-        const nextBreaks = [...existingBreaks, inserted];
-        const updatedDay = await updateDayAfterBreakMutation(client, day, sessions, nextBreaks);
-
-        await appendAudit(client, {
-          dayId: day.id,
-          action: 'break_created',
-          actorAccountType: 'ADMIN',
-          actorAccountId: admin.adminId,
-          previousStatus: day.status,
-          newStatus: updatedDay.status,
-          metadata: {
-            break: mapBreakRowToResponse(inserted),
-            reason: typeof (req.body as Record<string, unknown>)?.reason === 'string'
-              ? String((req.body as Record<string, unknown>).reason).trim()
-              : null
-          }
-        });
-
-        await client.query('COMMIT');
-        res.status(201).json({ day: mapDayRowToResponse(updatedDay, sessions, nextBreaks) });
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => undefined);
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch (err) {
-      next(err);
-    }
+const requireCorrectionEditor = (req: Request, res: Response): void => {
+  const scope = enforceFranchiseScope(req, { requireFranchiseId: true });
+  if (scope.error || scope.franchiseId === null) {
+    res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
+    return;
   }
-);
+  res.status(409).json({ code: 'ADMIN_CORRECTION_REQUIRED', error: 'Reload the entry to use the correction editor.' });
+};
 
-router.put(
-  '/time-entry/admin/day/:id/breaks/:breakId',
-  requireAdmin,
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const admin = getAdminContext(req);
-    if (!admin) {
-      res.status(401).json({ error: 'Not authenticated' });
-      return;
-    }
+router.post('/time-entry/admin/day/:id/breaks', requireAdmin, requireCorrectionEditor);
 
-    const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
-    if (scope.error || scope.franchiseId === null) {
-      res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
-      return;
-    }
+router.put('/time-entry/admin/day/:id/breaks/:breakId', requireAdmin, requireCorrectionEditor);
 
-    const dayId = parseIdParam((req.params as Record<string, unknown>).id);
-    const breakId = parseIdParam((req.params as Record<string, unknown>).breakId);
-    if (!dayId || !breakId) {
-      res.status(400).json({ error: 'id and breakId must be positive integers' });
-      return;
-    }
-
-    try {
-      const pool = getPostgresPool();
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-
-        const dayResult = await client.query<TimeEntryDayRow>(
-          `
-            SELECT
-              id,
-              franchiseid,
-              tutorid,
-              work_date,
-              timezone,
-              status,
-              schedule_snapshot,
-              comparison,
-              submitted_at,
-              decided_by,
-              decided_at,
-              decision_reason,
-              created_at,
-              updated_at
-            FROM public.time_entry_days
-            WHERE id = $1
-              AND franchiseid = $2
-            LIMIT 1
-            FOR UPDATE
-          `,
-          [dayId, scope.franchiseId]
-        );
-        if (!dayResult.rowCount) {
-          await client.query('ROLLBACK');
-          notFound(res);
-          return;
-        }
-        const day = dayResult.rows[0];
-
-        const currentBreak = await fetchBreakForDay(client, day.id, breakId);
-        if (!currentBreak) {
-          await client.query('ROLLBACK');
-          notFound(res);
-          return;
-        }
-        if (currentBreak.status === 'voided') {
-          await client.query('ROLLBACK');
-          res.status(409).json({ error: 'Voided breaks cannot be edited.' });
-          return;
-        }
-
-        const body = (req.body as Record<string, unknown>) ?? {};
-        const mergedBody = {
-          breakType: body.breakType ?? body.break_type ?? currentBreak.break_type,
-          payTreatment: body.payTreatment ?? body.pay_treatment ?? currentBreak.pay_treatment,
-          startTime: body.startTime ?? body.start_time ?? (currentBreak.start_time ? new Date(currentBreak.start_time).toISOString() : null),
-          endTime: body.endTime ?? body.end_time ?? (currentBreak.end_time ? new Date(currentBreak.end_time).toISOString() : null),
-          durationMinutes: body.durationMinutes ?? body.duration_minutes ?? currentBreak.duration_minutes,
-          note: body.note ?? currentBreak.note,
-          timeEntrySessionId: body.timeEntrySessionId ?? body.time_entry_session_id ?? currentBreak.time_entry_session_id
-        };
-        const parsed = parseBreakPayload(mergedBody, { requireWindowOrDuration: true });
-        if (!parsed.ok) {
-          await client.query('ROLLBACK');
-          res.status(400).json({ error: parsed.error });
-          return;
-        }
-
-        const sessions = await fetchSessionsByDayId(client, day.id);
-        const existingBreaks = await fetchBreaksByDayId(client, day.id);
-
-        let sessionId: number | null = null;
-        let durationMinutes: number;
-        if (parsed.payload.startTime && parsed.payload.endTime) {
-          const resolved = resolveBreakSession(sessions, parsed.payload, existingBreaks, currentBreak.id);
-          if (!resolved.ok) {
-            await client.query('ROLLBACK');
-            res.status(400).json({ error: resolved.error });
-            return;
-          }
-          sessionId = resolved.session.id;
-          durationMinutes = resolved.durationMinutes;
-        } else {
-          durationMinutes = parsed.payload.durationMinutes ?? 0;
-          if (durationMinutes <= 0) {
-            await client.query('ROLLBACK');
-            res.status(400).json({ error: 'durationMinutes is required for duration-only breaks.' });
-            return;
-          }
-        }
-
-        const updatedBreakResult = await client.query<TimeEntryBreakRow>(
-          `
-            UPDATE public.time_entry_breaks
-            SET time_entry_session_id = $1,
-                break_type = $2,
-                pay_treatment = $3,
-                start_time = $4,
-                end_time = $5,
-                duration_minutes = $6,
-                status = 'completed',
-                note = $7,
-                updated_at = NOW()
-            WHERE id = $8
-              AND entry_day_id = $9
-            RETURNING
-              id,
-              entry_day_id,
-              time_entry_session_id,
-              franchiseid,
-              tutorid,
-              break_type,
-              pay_treatment,
-              start_time,
-              end_time,
-              duration_minutes,
-              source,
-              status,
-              note,
-              created_at,
-              updated_at
-          `,
-          [
-            sessionId,
-            parsed.payload.breakType,
-            parsed.payload.payTreatment,
-            parsed.payload.startTime,
-            parsed.payload.endTime,
-            durationMinutes,
-            parsed.payload.note,
-            currentBreak.id,
-            day.id
-          ]
-        );
-        const updatedBreak = updatedBreakResult.rows[0];
-        const nextBreaks = existingBreaks.map((item) => (item.id === updatedBreak.id ? updatedBreak : item));
-        const updatedDay = await updateDayAfterBreakMutation(client, day, sessions, nextBreaks);
-
-        await appendAudit(client, {
-          dayId: day.id,
-          action: 'break_updated',
-          actorAccountType: 'ADMIN',
-          actorAccountId: admin.adminId,
-          previousStatus: day.status,
-          newStatus: updatedDay.status,
-          metadata: {
-            previousBreak: mapBreakRowToResponse(currentBreak),
-            break: mapBreakRowToResponse(updatedBreak)
-          }
-        });
-
-        await client.query('COMMIT');
-        res.status(200).json({ day: mapDayRowToResponse(updatedDay, sessions, nextBreaks) });
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => undefined);
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
-router.post(
-  '/time-entry/admin/day/:id/breaks/:breakId/void',
-  requireAdmin,
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const admin = getAdminContext(req);
-    if (!admin) {
-      res.status(401).json({ error: 'Not authenticated' });
-      return;
-    }
-
-    const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
-    if (scope.error || scope.franchiseId === null) {
-      res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
-      return;
-    }
-
-    const dayId = parseIdParam((req.params as Record<string, unknown>).id);
-    const breakId = parseIdParam((req.params as Record<string, unknown>).breakId);
-    if (!dayId || !breakId) {
-      res.status(400).json({ error: 'id and breakId must be positive integers' });
-      return;
-    }
-
-    try {
-      const pool = getPostgresPool();
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-
-        const dayResult = await client.query<TimeEntryDayRow>(
-          `
-            SELECT
-              id,
-              franchiseid,
-              tutorid,
-              work_date,
-              timezone,
-              status,
-              schedule_snapshot,
-              comparison,
-              submitted_at,
-              decided_by,
-              decided_at,
-              decision_reason,
-              created_at,
-              updated_at
-            FROM public.time_entry_days
-            WHERE id = $1
-              AND franchiseid = $2
-            LIMIT 1
-            FOR UPDATE
-          `,
-          [dayId, scope.franchiseId]
-        );
-        if (!dayResult.rowCount) {
-          await client.query('ROLLBACK');
-          notFound(res);
-          return;
-        }
-        const day = dayResult.rows[0];
-        const currentBreak = await fetchBreakForDay(client, day.id, breakId);
-        if (!currentBreak) {
-          await client.query('ROLLBACK');
-          notFound(res);
-          return;
-        }
-
-        const voidedResult = await client.query<TimeEntryBreakRow>(
-          `
-            UPDATE public.time_entry_breaks
-            SET status = 'voided',
-                source = CASE WHEN source = 'auto_rule' THEN source ELSE 'manager' END,
-                note = COALESCE($1, note),
-                updated_at = NOW()
-            WHERE id = $2
-              AND entry_day_id = $3
-            RETURNING
-              id,
-              entry_day_id,
-              time_entry_session_id,
-              franchiseid,
-              tutorid,
-              break_type,
-              pay_treatment,
-              start_time,
-              end_time,
-              duration_minutes,
-              source,
-              status,
-              note,
-              created_at,
-              updated_at
-          `,
-          [
-            typeof (req.body as Record<string, unknown>)?.note === 'string'
-              ? String((req.body as Record<string, unknown>).note).trim().slice(0, 2000)
-              : null,
-            currentBreak.id,
-            day.id
-          ]
-        );
-        const voidedBreak = voidedResult.rows[0];
-        const sessions = await fetchSessionsByDayId(client, day.id);
-        const existingBreaks = await fetchBreaksByDayId(client, day.id);
-        const nextBreaks = existingBreaks.map((item) => (item.id === voidedBreak.id ? voidedBreak : item));
-        const updatedDay = await updateDayAfterBreakMutation(client, day, sessions, nextBreaks);
-
-        await appendAudit(client, {
-          dayId: day.id,
-          action: 'break_voided',
-          actorAccountType: 'ADMIN',
-          actorAccountId: admin.adminId,
-          previousStatus: day.status,
-          newStatus: updatedDay.status,
-          metadata: {
-            previousBreak: mapBreakRowToResponse(currentBreak),
-            break: mapBreakRowToResponse(voidedBreak)
-          }
-        });
-
-        await client.query('COMMIT');
-        res.status(200).json({ day: mapDayRowToResponse(updatedDay, sessions, nextBreaks) });
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => undefined);
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch (err) {
-      next(err);
-    }
-  }
-);
+router.post('/time-entry/admin/day/:id/breaks/:breakId/void', requireAdmin, requireCorrectionEditor);
 
 router.get(
   '/time-entry/admin/pending',
@@ -1769,7 +1327,7 @@ router.get(
               SELECT entry_day_id
               FROM public.time_entry_audit
               WHERE entry_day_id = ANY($1::int[])
-                AND action IN ('approved', 'auto_approved')
+                AND action IN ('approved', 'auto_approved', 'admin_corrected_approved', 'admin_restored')
               GROUP BY entry_day_id
             `,
             [ids]
@@ -1881,6 +1439,7 @@ router.post(
             WHERE id = $1
               AND franchiseid = $2
             LIMIT 1
+            FOR UPDATE
           `,
           [dayId, scope.franchiseId]
         );
@@ -1896,6 +1455,20 @@ router.post(
           await client.query('ROLLBACK');
           res.status(409).json({ error: `Only pending entries can be decided (current status: ${day.status})` });
           return;
+        }
+
+        if (decision === 'approve') {
+          const open = await client.query<{ incomplete: boolean }>(
+            `SELECT (EXISTS(SELECT 1 FROM public.time_entry_sessions WHERE entry_day_id = $1 AND end_at IS NULL)
+              OR EXISTS(SELECT 1 FROM public.time_entry_days WHERE id = $1 AND clock_state <> 0)
+              OR EXISTS(SELECT 1 FROM public.time_entry_breaks WHERE entry_day_id = $1 AND status = 'active')) AS incomplete`,
+            [dayId]
+          );
+          if (open.rows[0]?.incomplete) {
+            await client.query('ROLLBACK');
+            res.status(409).json({ error: 'Complete the clock session and active breaks before approving.', code: 'INVALID_ENTRY_STATE' });
+            return;
+          }
         }
 
         const nextStatus: TimeEntryStatus = decision === 'approve' ? 'approved' : 'denied';
@@ -1955,271 +1528,7 @@ router.post(
   }
 );
 
-router.put(
-  '/time-entry/admin/day/:id',
-  requireAdmin,
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const admin = getAdminContext(req);
-    if (!admin) {
-      res.status(401).json({ error: 'Not authenticated' });
-      return;
-    }
+router.put('/time-entry/admin/day/:id', requireAdmin, requireCorrectionEditor);
 
-    const scope = enforceFranchiseScope(req, { requireFranchiseId: true, requiredMessage: 'franchiseId is required' });
-    if (scope.error || scope.franchiseId === null) {
-      res.status(scope.error?.status ?? 400).json({ error: scope.error?.message ?? 'franchiseId is required' });
-      return;
-    }
-
-    const dayId = parseIdParam((req.params as Record<string, unknown>).id);
-    if (!dayId) {
-      res.status(400).json({ error: 'id must be a positive integer' });
-      return;
-    }
-
-    const reasonRaw = (req.body as Record<string, unknown>)?.reason;
-    const reason = typeof reasonRaw === 'string' ? reasonRaw.trim() : '';
-    if (reason.length > 2000) {
-      res.status(400).json({ error: 'reason must be 2000 characters or fewer' });
-      return;
-    }
-    if (reason.length < 5) {
-      res.status(400).json({ error: 'reason is required (min 5 characters)' });
-      return;
-    }
-
-    const sessionsRaw = (req.body as Record<string, unknown>)?.sessions;
-    if (!Array.isArray(sessionsRaw)) {
-      res.status(400).json({ error: 'sessions must be an array' });
-      return;
-    }
-
-    if (sessionsRaw.length > 20) {
-      res.status(400).json({ error: 'sessions is too large (max 20)' });
-      return;
-    }
-
-    try {
-      const pool = getPostgresPool();
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-
-        const existingResult = await client.query<TimeEntryDayRow>(
-          `
-            SELECT
-              id,
-              franchiseid,
-              tutorid,
-              work_date,
-              timezone,
-              status,
-              schedule_snapshot,
-              comparison,
-              submitted_at,
-              decided_by,
-              decided_at,
-              decision_reason,
-              created_at,
-              updated_at
-            FROM public.time_entry_days
-            WHERE id = $1
-              AND franchiseid = $2
-            LIMIT 1
-          `,
-          [dayId, scope.franchiseId]
-        );
-
-        if (!existingResult.rowCount) {
-          await client.query('ROLLBACK');
-          notFound(res);
-          return;
-        }
-
-        const existingDay = existingResult.rows[0];
-        const workDate = normalizeWorkDate(existingDay.work_date);
-        if (!workDate) {
-          await client.query('ROLLBACK');
-          res.status(500).json({ error: 'Unable to resolve work date for this entry.' });
-          return;
-        }
-        const timezone = existingDay.timezone;
-
-        const normalizedSessions = sessionsRaw
-          .map((session, idx) => {
-            if (!isRecord(session)) return null;
-            const startAt = parseTimestamptzMinute(session.startAt);
-            const endAt = parseTimestamptzMinute(session.endAt);
-            if (!startAt || !endAt) return null;
-
-            const startLocal = DateTime.fromISO(startAt, { zone: 'utc' }).setZone(timezone);
-            const endLocal = DateTime.fromISO(endAt, { zone: 'utc' }).setZone(timezone);
-            if (!startLocal.isValid || !endLocal.isValid) return null;
-            if (startLocal.toISODate() !== workDate) return null;
-            if (endLocal.toISODate() !== workDate) return null;
-
-            const startMinute = toEpochMinute(startAt);
-            const endMinute = toEpochMinute(endAt);
-            if (startMinute === null || endMinute === null) return null;
-            if (endMinute <= startMinute) return null;
-
-            return {
-              sortOrder: idx,
-              startAt,
-              endAt,
-              startMinute,
-              endMinute
-            };
-          })
-          .filter(Boolean) as Array<{
-          sortOrder: number;
-          startAt: string;
-          endAt: string;
-          startMinute: number;
-          endMinute: number;
-        }>;
-
-        if (normalizedSessions.length !== sessionsRaw.length) {
-          await client.query('ROLLBACK');
-          res.status(400).json({
-            error: 'Each session must include startAt/endAt as ISO timestamps with timezone offset, aligned to the minute, within workDate in franchise timezone.'
-          });
-          return;
-        }
-
-        const sorted = normalizedSessions
-          .slice()
-          .sort((a, b) => a.startMinute - b.startMinute || a.endMinute - b.endMinute);
-        for (let idx = 1; idx < sorted.length; idx += 1) {
-          if (sorted[idx].startMinute < sorted[idx - 1].endMinute) {
-            await client.query('ROLLBACK');
-            res.status(400).json({ error: 'Sessions must not overlap' });
-            return;
-          }
-        }
-
-        const previousSessions = await fetchSessionsByDayId(client, existingDay.id);
-        const existingBreaks = await fetchBreaksByDayId(client, existingDay.id);
-
-        const snapshot = parseScheduleSnapshotV1(existingDay.schedule_snapshot);
-
-        let comparison: unknown | null = existingDay.comparison;
-        if (snapshot) {
-          const computed = computeTimeEntryComparisonV2({
-            sessions: normalizedSessions.map((s) => ({ startAt: s.startAt, endAt: s.endAt })),
-            breaks: existingBreaks.map((row) => ({
-              payTreatment: row.pay_treatment,
-              status: row.status,
-              startTime: row.start_time,
-              endTime: row.end_time,
-              durationMinutes: Number(row.duration_minutes)
-            })),
-            snapshotIntervals: snapshot.intervals
-          });
-          if (computed.ok) {
-            comparison = computed.comparison;
-          }
-        }
-
-        const update = await client.query<TimeEntryDayRow>(
-          `
-            UPDATE public.time_entry_days
-            SET status = 'pending',
-                comparison = $1,
-                submitted_at = NOW(),
-                decided_by = NULL,
-                decided_at = NULL,
-                decision_reason = NULL,
-                clock_state = 0,
-                updated_at = NOW()
-            WHERE id = $2
-            RETURNING
-              id,
-              franchiseid,
-              tutorid,
-              work_date,
-              timezone,
-              status,
-              schedule_snapshot,
-              comparison,
-              submitted_at,
-              decided_by,
-              decided_at,
-              decision_reason,
-              created_at,
-              updated_at
-          `,
-            [comparison, existingDay.id]
-          );
-
-        const updatedDay = update.rows[0];
-
-        await client.query('DELETE FROM public.time_entry_sessions WHERE entry_day_id = $1', [existingDay.id]);
-        for (const session of normalizedSessions) {
-          await client.query(
-            `
-              INSERT INTO public.time_entry_sessions
-                (entry_day_id, franchiseid, tutorid, start_at, end_at, sort_order, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-            `,
-            [
-              existingDay.id,
-              existingDay.franchiseid,
-              existingDay.tutorid,
-              session.startAt,
-              session.endAt,
-              session.sortOrder
-            ]
-          );
-        }
-
-        if (existingDay.status === 'approved') {
-          await appendAudit(client, {
-            dayId: existingDay.id,
-            action: 'invalidated',
-            actorAccountType: 'ADMIN',
-            actorAccountId: admin.adminId,
-            previousStatus: existingDay.status,
-            newStatus: updatedDay.status,
-            metadata: { workDate, timezone, reason, kind: 'admin_fixed' }
-          });
-        }
-
-        await appendAudit(client, {
-          dayId: existingDay.id,
-          action: 'admin_fixed',
-          actorAccountType: 'ADMIN',
-          actorAccountId: admin.adminId,
-          previousStatus: existingDay.status,
-          newStatus: updatedDay.status,
-          metadata: {
-            workDate,
-            timezone,
-            reason,
-            previousSessions: previousSessions.map((row) => ({
-              startAt: new Date(row.start_at).toISOString(),
-              endAt: new Date(row.end_at).toISOString(),
-              sortOrder: row.sort_order
-            })),
-            sessions: normalizedSessions.map((s) => ({ startAt: s.startAt, endAt: s.endAt, sortOrder: s.sortOrder }))
-          }
-        });
-
-        await client.query('COMMIT');
-
-        const sessions = await fetchSessionsByDayId(client, updatedDay.id);
-        const breaks = await fetchBreaksByDayId(client, updatedDay.id);
-        res.status(200).json({ day: mapDayRowToResponse(updatedDay, sessions, breaks) });
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => undefined);
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
+router.use(tutorReopenErrorHandler);
 export default router;
