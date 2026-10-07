@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { DateTime } from 'luxon';
 import type { PoolClient, QueryResultRow } from 'pg';
 import type { NormalizedTimeOffSubmission, TimeOffRecord, TimeOffType } from '../types/timeoff';
 import type {
@@ -11,6 +12,7 @@ import type {
   TimeOffChangeHistoryEntry,
   TimeOffChangeOperationAction,
   TimeOffChangeOperationActor,
+  TimeOffChangePage,
   TimeOffChangeReceipt
 } from '../types/timeOffChanges';
 import { canonicalJsonStringify } from './scheduleSnapshot';
@@ -493,4 +495,201 @@ export async function retryTimeOffChangeDelivery(
     throw new TimeOffChangeError('TIME_OFF_DELIVERY_NOT_RETRYABLE', 'Only failed deliveries can be retried', 409);
   }
   return mapDeliveryRow(updated.rows[0]);
+}
+
+const REQUEST_FIELDS = [
+  'id', 'franchiseid', 'tutorid', 'bridge_flag', 'bridge_profile_id', 'first_name', 'last_name', 'email',
+  'start_at', 'end_at', 'type', 'absence_label', 'notes', 'status', 'created_at', 'created_by', 'decided_at',
+  'decided_by', 'decision_reason', 'google_calendar_event_id', 'duration_hours', 'partial_day',
+  'leave_time', 'return_time', 'public_metadata', 'google_calendar_id'
+];
+const qualifiedRequestColumns = (alias: string) =>
+  `${REQUEST_FIELDS.map((field) => `${alias}.${field}`).join(', ')}, ${alias}.version::TEXT AS version`;
+
+const AMENDMENT_FIELDS: Array<[string, string]> = [
+  ['id', '::TEXT'], ['request_id', ''], ['base_version', '::TEXT'], ['start_date', '::TEXT'], ['end_date', '::TEXT'],
+  ['start_at', ''], ['end_at', ''], ['partial_day', ''], ['leave_time', ''], ['return_time', ''], ['type', ''],
+  ['storage_type', ''], ['absence_label', ''], ['reason', ''], ['duration_hours', '::TEXT'], ['timezone', ''],
+  ['change_reason', ''], ['proposed_by', ''], ['created_at', ''], ['status', ''], ['decided_by_type', ''],
+  ['decided_by', ''], ['decided_at', ''], ['decision_reason', '']
+];
+const AMENDMENT_PREFIX = 'amendment__';
+const prefixedAmendmentColumns = (alias: string) =>
+  AMENDMENT_FIELDS.map(([field, cast]) => `${alias}.${field}${cast} AS ${AMENDMENT_PREFIX}${field}`).join(', ');
+
+const MAX_CURSOR_LENGTH = 2000;
+
+function cursorScope(filters: Record<string, unknown>): string {
+  return createHash('sha256').update(canonicalJsonStringify(filters)).digest('hex').slice(0, 24);
+}
+
+function encodeListCursor(filters: Record<string, unknown>, tuple: [string, string]): string {
+  return Buffer.from(JSON.stringify({ s: cursorScope(filters), t: tuple })).toString('base64url');
+}
+
+/** Cursors are opaque and only valid for the exact filters that produced them. */
+function decodeListCursor(cursor: string | undefined, filters: Record<string, unknown>): [string, string] | null {
+  if (cursor === undefined) return null;
+  const invalidCursor = () =>
+    new TimeOffChangeError('TIME_OFF_INVALID_CURSOR', 'This page link is no longer valid; reload the list', 400);
+  if (cursor.length > MAX_CURSOR_LENGTH || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw invalidCursor();
+  let payload: { s?: unknown; t?: unknown };
+  try {
+    payload = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { s?: unknown; t?: unknown };
+  } catch {
+    throw invalidCursor();
+  }
+  if (payload.s !== cursorScope(filters) || !Array.isArray(payload.t) || payload.t.length !== 2) throw invalidCursor();
+  return [String(payload.t[0]), String(payload.t[1])];
+}
+
+export type AdminTimeOffStatusFilter = 'approved' | 'cancelled' | 'denied' | 'pending' | 'all';
+
+export interface AdminTimeOffListQuery {
+  franchiseId: number;
+  timezone: string;
+  /** The center-local date used for the default "upcoming approved" view. */
+  today: string;
+  status?: AdminTimeOffStatusFilter;
+  tutorId?: number;
+  from?: string;
+  to?: string;
+  requestId?: number;
+  cursor?: string;
+  limit: number;
+}
+
+export interface TimeOffChangeListItem {
+  request: TimeOffRecord;
+  version: string;
+  pendingAmendmentId: string | null;
+}
+
+/**
+ * Scoped management list ordered by (start_at DESC, id DESC). With no status
+ * or date filter it shows approved requests starting today or later; dates
+ * filter by overlap with whole local days in the center timezone.
+ */
+export async function listAdminTimeOffRequests(
+  db: Queryable,
+  query: AdminTimeOffListQuery
+): Promise<TimeOffChangePage<TimeOffChangeListItem>> {
+  const useDefault = query.status === undefined && query.from === undefined && query.to === undefined;
+  const status = query.status ?? 'approved';
+  const localStart = (date: string) => DateTime.fromISO(date, { zone: query.timezone }).startOf('day');
+  const filters = {
+    franchiseId: query.franchiseId,
+    status,
+    tutorId: query.tutorId ?? null,
+    requestId: query.requestId ?? null,
+    startsOnOrAfter: useDefault ? localStart(query.today).toUTC().toISO() : null,
+    overlapStart: query.from ? localStart(query.from).toUTC().toISO() : null,
+    overlapEnd: query.to ? localStart(query.to).plus({ days: 1 }).toUTC().toISO() : null
+  };
+  const after = decodeListCursor(query.cursor, filters);
+  const result = await db.query<VersionedTimeOffRow & { pending_amendment_id: string | null }>(
+    `SELECT ${qualifiedRequestColumns('request')}, pending.id::TEXT AS pending_amendment_id
+     FROM public.time_off_requests request
+     LEFT JOIN public.time_off_amendments pending
+       ON pending.request_id = request.id AND pending.status = 'pending'
+     WHERE request.franchiseid = $1
+       AND ($2 = 'all' OR request.status::TEXT = $2)
+       AND ($3::BIGINT IS NULL OR request.tutorid = $3)
+       AND ($4::BIGINT IS NULL OR request.id = $4)
+       AND ($5::TIMESTAMPTZ IS NULL OR request.start_at >= $5)
+       AND ($6::TIMESTAMPTZ IS NULL OR request.end_at > $6)
+       AND ($7::TIMESTAMPTZ IS NULL OR request.start_at < $7)
+       AND ($8::TIMESTAMPTZ IS NULL OR (request.start_at, request.id) < ($8::TIMESTAMPTZ, $9::BIGINT))
+     ORDER BY request.start_at DESC, request.id DESC
+     LIMIT $10`,
+    [
+      query.franchiseId, status, filters.tutorId, filters.requestId, filters.startsOnOrAfter, filters.overlapStart,
+      filters.overlapEnd, after ? after[0] : null, after ? after[1] : null, query.limit + 1
+    ]
+  );
+  const rows = result.rows.slice(0, query.limit);
+  const last = rows[rows.length - 1];
+  return {
+    items: rows.map((row) => ({
+      request: mapTimeOffRow(row, query.timezone),
+      version: String(row.version),
+      pendingAmendmentId: row.pending_amendment_id
+    })),
+    nextCursor: result.rows.length > query.limit && last
+      ? encodeListCursor(filters, [iso(last.start_at), String(last.id)])
+      : null
+  };
+}
+
+export interface TimeOffAmendmentQueueItem {
+  amendment: TimeOffAmendment;
+  request: TimeOffRecord;
+  version: string;
+  /** False once the proposal reached its expiry instant, before the expiry pass persists it. */
+  actionable: boolean;
+}
+
+/** Scoped pending change requests, oldest first. */
+export async function listPendingTimeOffAmendments(
+  db: Queryable,
+  query: { franchiseId: number; timezone: string; nowIso: string; cursor?: string; limit: number }
+): Promise<TimeOffChangePage<TimeOffAmendmentQueueItem>> {
+  const filters = { franchiseId: query.franchiseId, list: 'pending-amendments' };
+  const after = decodeListCursor(query.cursor, filters);
+  const result = await db.query<VersionedTimeOffRow & Record<string, unknown>>(
+    `SELECT ${prefixedAmendmentColumns('amendment')}, ${qualifiedRequestColumns('request')}
+     FROM public.time_off_amendments amendment
+     JOIN public.time_off_requests request ON request.id = amendment.request_id
+     WHERE amendment.status = 'pending' AND request.franchiseid = $1
+       AND ($2::TIMESTAMPTZ IS NULL OR (amendment.created_at, amendment.id) > ($2::TIMESTAMPTZ, $3::BIGINT))
+     ORDER BY amendment.created_at, amendment.id
+     LIMIT $4`,
+    [query.franchiseId, after ? after[0] : null, after ? after[1] : null, query.limit + 1]
+  );
+  const items = result.rows.slice(0, query.limit).map((row) => {
+    const amendment = mapAmendmentRow(Object.fromEntries(AMENDMENT_FIELDS.map(([field]) =>
+      [field, row[`${AMENDMENT_PREFIX}${field}`]])) as AmendmentRow);
+    const request = mapTimeOffRow(row, query.timezone);
+    const expiresAt = Math.min(Date.parse(request.startAt), Date.parse(amendment.proposed.startAt));
+    return { amendment, request, version: String(row.version), actionable: expiresAt > Date.parse(query.nowIso) };
+  });
+  const last = items[items.length - 1];
+  return {
+    items,
+    nextCursor: result.rows.length > query.limit && last
+      ? encodeListCursor(filters, [last.amendment.createdAt, last.amendment.id])
+      : null
+  };
+}
+
+/** Scoped open (pending or failed) delivery jobs, newest first. */
+export async function listTimeOffChangeDeliveries(
+  db: Queryable,
+  query: { franchiseId: number; status?: 'pending' | 'failed'; cursor?: string; limit: number }
+): Promise<TimeOffChangePage<TimeOffChangeDelivery>> {
+  const filters = { franchiseId: query.franchiseId, status: query.status ?? 'open' };
+  const after = decodeListCursor(query.cursor, filters);
+  const result = await db.query(
+    `SELECT delivery.id::TEXT AS id, delivery.operation_id::TEXT AS operation_id, delivery.request_id,
+       delivery.channel, delivery.kind, delivery.status, delivery.attempts, delivery.next_attempt_at,
+       delivery.last_error, delivery.target_version::TEXT AS target_version, delivery.created_at,
+       delivery.completed_at
+     FROM public.time_off_change_deliveries delivery
+     JOIN public.time_off_requests request ON request.id = delivery.request_id
+     WHERE request.franchiseid = $1
+       AND delivery.status = ANY($2::TEXT[])
+       AND ($3::TIMESTAMPTZ IS NULL OR (delivery.created_at, delivery.id::TEXT) < ($3::TIMESTAMPTZ, $4::TEXT))
+     ORDER BY delivery.created_at DESC, delivery.id::TEXT DESC
+     LIMIT $5`,
+    [
+      query.franchiseId, query.status ? [query.status] : ['pending', 'failed'],
+      after ? after[0] : null, after ? after[1] : null, query.limit + 1
+    ]
+  );
+  const items = result.rows.slice(0, query.limit).map(mapDeliveryRow);
+  const last = items[items.length - 1];
+  return {
+    items,
+    nextCursor: result.rows.length > query.limit && last ? encodeListCursor(filters, [last.createdAt, last.id]) : null
+  };
 }

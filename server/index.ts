@@ -12,6 +12,7 @@ import payPeriodRoutes from './routes/payPeriod';
 import hoursRoutes from './routes/hours';
 import extraHoursRoutes from './routes/extrahours';
 import timeOffRoutes from './routes/timeoff';
+import { createTimeOffChangesRouter } from './routes/timeOffChanges';
 import ptoRoutes from './routes/pto';
 import timeEntryRoutes from './routes/timeEntry';
 import adminTimeEntryRoutes from './routes/adminTimeEntry';
@@ -22,9 +23,12 @@ import healthRoutes from './routes/health';
 import { validateDbEnv, validateRuntimeEnv } from './config/env';
 import { SESSION_SECRET } from './config/session';
 import { createSessionMiddleware } from './config/sessionMiddleware';
-import { closePostgresPool } from './db/postgres';
+import { findMissingTimeOffChangeSchema, isTimeOffChangesEnabled } from './config/timeOffChanges';
+import { closePostgresPool, getPostgresPool } from './db/postgres';
 import { closeMssqlPool } from './db/mssql';
 import { startAutoClockOutScheduler } from './services/autoClockOutScheduler';
+import { runTimeOffChangeDeliveryPass, startTimeOffChangeWorker } from './services/timeOffChangeDelivery';
+import { createTimeOffChangeService } from './services/timeOffChanges';
 import { installGracefulShutdown } from './services/gracefulShutdown';
 import { mapPtoHttpError } from './services/pto/errors';
 import { setSensitivePageHeaders } from './middleware/sensitivePageHeaders';
@@ -54,6 +58,29 @@ if (process.env.SKIP_DB_VALIDATION !== 'true') {
 }
 
 const autoClockOutScheduler = startAutoClockOutScheduler();
+
+// Committed calendar/email jobs drain even while new change operations are
+// disabled; before migration 0016 the worker stays idle instead of failing.
+let timeOffChangeWorker: ReturnType<typeof startTimeOffChangeWorker> | undefined;
+const timeOffChangeService = createTimeOffChangeService({ wake: () => timeOffChangeWorker?.wake() });
+timeOffChangeWorker = startTimeOffChangeWorker({
+  runPass: (nowIso) => runTimeOffChangeDeliveryPass({
+    pool: getPostgresPool(),
+    expire: (expiryNowIso) => timeOffChangeService.expire(expiryNowIso)
+  }, nowIso)
+});
+
+if (isTimeOffChangesEnabled(process.env)) {
+  findMissingTimeOffChangeSchema(getPostgresPool())
+    .then((missing) => {
+      if (missing.length === 0) return;
+      console.error(`[startup] TIME_OFF_CHANGES_ENABLED=true requires migration 0016; missing: ${missing.join(', ')}`);
+      process.exit(1);
+    })
+    .catch((err) => {
+      console.warn('[startup] Could not verify the approved time-off change schema:', err instanceof Error ? err.message : err);
+    });
+}
 
 if (!process.env.SESSION_SECRET) {
   console.warn(
@@ -89,6 +116,8 @@ app.use('/api/admin', adminSettingsRoutes);
 app.use('/api/pay-period', payPeriodRoutes);
 app.use('/api', hoursRoutes);
 app.use('/api', extraHoursRoutes);
+// Specific change-management paths must win over `/timeoff/admin/:id`.
+app.use('/api', createTimeOffChangesRouter({ service: timeOffChangeService }));
 app.use('/api', timeOffRoutes);
 app.use('/api', ptoRoutes);
 app.use('/api', timeEntryRoutes);
@@ -149,6 +178,7 @@ installGracefulShutdown({
   server,
   closeResources: async () => {
     autoClockOutScheduler.stop();
+    await timeOffChangeWorker?.stop();
     const results = await Promise.allSettled([closePostgresPool(), closeMssqlPool()]);
     const failed = results.find((result) => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;

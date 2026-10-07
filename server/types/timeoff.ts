@@ -15,6 +15,8 @@ export interface TimeOffPolicy {
   allowedTypes: TimeOffType[];
   maxDurationHours: number;
   pto: PtoPolicyStatus;
+  /** Approved-request change and cancellation actions are available; absent means off. */
+  changesEnabled?: boolean;
 }
 
 export interface TimeOffSubmissionInput {
