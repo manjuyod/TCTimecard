@@ -77,10 +77,7 @@ export async function startTimeOffChangesDatabase(
       }
     }
     if (!ready) throw new Error('Disposable PostgreSQL did not start');
-    await pool.query(PREREQUISITE_TABLES);
-    for (const migration of options.migrations ?? TIME_OFF_MIGRATION_CHAIN) {
-      await pool.query(readMigration(migration));
-    }
+    await resetTimeOffChangesSchema(pool, options.migrations);
   } catch (error) {
     await pool?.end().catch(() => undefined);
     try { docker('rm', '--force', name); } catch { /* disposable */ }
@@ -94,6 +91,28 @@ export async function startTimeOffChangesDatabase(
       try { docker('rm', '--force', name); } catch { /* disposable */ }
     }
   };
+}
+
+/** Recreates the public schema and applies the prerequisite tables and migrations. */
+export async function resetTimeOffChangesSchema(pool: Pool, migrations = TIME_OFF_MIGRATION_CHAIN): Promise<void> {
+  await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');
+  await pool.query(PREREQUISITE_TABLES);
+  for (const migration of migrations) {
+    await pool.query(readMigration(migration));
+  }
+}
+
+/** Waits until a backend is blocked on a heavyweight lock and reports which kind. */
+export async function waitForLockWait(pool: Pool, pid: number): Promise<string> {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    const result = await pool.query<{ wait_event_type: string | null; wait_event: string | null }>(
+      'SELECT wait_event_type, wait_event FROM pg_stat_activity WHERE pid = $1',
+      [pid]
+    );
+    if (result.rows[0]?.wait_event_type === 'Lock') return String(result.rows[0].wait_event);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`PostgreSQL backend ${pid} did not reach a lock wait`);
 }
 
 export async function withClient<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
