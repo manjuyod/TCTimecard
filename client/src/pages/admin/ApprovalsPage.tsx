@@ -49,7 +49,9 @@ import {
 } from '../../components/ui/dialog';
 import { Textarea } from '../../components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
-import { parseAdminTimeOffDeepLink } from '../../lib/timeOff';
+import { parseAdminTimeOffDeepLink, parseAdminTimeOffManageLink } from '../../lib/timeOff';
+import { fetchAdminTimeOffChangeCapabilities } from '../../lib/timeOffChangesApi';
+import { TimeOffManagement } from './time-off/TimeOffManagement';
 
 type DenyContext =
   | { type: 'extra'; request: ExtraHoursRequest }
@@ -264,6 +266,18 @@ export function ApprovalsPage(): JSX.Element {
   const [denyDialog, setDenyDialog] = useState<DenyContext | null>(null);
   const [denyReason, setDenyReason] = useState('');
   const [actingId, setActingId] = useState<number | null>(null);
+  const [timeOffChangesEnabled, setTimeOffChangesEnabled] = useState(false);
+  const timeOffChangesDirty = useRef(false);
+  useEffect(() => {
+    let current = true;
+    setTimeOffChangesEnabled(false);
+    timeOffChangesDirty.current = false;
+    if (franchiseId === null) return () => { current = false; };
+    fetchAdminTimeOffChangeCapabilities(franchiseId)
+      .then((capability) => { if (current) setTimeOffChangesEnabled(capability.enabled === true); })
+      .catch(() => { if (current) setTimeOffChangesEnabled(false); });
+    return () => { current = false; };
+  }, [franchiseId]);
   useEffect(() => {
     if (!selectorAllowed) {
       setError(null);
@@ -293,6 +307,8 @@ export function ApprovalsPage(): JSX.Element {
     const parsed = validateFranchise();
     if (parsed !== null) {
       if (correctionTarget) return;
+      if (parsed !== franchiseId && timeOffChangesDirty.current
+        && !window.confirm('Discard your unsaved time-off change and switch centers?')) return;
       if (parsed !== franchiseId) setSearchParams(prev => {
         const next = new URLSearchParams(prev); next.delete('tutorId'); next.delete('workDate'); return next;
       });
@@ -359,6 +375,7 @@ export function ApprovalsPage(): JSX.Element {
   }, [franchiseId]);
 
   const timeOffDeepLink = useMemo(() => parseAdminTimeOffDeepLink(location.search), [location.search]);
+  const timeOffManageLink = useMemo(() => parseAdminTimeOffManageLink(location.search), [location.search]);
 
   useEffect(() => {
     if (!reviewDetail) return;
@@ -387,7 +404,8 @@ export function ApprovalsPage(): JSX.Element {
   }, [selectorAllowed, timeOffDeepLink]);
 
   useEffect(() => {
-    if (!timeOffDeepLink || franchiseId === null) return;
+    // Change-management links open in TimeOffManagement, not the original approval flow.
+    if (!timeOffDeepLink || franchiseId === null || timeOffManageLink) return;
     const key = `${location.pathname}${location.search}`;
     if (handledDeepLink === key) return;
     const effectiveFranchiseId = selectorAllowed ? timeOffDeepLink.franchiseId : franchiseId;
@@ -406,7 +424,7 @@ export function ApprovalsPage(): JSX.Element {
         }
       })
       .catch((err) => toast.error(err instanceof Error ? err.message : 'Unable to open time-off request'));
-  }, [franchiseId, handledDeepLink, location.pathname, location.search, selectorAllowed, timeOffDeepLink]);
+  }, [franchiseId, handledDeepLink, location.pathname, location.search, selectorAllowed, timeOffDeepLink, timeOffManageLink]);
 
   const handleApproveExtra = async (request: ExtraHoursRequest) => {
     if (franchiseId === null && sessionFranchiseId === null) {
@@ -990,6 +1008,17 @@ export function ApprovalsPage(): JSX.Element {
             </CardHeader>
             <CardContent>{timeOffContent}</CardContent>
           </Card>
+
+          {timeOffChangesEnabled && franchiseId !== null ? (
+            <TimeOffManagement
+              key={franchiseId}
+              franchiseId={franchiseId}
+              requestId={timeOffManageLink?.requestId}
+              amendmentId={timeOffManageLink?.amendmentId ?? undefined}
+              onChanged={() => void loadTimeOff(franchiseId)}
+              onDirtyChange={(dirty) => { timeOffChangesDirty.current = dirty; }}
+            />
+          ) : null}
           </div>
         </TabsContent>
       </Tabs>

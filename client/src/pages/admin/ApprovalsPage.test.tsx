@@ -42,3 +42,52 @@ it('canceling the correction returns keyboard focus to its original lookup contr
   fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
   await waitFor(() => expect(trigger).toHaveFocus());
 });
+
+const timeOffHost = (enabled: boolean, calls: string[] = []) => {
+  globalThis.fetch = async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.startsWith('/api/timeoff/admin/change-capabilities')) return new Response(JSON.stringify({ enabled }));
+    if (path.startsWith('/api/timeoff/admin/42/change-detail')) return new Response(JSON.stringify({
+      version: '5', timezone: 'America/Los_Angeles', pendingAmendment: null, history: [], deliveries: [], allowedActions: ['cancel'],
+      request: { id: 42, franchiseId: 77, tutorId: 123, tutorName: 'Ada Lovelace', startAt: '2026-11-16T08:00:00.000Z',
+        endAt: '2026-11-18T08:00:00.000Z', startDate: '2026-11-16', endDate: '2026-11-17', type: 'pto', absenceLabel: 'Paid Time Off',
+        reason: 'Family trip out of town', notes: 'Family trip out of town', status: 'approved', createdAt: '2026-10-01T18:00:00.000Z',
+        decidedAt: '2026-10-02T18:00:00.000Z', decisionReason: 'Approved', partialDay: false, leaveTime: null, returnTime: null }
+    }));
+    if (path.startsWith('/api/pay-period')) return new Response(JSON.stringify({ payPeriod: {
+      franchiseId: 77, timezone: 'America/Los_Angeles', startDate: '2026-09-01', endDate: '2026-09-15'
+    } }));
+    return new Response(JSON.stringify({ days: [], requests: [], failures: [], items: [], nextCursor: null }));
+  };
+  return calls;
+};
+
+it('adds change requests and approved-time-off management beside the pending time-off inbox', async () => {
+  timeOffHost(true);
+  render(<MemoryRouter initialEntries={['/admin/approvals?tab=timeoff']}
+    future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><ApprovalsPage /></MemoryRouter>);
+  fireEvent.mouseDown(await screen.findByRole('tab', { name: 'Time Off' }));
+  expect(await screen.findByRole('heading', { name: 'Change requests' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Manage time off' })).toBeInTheDocument();
+  expect(screen.getByText('Pending Time Off')).toBeInTheDocument();
+});
+
+it('keeps approved-time-off management hidden while the capability is off', async () => {
+  const calls = timeOffHost(false);
+  render(<MemoryRouter initialEntries={['/admin/approvals?tab=timeoff']}
+    future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><ApprovalsPage /></MemoryRouter>);
+  fireEvent.mouseDown(await screen.findByRole('tab', { name: 'Time Off' }));
+  await screen.findByText('Pending Time Off');
+  await waitFor(() => expect(calls.some((path) => path.startsWith('/api/timeoff/admin/change-capabilities'))).toBe(true));
+  expect(screen.queryByRole('heading', { name: 'Manage time off' })).not.toBeInTheDocument();
+});
+
+it('opens a manage deep link in the change view instead of the original approval flow', async () => {
+  const calls = timeOffHost(true);
+  render(<MemoryRouter initialEntries={['/admin/approvals?tab=timeoff&franchiseId=77&requestId=42&view=manage&amendmentId=7']}
+    future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><ApprovalsPage /></MemoryRouter>);
+  expect(await screen.findByText('Request #42')).toBeInTheDocument();
+  expect(calls.some((path) => path.startsWith('/api/timeoff/admin/42/change-detail'))).toBe(true);
+  expect(calls.some((path) => /^\/api\/timeoff\/admin\/42\?/.test(path))).toBe(false);
+});
