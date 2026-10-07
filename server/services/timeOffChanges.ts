@@ -434,7 +434,7 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
         after: effectiveFields(input.after)
       }
     }, client);
-    await insertTimeOffChangeDeliveries(client, operationId, request.id, deliveries);
+    await insertTimeOffChangeDeliveries(client, operationId, request.id, deliveries, input.nowIso);
     return receipt;
   }
 

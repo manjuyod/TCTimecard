@@ -400,19 +400,21 @@ export async function insertTimeOffChangeDeliveries(
   client: Queryable,
   operationId: string,
   requestId: number,
-  deliveries: TimeOffChangeDeliveryInput[]
+  deliveries: TimeOffChangeDeliveryInput[],
+  nowIso: string
 ): Promise<void> {
   for (const delivery of deliveries) {
     await client.query(
       `INSERT INTO public.time_off_change_deliveries
         (id, operation_id, request_id, channel, kind, target_version, payload, recipient, identity, calendar_id,
-         recovery_event_id, dedupe_key, status, last_error, next_attempt_at, completed_at)
+         recovery_event_id, dedupe_key, status, last_error, next_attempt_at, completed_at, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6::BIGINT, $7, $8, $9, $10, $11, $12, $13, $14,
-         CASE WHEN $13 = 'pending' THEN NOW() END, CASE WHEN $13 = 'failed' THEN NOW() END)`,
+         CASE WHEN $13 = 'pending' THEN $15::TIMESTAMPTZ END, CASE WHEN $13 = 'failed' THEN $15::TIMESTAMPTZ END,
+         $15::TIMESTAMPTZ, $15::TIMESTAMPTZ)`,
       [
         delivery.id, operationId, requestId, delivery.channel, delivery.kind, delivery.targetVersion, delivery.payload,
         delivery.recipient, delivery.identity, delivery.calendarId, delivery.recoveryEventId, delivery.dedupeKey,
-        delivery.status, delivery.lastError
+        delivery.status, delivery.lastError, nowIso
       ]
     );
   }
@@ -452,4 +454,43 @@ export async function findTimeOffOverlapCandidates(
     [input.tutorId, input.requestId, input.startAt, input.endAt]
   );
   return result.rows.map((row) => ({ id: Number(row.id), status: row.status, startAt: iso(row.start_at), endAt: iso(row.end_at) }));
+}
+
+/**
+ * Re-queues a failed delivery for a scoped admin without repeating the
+ * business change. Calendar jobs replaced by a newer target stay closed.
+ */
+export async function retryTimeOffChangeDelivery(
+  db: Queryable,
+  input: { franchiseId: number; deliveryId: string; nowIso: string }
+): Promise<TimeOffChangeDelivery> {
+  const current = await db.query<{ status: string; has_newer_calendar_target: boolean }>(
+    `SELECT delivery.status,
+       EXISTS (
+         SELECT 1 FROM public.time_off_change_deliveries newer
+         WHERE delivery.channel = 'calendar' AND newer.channel = 'calendar'
+           AND newer.request_id = delivery.request_id AND newer.target_version > delivery.target_version
+       ) AS has_newer_calendar_target
+     FROM public.time_off_change_deliveries delivery
+     JOIN public.time_off_requests request ON request.id = delivery.request_id
+     WHERE delivery.id::TEXT = $1 AND request.franchiseid = $2`,
+    [input.deliveryId, input.franchiseId]
+  );
+  const row = current.rows[0];
+  if (!row) throw new TimeOffChangeError('TIME_OFF_DELIVERY_NOT_FOUND', 'Delivery not found', 404);
+  if (row.status === 'superseded' || row.has_newer_calendar_target) {
+    throw new TimeOffChangeError('TIME_OFF_DELIVERY_SUPERSEDED', 'A newer calendar change replaced this delivery', 409);
+  }
+  const updated = await db.query(
+    `UPDATE public.time_off_change_deliveries
+     SET status = 'pending', attempts = 0, next_attempt_at = $2::TIMESTAMPTZ, completed_at = NULL,
+       updated_at = $2::TIMESTAMPTZ
+     WHERE id::TEXT = $1 AND status = 'failed'
+     RETURNING ${DELIVERY_COLUMNS}`,
+    [input.deliveryId, input.nowIso]
+  );
+  if (!updated.rows[0]) {
+    throw new TimeOffChangeError('TIME_OFF_DELIVERY_NOT_RETRYABLE', 'Only failed deliveries can be retried', 409);
+  }
+  return mapDeliveryRow(updated.rows[0]);
 }

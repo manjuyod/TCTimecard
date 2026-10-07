@@ -43,7 +43,75 @@ export const resolveCalendarServiceAccountCredentials = (
 export interface CalendarClient {
   insertEvent: (calendarId: string, event: Record<string, unknown>) => Promise<{ id: string; htmlLink?: string }>;
   getEvent: (calendarId: string, eventId: string) => Promise<Record<string, unknown>>;
+  /** Partial update: omitted fields are kept and `null` clears a field. */
+  patchEvent: (calendarId: string, eventId: string, patch: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  deleteEvent: (calendarId: string, eventId: string) => Promise<void>;
+  /** Proves the subject can read the calendar using only the events scope. */
+  assertCalendarAccess: (calendarId: string) => Promise<void>;
 }
+
+export type CalendarProviderError = Error & { status?: number; reason?: string };
+
+const CALENDAR_API = 'https://www.googleapis.com/calendar/v3/calendars';
+const CALENDAR_REQUEST_TIMEOUT_MS = 10_000;
+
+const calendarEventsUrl = (calendarId: string, eventId?: string) =>
+  `${CALENDAR_API}/${encodeURIComponent(calendarId)}/events${eventId ? `/${encodeURIComponent(eventId)}` : ''}`;
+
+const providerError = (operation: string, status: number, body: unknown): CalendarProviderError => {
+  const detail = (body as { error?: { message?: string; errors?: Array<{ reason?: string }> } } | null)?.error;
+  const error = new Error(
+    `Google Calendar ${operation} failed (${status})${detail?.message ? `: ${detail.message}` : ''}`
+  ) as CalendarProviderError;
+  error.status = status;
+  error.reason = detail?.errors?.[0]?.reason;
+  return error;
+};
+
+const parseJson = (text: string): unknown => {
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Patch, delete, and access-probe requests for an authorized calendar subject.
+ * Every request carries a 10-second timeout.
+ */
+export const createCalendarEventTransport = (input: {
+  getAccessToken: () => Promise<string>;
+  fetch?: typeof fetch;
+  timeoutMs?: number;
+}): Pick<CalendarClient, 'patchEvent' | 'deleteEvent' | 'assertCalendarAccess'> => {
+  const fetchImpl = input.fetch ?? fetch;
+  const send = async (operation: string, url: string, init: RequestInit = {}): Promise<unknown> => {
+    const accessToken = await input.getAccessToken();
+    const response = await fetchImpl(url, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(init.body ? { 'Content-Type': 'application/json' } : {})
+      },
+      signal: AbortSignal.timeout(input.timeoutMs ?? CALENDAR_REQUEST_TIMEOUT_MS)
+    });
+    const body = parseJson(await response.text());
+    if (!response.ok) throw providerError(operation, response.status, body);
+    return body;
+  };
+  return {
+    patchEvent: async (calendarId, eventId, patch) =>
+      ((await send('patch', calendarEventsUrl(calendarId, eventId), { method: 'PATCH', body: JSON.stringify(patch) }))
+        ?? {}) as Record<string, unknown>,
+    deleteEvent: async (calendarId, eventId) => {
+      await send('delete', calendarEventsUrl(calendarId, eventId), { method: 'DELETE' });
+    },
+    assertCalendarAccess: async (calendarId) => {
+      await send('access check', `${calendarEventsUrl(calendarId)}?maxResults=1`);
+    }
+  };
+};
 
 export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient => {
   const subject = subjectEmail?.trim();
@@ -110,12 +178,25 @@ export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient 
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     const text = await response.text();
-    const json = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-    if (!response.ok) throw new Error(`Google Calendar event lookup failed (${response.status})`);
-    return json;
+    const body = parseJson(text);
+    if (!response.ok) {
+      const error = new Error(`Google Calendar event lookup failed (${response.status})`) as CalendarProviderError;
+      error.status = response.status;
+      error.reason = (body as { error?: { errors?: Array<{ reason?: string }> } } | null)?.error?.errors?.[0]?.reason;
+      throw error;
+    }
+    return (body ?? {}) as Record<string, unknown>;
   };
 
-  return { insertEvent, getEvent };
+  const transport = createCalendarEventTransport({
+    getAccessToken: async () => {
+      const accessToken = (await jwt.authorize())?.access_token;
+      if (!accessToken) throw new Error('Unable to acquire Google access token');
+      return accessToken;
+    }
+  });
+
+  return { insertEvent, getEvent, ...transport };
 };
 
 export const buildDeterministicTimeOffEventId = (requestId: number): string => `tctimeoff${requestId.toString(32)}`;
@@ -162,7 +243,7 @@ export const buildTimeOffCalendarEvent = (
 };
 
 export const insertOrVerifyTimeOffEvent = async (
-  client: CalendarClient,
+  client: Pick<CalendarClient, 'insertEvent' | 'getEvent'>,
   calendarId: string,
   payload: Record<string, unknown>,
   requestId: number,
