@@ -80,6 +80,14 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
   const [cancellationReason, setCancellationReason] = useState('');
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const editorDirty = useRef(false);
+  const dialogOpener = useRef<HTMLElement | null>(null);
+  const openDialog = (next: Exclude<Dialogs, null>) => {
+    // Dialogs open without a DialogTrigger, so restore focus to the opener ourselves.
+    dialogOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    commandKeys.current.reset();
+    if (next === 'cancel') setCancellationReason('');
+    setDialog(next);
+  };
 
   useEffect(() => {
     alive.current = true;
@@ -392,10 +400,10 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
                   ) : (
                     <div className="flex flex-wrap gap-2">
                       {actions.includes('admin_edit') ? (
-                        <Button variant="outline" onClick={() => { commandKeys.current.reset(); setDialog('edit'); }}>Edit approved request</Button>
+                        <Button variant="outline" onClick={() => openDialog('edit')}>Edit approved request</Button>
                       ) : null}
                       {actions.includes('cancel') ? (
-                        <Button variant="ghost" onClick={() => { commandKeys.current.reset(); setCancellationReason(''); setDialog('cancel'); }}>
+                        <Button variant="ghost" onClick={() => openDialog('cancel')}>
                           Cancel time off
                         </Button>
                       ) : null}
@@ -417,7 +425,10 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
       ) : null}
 
       <Dialog open={dialog !== null && detail !== null} onOpenChange={(isOpen) => { if (!isOpen) requestDialogClose(); }}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-h-[90vh] overflow-y-auto" onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          if (dialogOpener.current?.isConnected) dialogOpener.current.focus();
+        }}>
           {dialog === 'edit' && detail ? (
             <>
               <DialogHeader>

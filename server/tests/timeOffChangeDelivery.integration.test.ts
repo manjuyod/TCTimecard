@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { Pool } from 'pg';
+import { createPtoRouteStore } from '../services/pto/routeStore';
 import { runTimeOffChangeDeliveryPass, type TimeOffChangeDeliveryDeps } from '../services/timeOffChangeDelivery';
 import { retryTimeOffChangeDelivery } from '../services/timeOffChangeRepository';
 import { createTimeOffChangeService } from '../services/timeOffChanges';
 import type { TimeOffEmailPayload } from '../services/timeOffEmail';
-import type { TimeOffSubmissionInput } from '../types/timeoff';
+import { normalizeTimeOffSubmission } from '../services/timeOffPolicy';
+import { appendTimeOffAudit, createAuthenticatedTimeOff, updateTimeOffDecision } from '../services/timeOffRepository';
+import type { NormalizedTimeOffSubmission, TimeOffSubmissionInput } from '../types/timeoff';
 import type { TimeOffChangeActor, TimeOffChangeCommand } from '../types/timeOffChanges';
 import { FakeCalendar } from './helpers/fakeCalendar';
 import {
+  inTransaction,
   resetTimeOffChangesSchema,
+  seedPtoTutor,
   seedTimeOffRequest,
   startTimeOffChangesDatabase,
   timeOffChangesDatabaseEnabled,
@@ -262,5 +267,142 @@ describe('approved time-off change delivery', { skip }, () => {
     }), expiryTime);
     assert.deepEqual(calls, [expiryTime]);
     assert.equal((await db().query('SELECT status FROM public.time_off_amendments')).rows[0].status, 'expired');
+  });
+});
+
+describe('approved time-off change lifecycle end to end', { skip }, () => {
+  beforeEach(async () => {
+    await resetTimeOffChangesSchema(db());
+    sent.length = 0;
+  });
+
+  /** Ordinary submission and initial approval through the existing persistence paths. */
+  async function submitAndApprove(calendar: FakeCalendar): Promise<{ requestId: number; profileId: string }> {
+    const { profileId } = await seedPtoTutor(db());
+    const normalized = normalizeTimeOffSubmission(
+      { startDate: '2026-11-16', endDate: '2026-11-17', partialDay: false, type: 'pto', reason: 'Family trip out of town' },
+      { timezone: 'America/Los_Angeles', nowIso: NOW, maxDurationHours: 336, noticeRequired: true }
+    );
+    assert.equal(normalized.valid, true);
+    const created = await createAuthenticatedTimeOff({
+      franchiseId: 44, tutorId: 4401, firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com',
+      submission: normalized.value as NormalizedTimeOffSubmission, timezone: 'America/Los_Angeles',
+      decisionToken: { tokenHash: 'a'.repeat(64), expiresAt: '2026-10-21T17:00:00.000Z' }
+    }, db());
+    await appendTimeOffAudit({ requestId: created.id, action: 'created', actorAccountType: 'TUTOR', actorAccountId: 4401,
+      previousStatus: null, newStatus: 'pending', metadata: {} }, db());
+    const eventId = `tctimeoff${created.id.toString(32)}`;
+    calendar.seed(CALENDAR, { ...ownedEvent(created.id), id: eventId, start: { date: '2026-11-16' }, end: { date: '2026-11-18' } });
+    await inTransaction(db(), async (client) => {
+      await updateTimeOffDecision({ client, requestId: created.id, status: 'approved', actorId: 9, reason: 'Approved',
+        calendarEventId: eventId, calendarId: CALENDAR, timezone: 'America/Los_Angeles' });
+      await appendTimeOffAudit({ requestId: created.id, action: 'approved', actorAccountType: 'ADMIN', actorAccountId: 9,
+        previousStatus: 'pending', newStatus: 'approved', metadata: {} }, client);
+    });
+    return { requestId: created.id, profileId };
+  }
+
+  const balance = (profileId: string) => createPtoRouteStore(db()).getBalanceSummary(profileId, '2026-11-16');
+  const counts = async () => (await db().query<{ ledger: number; jobs: number; operations: number }>(`
+    SELECT (SELECT COUNT(*)::INT FROM public.pto_ledger_entries) AS ledger,
+      (SELECT COUNT(*)::INT FROM public.time_off_change_deliveries) AS jobs,
+      (SELECT COUNT(*)::INT FROM public.time_off_change_operations) AS operations`)).rows[0];
+  const command = async (actor: TimeOffChangeActor, requestId: number, body: Record<string, unknown>, key: string) =>
+    service().execute({ actor, requestId, expectedVersion: (await service().detail(actor, requestId, NOW)).version,
+      idempotencyKey: key, nowIso: NOW, ...body } as TimeOffChangeCommand);
+  const pto = (startDate: string, endDate: string): TimeOffSubmissionInput =>
+    ({ startDate, endDate, partialDay: false, type: 'pto', reason: 'Family trip out of town' });
+
+  async function runLifecycle(calendar: FakeCalendar, requestId: number) {
+    const before = await service().detail(admin, requestId, NOW);
+    const first = await command(tutor, requestId, { action: 'propose', proposed: pto('2026-11-16', '2026-11-18'),
+      changeReason: 'One more day with family' }, 'e2e-propose-1');
+    const pending = await service().detail(admin, requestId, NOW);
+    assert.equal(pending.request.startDate, before.request.startDate);
+    assert.equal(pending.request.endDate, before.request.endDate, 'original dates stay effective during review');
+    await command(admin, requestId, { action: 'deny_amendment', amendmentId: first.amendmentId, reason: 'Coverage is short' },
+      'e2e-deny-1');
+    const second = await command(tutor, requestId, { action: 'propose', proposed: pto('2026-11-16', '2026-11-18'),
+      changeReason: 'Asking again for one more day' }, 'e2e-propose-2');
+    await command(admin, requestId, { action: 'approve_amendment', amendmentId: second.amendmentId }, 'e2e-approve-2');
+    await command(admin, requestId, { action: 'admin_edit', proposed: pto('2026-11-17', '2026-11-18'),
+      changeReason: 'Shifted by the center' }, 'e2e-edit-1');
+    const cancelled = await command(tutor, requestId, { action: 'cancel', changeReason: 'Trip was cancelled entirely' },
+      'e2e-cancel-1');
+    return { cancelled };
+  }
+
+  async function assertFinalState(calendar: FakeCalendar, requestId: number, profileId: string, originalLedger: string[]) {
+    const final = await service().detail(admin, requestId, NOW);
+    assert.equal(final.request.status, 'cancelled');
+    assert.equal(final.pendingAmendment, null);
+    assert.deepEqual(final.history.map((entry) => entry.action),
+      ['propose', 'deny_amendment', 'propose', 'approve_amendment', 'admin_edit', 'cancel']);
+    const owned = [...calendar.events.values()].filter((event) =>
+      String((event.extendedProperties as { private?: Record<string, unknown> } | undefined)?.private?.timeOffRequestId) === String(requestId));
+    assert.deepEqual(owned, [], 'no active owned calendar event after delivery');
+    const ledgerIds = (await db().query<{ id: string }>('SELECT id::TEXT AS id FROM public.pto_ledger_entries WHERE request_id = $1',
+      [requestId])).rows.map((row) => row.id);
+    assert.ok(originalLedger.every((id) => ledgerIds.includes(id)), 'original ledger rows retained');
+    const audits = (await db().query<{ action: string }>('SELECT action FROM public.time_off_audit WHERE request_id = $1 ORDER BY id',
+      [requestId])).rows.map((row) => row.action);
+    assert.deepEqual(audits.slice(0, 2), ['created', 'approved']);
+    const summary = await balance(profileId);
+    assert.equal(summary.usedDays, 0, 'full actual consumption released');
+    assert.equal(summary.availableDays, 5);
+  }
+
+  it('runs submission through approval, proposals, denial, approval, admin edit, and cancellation', async () => {
+    const calendar = new FakeCalendar();
+    const { requestId, profileId } = await submitAndApprove(calendar);
+    const originalLedger = (await db().query<{ id: string }>('SELECT id::TEXT AS id FROM public.pto_ledger_entries WHERE request_id = $1',
+      [requestId])).rows.map((row) => row.id);
+    assert.equal((await balance(profileId)).availableDays, 3);
+
+    const { cancelled } = await runLifecycle(calendar, requestId);
+    await runTimeOffChangeDeliveryPass(deps(calendar), NOW);
+    await assertFinalState(calendar, requestId, profileId, originalLedger);
+
+    const settled = await counts();
+    const replay = await service().execute({ actor: tutor, requestId, expectedVersion: String(Number(cancelled.version) - 1),
+      idempotencyKey: 'e2e-cancel-1', nowIso: NOW, action: 'cancel', changeReason: 'Trip was cancelled entirely' });
+    assert.deepEqual(replay, cancelled);
+    await assert.rejects(command(admin, requestId, { action: 'approve_amendment', amendmentId: '1' }, 'e2e-approve-2'),
+      (error: { code?: string }) => error.code === 'TIME_OFF_IDEMPOTENCY_MISMATCH');
+    await runTimeOffChangeDeliveryPass(deps(calendar), later(60));
+    assert.deepEqual(await counts(), settled, 'replays add no ledger rows, jobs, or operations');
+  });
+
+  it('converges after provider failures and a worker restart', async () => {
+    const calendar = new FakeCalendar();
+    const { requestId, profileId } = await submitAndApprove(calendar);
+    const originalLedger = (await db().query<{ id: string }>('SELECT id::TEXT AS id FROM public.pto_ledger_entries WHERE request_id = $1',
+      [requestId])).rows.map((row) => row.id);
+    await runLifecycle(calendar, requestId);
+    for (let failure = 0; failure < 3; failure += 1) calendar.failures.push({ method: 'get', status: 503 });
+
+    await runTimeOffChangeDeliveryPass(deps(calendar), NOW);
+    await runTimeOffChangeDeliveryPass(deps(calendar), later(30));
+    // A fresh process picks up the same durable jobs.
+    await runTimeOffChangeDeliveryPass(deps(calendar), later(30 + 120));
+    await runTimeOffChangeDeliveryPass(deps(calendar), later(30 + 120 + 600));
+    await assertFinalState(calendar, requestId, profileId, originalLedger);
+    const failed = await db().query("SELECT COUNT(*)::INT AS count FROM public.time_off_change_deliveries WHERE status = 'failed'");
+    assert.equal(failed.rows[0].count, 0);
+  });
+
+  it('converges with two workers draining at once', async () => {
+    const calendar = new FakeCalendar();
+    const { requestId, profileId } = await submitAndApprove(calendar);
+    const originalLedger = (await db().query<{ id: string }>('SELECT id::TEXT AS id FROM public.pto_ledger_entries WHERE request_id = $1',
+      [requestId])).rows.map((row) => row.id);
+    await runLifecycle(calendar, requestId);
+    calendar.afterMutation = () => new Promise((resolve) => setTimeout(resolve, 100));
+    await Promise.all([runTimeOffChangeDeliveryPass(deps(calendar), NOW), runTimeOffChangeDeliveryPass(deps(calendar), NOW)]);
+    await Promise.all([runTimeOffChangeDeliveryPass(deps(calendar), NOW), runTimeOffChangeDeliveryPass(deps(calendar), NOW)]);
+    await assertFinalState(calendar, requestId, profileId, originalLedger);
+    assert.equal(calendar.count('delete'), 1);
+    const emailJobs = await db().query("SELECT COUNT(*)::INT AS count FROM public.time_off_change_deliveries WHERE channel = 'email'");
+    assert.equal(sent.length, emailJobs.rows[0].count, 'each email job sent exactly once');
   });
 });

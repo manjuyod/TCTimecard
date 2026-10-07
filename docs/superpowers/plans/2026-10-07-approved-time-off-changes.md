@@ -10,7 +10,7 @@
 
 **Spec:** [Approved time-off changes: product and technical spec](../specs/2026-10-07-approved-time-off-changes-design.md). Read the full spec before executing a task.
 
-**Status:** Planning complete for review; no implementation tasks have been executed. User requested both documents in this pass. Execution method is not selected.
+**Status:** Implemented on branch `feature/approved-time-off-changes` (inline execution, Tasks 1–9). Verified locally: `npm run typecheck`, `npm test`, `npm run build`, the five approved-time-off PostgreSQL suites and the three legacy PTO PostgreSQL suites (Docker), plus a browser pass against a disposable local harness with in-memory calendar/email providers. Not deployed; migration 0016 has not been applied to any shared database.
 
 ## Global Constraints
 

@@ -2,7 +2,7 @@
 
 Date: 2026-10-07
 
-Status: Proposed for review. The user approved the core behavior and requested both this spec and an implementation plan. Application implementation has not started.
+Status: Implemented on branch `feature/approved-time-off-changes` and verified locally (see the plan's status and `docs/operations/approved-time-off-changes.md`). Not deployed. The user approved the core behavior; the upcoming-only boundary remains the default.
 
 Companion: [Implementation plan](../plans/2026-10-07-approved-time-off-changes.md)
 

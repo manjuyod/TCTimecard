@@ -86,6 +86,7 @@ export function TutorTimeOffPage(): JSX.Element {
   const [cancellationReason, setCancellationReason] = useState('');
   const editorDirty = useRef(false);
   const commandKeys = useRef(createCommandKeys());
+  const dialogOpener = useRef<HTMLElement | null>(null);
 
   const loadChangeDetails = async (items: TimeOffRequest[]) => {
     const approved = items.filter((item) => item.status === 'approved')
@@ -259,6 +260,8 @@ export function TutorTimeOffPage(): JSX.Element {
   };
 
   const openChangeDialog = async (kind: ChangeDialog['kind'], requestId: number) => {
+    // Dialogs open without a DialogTrigger, so restore focus to the opener ourselves.
+    dialogOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     commandKeys.current.reset();
     editorDirty.current = false;
     setDialogError(null);
@@ -633,7 +636,10 @@ export function TutorTimeOffPage(): JSX.Element {
       </Tabs>
 
       <Dialog open={changeDialog !== null} onOpenChange={(open) => { if (!open) requestDialogClose(); }}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-h-[90vh] overflow-y-auto" onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          if (dialogOpener.current?.isConnected) dialogOpener.current.focus();
+        }}>
           {changeDialog?.kind === 'change' ? (
             <>
               <DialogHeader>

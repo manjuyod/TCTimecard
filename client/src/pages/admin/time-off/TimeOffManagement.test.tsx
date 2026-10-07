@@ -236,3 +236,15 @@ describe('TimeOffManagement', () => {
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
   });
 });
+
+describe('TimeOffManagement keyboard focus', () => {
+  it('returns focus to the action that opened a dialog when it closes', async () => {
+    installFetch();
+    renderManagement({ requestId: 42 });
+    const trigger = await screen.findByRole('button', { name: 'Cancel time off' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole('button', { name: 'Keep time off' }));
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+});

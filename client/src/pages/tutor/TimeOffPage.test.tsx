@@ -409,3 +409,15 @@ describe('tutor approved time-off changes', () => {
     expect(screen.getByLabelText('End date')).toHaveValue('2026-11-18');
   });
 });
+
+describe('tutor approved time-off dialogs and keyboard focus', () => {
+  it('returns focus to the action that opened a dialog when it closes', async () => {
+    installChangeFetch({ changesEnabled: true });
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    const trigger = await screen.findByRole('button', { name: 'Cancel time off' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole('button', { name: 'Keep time off' }));
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+});
