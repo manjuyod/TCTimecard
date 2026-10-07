@@ -120,6 +120,10 @@ export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient 
 
 export const buildDeterministicTimeOffEventId = (requestId: number): string => `tctimeoff${requestId.toString(32)}`;
 
+/** Replacement event id for one calendar target version; base32hex like Google requires. */
+export const buildRecoveryTimeOffEventId = (requestId: number, targetVersion: string): string =>
+  `tctimeoff${requestId.toString(32)}v${BigInt(targetVersion).toString(32)}`;
+
 export const buildTimeOffCalendarEvent = (
   request: import('../types/timeoff').TimeOffCalendarRequest,
   decisionReason: string

@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import type { NormalizedTimeOffSubmission } from '../../types/timeoff';
+import type { TimeOffReplacementQuote } from '../../types/timeOffChanges';
 import { TimeOffChangeError } from '../timeOffChangeErrors';
 import { mapPtoHttpError } from './errors';
 
@@ -11,13 +12,7 @@ export type TimeOffReplacementQuoteReason =
   | 'identity_conflict'
   | 'reconciliation_required';
 
-export interface TimeOffReplacementQuote {
-  eligible: boolean;
-  reason: TimeOffReplacementQuoteReason | string;
-  tracked: boolean;
-  cycles: Array<{ cycleStart: string; oldDays: number; newDays: number; availableDays: number; availableAfter: number }>;
-  warnings: string[];
-}
+export type { TimeOffReplacementQuote };
 
 type Queryable = Pick<PoolClient, 'query'>;
 

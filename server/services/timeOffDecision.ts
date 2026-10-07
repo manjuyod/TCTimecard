@@ -218,6 +218,7 @@ async function decideLockedTimeOffRequest(args: {
   const client = await args.pool.connect();
   let updated: TimeOffRecord | null = null;
   let calendarEventId: string | null = null;
+  let calendarId: string | null = null;
   const decisionReason = normalizeEmailDecisionReason(args.reason);
   let locked: TimeOffRecord | null = null;
 
@@ -259,6 +260,7 @@ async function decideLockedTimeOffRequest(args: {
         locked.id,
         locked.franchiseId
       );
+      calendarId = gmailId;
     }
 
     updated = await updateTimeOffDecision({
@@ -268,6 +270,7 @@ async function decideLockedTimeOffRequest(args: {
       actorId: args.actorId,
       reason: decisionReason,
       calendarEventId,
+      calendarId,
       timezone: args.timezone,
       expectedTokenHash: args.expectedTokenHash,
       nowIso: args.nowIso

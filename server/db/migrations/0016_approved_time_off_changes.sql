@@ -194,7 +194,9 @@ CREATE TABLE IF NOT EXISTS public.time_off_change_deliveries (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT time_off_change_deliveries_dedupe_key UNIQUE (dedupe_key),
   CONSTRAINT time_off_change_deliveries_calendar_recovery CHECK (channel <> 'calendar' OR recovery_event_id IS NOT NULL),
-  CONSTRAINT time_off_change_deliveries_email_recipient CHECK (channel <> 'email' OR BTRIM(COALESCE(recipient, '')) <> '')
+  CONSTRAINT time_off_change_deliveries_email_recipient CHECK (
+    channel <> 'email' OR BTRIM(COALESCE(recipient, '')) <> '' OR status = 'failed'
+  )
 );
 
 CREATE INDEX IF NOT EXISTS time_off_change_deliveries_due_idx

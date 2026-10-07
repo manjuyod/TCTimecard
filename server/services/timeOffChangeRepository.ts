@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
-import type { NormalizedTimeOffSubmission, TimeOffType } from '../types/timeoff';
+import type { NormalizedTimeOffSubmission, TimeOffRecord, TimeOffType } from '../types/timeoff';
 import type {
   AmendmentStatus,
   TimeOffAmendment,
@@ -160,13 +160,15 @@ export async function lockTimeOffChangeRequest(
   client: Queryable,
   requestId: number,
   timezone: string
-): Promise<{ request: ReturnType<typeof mapTimeOffRow>; version: string } | null> {
+): Promise<{ request: ReturnType<typeof mapTimeOffRow>; version: string; calendarId: string | null } | null> {
   const result = await client.query<VersionedTimeOffRow>(
     `SELECT ${REQUEST_COLUMNS} FROM public.time_off_requests WHERE id = $1 FOR UPDATE`,
     [requestId]
   );
   const row = result.rows[0];
-  return row ? { request: mapTimeOffRow(row, timezone), version: String(row.version) } : null;
+  return row
+    ? { request: mapTimeOffRow(row, timezone), version: String(row.version), calendarId: row.google_calendar_id ?? null }
+    : null;
 }
 
 /** Reads the unauthorized detail; callers authorize scope and set `allowedActions`. */
@@ -315,4 +317,139 @@ function normalizeHashValue(value: unknown): unknown {
     return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, normalizeHashValue(entry)]));
   }
   return value;
+}
+
+export async function lockPendingAmendment(client: Queryable, requestId: number): Promise<TimeOffAmendment | null> {
+  const result = await client.query<AmendmentRow>(
+    `SELECT ${AMENDMENT_COLUMNS} FROM public.time_off_amendments
+     WHERE request_id = $1 AND status = 'pending' FOR UPDATE`,
+    [requestId]
+  );
+  return result.rows[0] ? mapAmendmentRow(result.rows[0]) : null;
+}
+
+export async function findAmendment(client: Queryable, requestId: number, amendmentId: string): Promise<TimeOffAmendment | null> {
+  const result = await client.query<AmendmentRow>(
+    `SELECT ${AMENDMENT_COLUMNS} FROM public.time_off_amendments WHERE request_id = $1 AND id = $2::BIGINT`,
+    [requestId, amendmentId]
+  );
+  return result.rows[0] ? mapAmendmentRow(result.rows[0]) : null;
+}
+
+export async function insertAmendment(client: Queryable, input: {
+  requestId: number;
+  baseVersion: string;
+  proposed: NormalizedTimeOffSubmission;
+  timezone: string;
+  changeReason: string;
+  proposedBy: number;
+}): Promise<TimeOffAmendment> {
+  const value = input.proposed;
+  const result = await client.query<AmendmentRow>(
+    `INSERT INTO public.time_off_amendments
+      (request_id, base_version, start_date, end_date, start_at, end_at, partial_day, leave_time, return_time,
+       type, storage_type, absence_label, reason, duration_hours, timezone, change_reason, proposed_by)
+     VALUES ($1, $2::BIGINT, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+     RETURNING ${AMENDMENT_COLUMNS}`,
+    [
+      input.requestId, input.baseVersion, value.startDate, value.endDate, value.startAt, value.endAt, value.partialDay,
+      value.leaveTime, value.returnTime, value.type, value.storageType, value.absenceLabel, value.reason,
+      value.durationHours, input.timezone, input.changeReason, input.proposedBy
+    ]
+  );
+  return mapAmendmentRow(result.rows[0]);
+}
+
+export async function closeAmendment(client: Queryable, input: {
+  id: string;
+  status: Exclude<AmendmentStatus, 'pending'>;
+  decidedByType: TimeOffChangeActorType;
+  decidedBy: number;
+  decisionReason: string | null;
+}): Promise<TimeOffAmendment> {
+  const result = await client.query<AmendmentRow>(
+    `UPDATE public.time_off_amendments
+     SET status = $2, decided_by_type = $3, decided_by = $4, decided_at = NOW(), decision_reason = $5
+     WHERE id = $1::BIGINT AND status = 'pending'
+     RETURNING ${AMENDMENT_COLUMNS}`,
+    [input.id, input.status, input.decidedByType, input.decidedBy, input.decisionReason]
+  );
+  if (!result.rows[0]) {
+    throw new TimeOffChangeError('TIME_OFF_AMENDMENT_CLOSED', 'This change request is no longer pending', 409);
+  }
+  return mapAmendmentRow(result.rows[0]);
+}
+
+/** A delivery job planned inside the business transaction; inserted as written. */
+export interface TimeOffChangeDeliveryInput {
+  id: string;
+  channel: 'calendar' | 'email';
+  kind: string;
+  targetVersion: string;
+  payload: Record<string, unknown>;
+  recipient: string | null;
+  identity: string | null;
+  calendarId: string | null;
+  recoveryEventId: string | null;
+  dedupeKey: string;
+  status: 'pending' | 'failed';
+  lastError: string | null;
+}
+
+export async function insertTimeOffChangeDeliveries(
+  client: Queryable,
+  operationId: string,
+  requestId: number,
+  deliveries: TimeOffChangeDeliveryInput[]
+): Promise<void> {
+  for (const delivery of deliveries) {
+    await client.query(
+      `INSERT INTO public.time_off_change_deliveries
+        (id, operation_id, request_id, channel, kind, target_version, payload, recipient, identity, calendar_id,
+         recovery_event_id, dedupe_key, status, last_error, next_attempt_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6::BIGINT, $7, $8, $9, $10, $11, $12, $13, $14,
+         CASE WHEN $13 = 'pending' THEN NOW() END, CASE WHEN $13 = 'failed' THEN NOW() END)`,
+      [
+        delivery.id, operationId, requestId, delivery.channel, delivery.kind, delivery.targetVersion, delivery.payload,
+        delivery.recipient, delivery.identity, delivery.calendarId, delivery.recoveryEventId, delivery.dedupeKey,
+        delivery.status, delivery.lastError
+      ]
+    );
+  }
+}
+
+/** Pending proposals at or past the earlier of the current and proposed starts. */
+export async function findExpiredAmendments(
+  db: Queryable,
+  nowIso: string,
+  limit: number
+): Promise<Array<{ amendmentId: string; requestId: number; franchiseId: number }>> {
+  const result = await db.query<{ amendment_id: string; request_id: string; franchiseid: number }>(
+    `SELECT amendment.id::TEXT AS amendment_id, amendment.request_id, request.franchiseid
+     FROM public.time_off_amendments amendment
+     JOIN public.time_off_requests request ON request.id = amendment.request_id
+     WHERE amendment.status = 'pending' AND LEAST(request.start_at, amendment.start_at) <= $1
+     ORDER BY LEAST(request.start_at, amendment.start_at), amendment.id
+     LIMIT $2`,
+    [nowIso, limit]
+  );
+  return result.rows.map((row) => ({
+    amendmentId: row.amendment_id,
+    requestId: Number(row.request_id),
+    franchiseId: Number(row.franchiseid)
+  }));
+}
+
+/** Other pending/approved leave for the same tutor that intersects an interval. */
+export async function findTimeOffOverlapCandidates(
+  db: Queryable,
+  input: { tutorId: number; requestId: number; startAt: string; endAt: string }
+): Promise<Array<{ id: number; status: TimeOffRecord['status']; startAt: string; endAt: string }>> {
+  const result = await db.query<{ id: string; status: TimeOffRecord['status']; start_at: string | Date; end_at: string | Date }>(
+    `SELECT id, status, start_at, end_at FROM public.time_off_requests
+     WHERE tutorid = $1 AND id <> $2 AND status IN ('pending', 'approved')
+       AND start_at < $4 AND end_at > $3`,
+    [input.tutorId, input.requestId, input.startAt, input.endAt]
+  );
+  return result.rows.map((row) => ({ id: Number(row.id), status: row.status, startAt: iso(row.start_at), endAt: iso(row.end_at) }));
 }

@@ -193,3 +193,82 @@ export async function seedTimeOffRequest(db: Pool | PoolClient, input: SeedReque
   ]);
   return Number(result.rows[0].id);
 }
+
+const DAY_MS = 86_400_000;
+export const dayCount = (startDate: string, endDate: string) =>
+  Math.round((Date.parse(`${endDate}T00:00:00.000Z`) - Date.parse(`${startDate}T00:00:00.000Z`)) / DAY_MS) + 1;
+
+export interface PtoTutorFixture { profileId: string; membershipId: string }
+
+export async function seedPtoTutor(
+  pool: Pool,
+  input: { franchiseId?: number; tutorId?: number; firstName?: string; email?: string; enable?: boolean } = {}
+): Promise<PtoTutorFixture> {
+  const franchiseId = input.franchiseId ?? 44;
+  const tutorId = input.tutorId ?? 4401;
+  if (input.enable !== false) {
+    await pool.query(`INSERT INTO public.pto_center_settings (franchiseid, enabled) VALUES ($1, TRUE)
+      ON CONFLICT (franchiseid) DO UPDATE SET enabled = TRUE`, [franchiseId]);
+  }
+  const profile = await pool.query<{ id: string }>(`INSERT INTO public.pto_profiles (first_name, last_name, identity_status)
+    VALUES ($1, 'Lovelace', 'confirmed') RETURNING id`, [input.firstName ?? 'Ada']);
+  const profileId = profile.rows[0].id;
+  await pool.query(`INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id) VALUES ($1, $2, $3)`,
+    [profileId, `timecard-center:${franchiseId}`, String(tutorId)]);
+  const membership = await pool.query<{ id: string }>(`INSERT INTO public.pto_profile_centers
+    (profile_id, franchiseid, tutor_id, active) VALUES ($1, $2, $3, TRUE) RETURNING id`, [profileId, franchiseId, tutorId]);
+  await pool.query(`INSERT INTO public.pto_profile_emails (profile_id, franchiseid, email, active, source, source_membership_id)
+    VALUES ($1, $2, $3, TRUE, 'crm', $4)`, [profileId, franchiseId, input.email ?? 'ada@example.com', membership.rows[0].id]);
+  await linkLogin(pool, profileId, franchiseId, tutorId);
+  return { profileId, membershipId: membership.rows[0].id };
+}
+
+export async function linkLogin(pool: Pool, profileId: string, franchiseId: number, tutorId: number, withCrmId = false): Promise<string> {
+  if (withCrmId) {
+    await pool.query(`INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id) VALUES ($1, $2, $3)`,
+      [profileId, `timecard-center:${franchiseId}`, String(tutorId)]);
+  }
+  const account = await pool.query<{ id: string }>(`INSERT INTO public.pto_discovered_tutor_accounts
+    (provider, crm_id, franchiseid, tutor_id, normalized_first_name, normalized_last_name, crm_snapshot, crm_active)
+    VALUES ($1, $2, $3, $4, 'ada', 'lovelace', '{}', TRUE) RETURNING id`,
+  [`timecard-center:${franchiseId}`, String(tutorId), franchiseId, tutorId]);
+  await pool.query(`INSERT INTO public.pto_profile_link_decisions
+    (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
+    VALUES ($1, $2, 'linked', 'db-test', $3, NOW())`, [profileId, account.rows[0].id, franchiseId]);
+  return account.rows[0].id;
+}
+
+export async function approvedPto(
+  pool: Pool,
+  startDate: string,
+  endDate = startDate,
+  input: { franchiseId?: number; tutorId?: number; legacy?: boolean } = {}
+): Promise<number> {
+  const seed = () => seedTimeOffRequest(pool, {
+    franchiseId: input.franchiseId ?? 44,
+    tutorId: input.tutorId ?? 4401,
+    type: 'pto',
+    absenceLabel: 'Paid Time Off',
+    status: 'pending',
+    startDate,
+    endDate,
+    durationHours: dayCount(startDate, endDate) * 24
+  });
+  let requestId: number;
+  if (input.legacy) {
+    // Simulates rows written before PTO tracking existed: no reservation triggers run.
+    requestId = await inTransaction(pool, async (client) => {
+      await client.query('SET LOCAL session_replication_role = replica');
+      return seedTimeOffRequest(client, {
+        franchiseId: input.franchiseId ?? 44, tutorId: input.tutorId ?? 4401, type: 'pto',
+        absenceLabel: 'Paid Time Off', status: 'pending', startDate, endDate,
+        durationHours: dayCount(startDate, endDate) * 24
+      });
+    });
+  } else {
+    requestId = await seed();
+  }
+  await pool.query(`UPDATE public.time_off_requests SET status = 'approved', decided_at = NOW(), decided_by = 9
+    WHERE id = $1`, [requestId]);
+  return requestId;
+}

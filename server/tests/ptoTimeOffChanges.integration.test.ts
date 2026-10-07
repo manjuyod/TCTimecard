@@ -9,8 +9,11 @@ import { persistTimeOffChangeOperation } from '../services/timeOffChangeReposito
 import type { NormalizedTimeOffSubmission } from '../types/timeoff';
 import type { TimeOffChangeOperationAction } from '../types/timeOffChanges';
 import {
+  approvedPto as approvedPtoIn,
   inTransaction,
+  linkLogin as linkLoginIn,
   resetTimeOffChangesSchema,
+  seedPtoTutor as seedPtoTutorIn,
   seedTimeOffRequest,
   startTimeOffChangesDatabase,
   timeOffChangesDatabaseEnabled,
@@ -49,78 +52,11 @@ const fullDays = (startDate: string, endDate: string, overrides: Partial<Normali
 const unpaid = (startDate: string, endDate: string) =>
   fullDays(startDate, endDate, { type: 'unpaid', storageType: 'unpaid', absenceLabel: 'Unpaid Time Off' });
 
-interface Tutor { profileId: string; membershipId: string }
-
-async function seedPtoTutor(
-  input: { franchiseId?: number; tutorId?: number; firstName?: string; email?: string; enable?: boolean } = {}
-): Promise<Tutor> {
-  const franchiseId = input.franchiseId ?? 44;
-  const tutorId = input.tutorId ?? 4401;
-  if (input.enable !== false) {
-    await db().query(`INSERT INTO public.pto_center_settings (franchiseid, enabled) VALUES ($1, TRUE)
-      ON CONFLICT (franchiseid) DO UPDATE SET enabled = TRUE`, [franchiseId]);
-  }
-  const profile = await db().query<{ id: string }>(`INSERT INTO public.pto_profiles (first_name, last_name, identity_status)
-    VALUES ($1, 'Lovelace', 'confirmed') RETURNING id`, [input.firstName ?? 'Ada']);
-  const profileId = profile.rows[0].id;
-  await db().query(`INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id) VALUES ($1, $2, $3)`,
-    [profileId, `timecard-center:${franchiseId}`, String(tutorId)]);
-  const membership = await db().query<{ id: string }>(`INSERT INTO public.pto_profile_centers
-    (profile_id, franchiseid, tutor_id, active) VALUES ($1, $2, $3, TRUE) RETURNING id`, [profileId, franchiseId, tutorId]);
-  await db().query(`INSERT INTO public.pto_profile_emails (profile_id, franchiseid, email, active, source, source_membership_id)
-    VALUES ($1, $2, $3, TRUE, 'crm', $4)`, [profileId, franchiseId, input.email ?? 'ada@example.com', membership.rows[0].id]);
-  await linkLogin(profileId, franchiseId, tutorId);
-  return { profileId, membershipId: membership.rows[0].id };
-}
-
-async function linkLogin(profileId: string, franchiseId: number, tutorId: number, withCrmId = false): Promise<string> {
-  if (withCrmId) {
-    await db().query(`INSERT INTO public.pto_profile_crm_ids (profile_id, provider, crm_id) VALUES ($1, $2, $3)`,
-      [profileId, `timecard-center:${franchiseId}`, String(tutorId)]);
-  }
-  const account = await db().query<{ id: string }>(`INSERT INTO public.pto_discovered_tutor_accounts
-    (provider, crm_id, franchiseid, tutor_id, normalized_first_name, normalized_last_name, crm_snapshot, crm_active)
-    VALUES ($1, $2, $3, $4, 'ada', 'lovelace', '{}', TRUE) RETURNING id`,
-  [`timecard-center:${franchiseId}`, String(tutorId), franchiseId, tutorId]);
-  await db().query(`INSERT INTO public.pto_profile_link_decisions
-    (profile_id, account_id, status, decided_by, decision_franchiseid, decided_at)
-    VALUES ($1, $2, 'linked', 'db-test', $3, NOW())`, [profileId, account.rows[0].id, franchiseId]);
-  return account.rows[0].id;
-}
-
-async function approvedPto(
-  startDate: string,
-  endDate = startDate,
-  input: { franchiseId?: number; tutorId?: number; legacy?: boolean } = {}
-): Promise<number> {
-  const seed = () => seedTimeOffRequest(db(), {
-    franchiseId: input.franchiseId ?? 44,
-    tutorId: input.tutorId ?? 4401,
-    type: 'pto',
-    absenceLabel: 'Paid Time Off',
-    status: 'pending',
-    startDate,
-    endDate,
-    durationHours: dayCount(startDate, endDate) * 24
-  });
-  let requestId: number;
-  if (input.legacy) {
-    // Simulates rows written before PTO tracking existed: no reservation triggers run.
-    requestId = await inTransaction(db(), async (client) => {
-      await client.query('SET LOCAL session_replication_role = replica');
-      return seedTimeOffRequest(client, {
-        franchiseId: input.franchiseId ?? 44, tutorId: input.tutorId ?? 4401, type: 'pto',
-        absenceLabel: 'Paid Time Off', status: 'pending', startDate, endDate,
-        durationHours: dayCount(startDate, endDate) * 24
-      });
-    });
-  } else {
-    requestId = await seed();
-  }
-  await db().query(`UPDATE public.time_off_requests SET status = 'approved', decided_at = NOW(), decided_by = 9
-    WHERE id = $1`, [requestId]);
-  return requestId;
-}
+const seedPtoTutor = (input: Parameters<typeof seedPtoTutorIn>[1] = {}) => seedPtoTutorIn(db(), input);
+const linkLogin = (profileId: string, franchiseId: number, tutorId: number, withCrmId = false) =>
+  linkLoginIn(db(), profileId, franchiseId, tutorId, withCrmId);
+const approvedPto = (startDate: string, endDate = startDate, input: Parameters<typeof approvedPtoIn>[3] = {}) =>
+  approvedPtoIn(db(), startDate, endDate, input);
 
 async function applyChange(
   client: PoolClient,

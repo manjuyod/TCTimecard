@@ -268,6 +268,8 @@ export async function updateTimeOffDecision(args: {
   actorId: number | null;
   reason: string;
   calendarEventId: string | null;
+  /** The calendar that holds `calendarEventId`; recorded for later updates. */
+  calendarId?: string | null;
   timezone: string;
   expectedTokenHash?: string | null;
   nowIso?: string;
@@ -275,6 +277,7 @@ export async function updateTimeOffDecision(args: {
   const result = await args.client.query<TimeOffRow>(
     `UPDATE public.time_off_requests SET status=$1, decided_at=NOW(), decided_by=$2,
        decision_reason=$3, google_calendar_event_id=COALESCE($4, google_calendar_event_id),
+       google_calendar_id=COALESCE($8, google_calendar_id),
        decision_token_used_at=CASE WHEN decision_token_hash IS NULL THEN decision_token_used_at ELSE NOW() END
      WHERE id=$5 AND status='pending'
        AND ($6::text IS NULL OR (
@@ -290,7 +293,8 @@ export async function updateTimeOffDecision(args: {
       args.calendarEventId,
       args.requestId,
       args.expectedTokenHash ?? null,
-      args.nowIso ?? new Date().toISOString()
+      args.nowIso ?? new Date().toISOString(),
+      args.calendarId ?? null
     ]
   );
   return result.rows[0] ? mapTimeOffRow(result.rows[0], args.timezone) : null;

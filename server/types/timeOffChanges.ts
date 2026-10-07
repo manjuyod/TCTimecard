@@ -100,3 +100,20 @@ export interface TimeOffChangePage<T> {
   items: T[];
   nextCursor: string | null;
 }
+
+export interface TimeOffReplacementQuote {
+  eligible: boolean;
+  reason: string;
+  tracked: boolean;
+  cycles: Array<{ cycleStart: string; oldDays: number; newDays: number; availableDays: number; availableAfter: number }>;
+  warnings: string[];
+}
+
+export interface TimeOffChangePreview {
+  version: string;
+  normalized: NormalizedTimeOffSubmission;
+  /** UTC offsets the server resolved for the boundaries, e.g. `-07:00`. */
+  resolvedOffsets: { start: string; end: string };
+  pto: TimeOffReplacementQuote | null;
+  warnings: string[];
+}
