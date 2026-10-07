@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   addTutorPtoEmail,
   fetchTutorPtoProfile,
@@ -29,6 +29,27 @@ import { InlineError } from '../../components/shared/InlineError';
 import { Skeleton } from '../../components/ui/skeleton';
 import { Badge } from '../../components/ui/badge';
 import { toast } from '../../components/ui/toast';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog';
+import { TimeOffChangeEditor } from '../../components/time-off/TimeOffChangeEditor';
+import { TimeOffDeliveryStatus } from '../../components/time-off/TimeOffDeliveryStatus';
+import {
+  changeErrorMessage,
+  createCommandKeys,
+  describeTimeOffRange,
+  isVersionConflict,
+  TimeOffChangeDetail,
+  toProposedInput
+} from '../../lib/timeOffChanges';
+import {
+  cancelApprovedTimeOff,
+  fetchTutorTimeOffChangeDetail,
+  previewTutorTimeOffChange,
+  submitTimeOffAmendment,
+  withdrawTimeOffAmendment
+} from '../../lib/timeOffChangesApi';
+
+const MAX_CHANGE_DETAILS = 20;
+type ChangeDialog = { kind: 'change' | 'cancel' | 'withdraw'; requestId: number };
 
 const emptyForm = (): TimeOffFormValue => ({
   startDate: '',
@@ -56,6 +77,27 @@ export function TutorTimeOffPage(): JSX.Element {
   const [quoting, setQuoting] = useState(false);
   const [alternateEmail, setAlternateEmail] = useState('');
   const [emailAction, setEmailAction] = useState<string | null>(null);
+  const [changeDetails, setChangeDetails] = useState<Record<number, TimeOffChangeDetail>>({});
+  const [changeDialog, setChangeDialog] = useState<ChangeDialog | null>(null);
+  const [dialogDetail, setDialogDetail] = useState<TimeOffChangeDetail | null>(null);
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const [dialogStale, setDialogStale] = useState(false);
+  const [cancellationReason, setCancellationReason] = useState('');
+  const editorDirty = useRef(false);
+  const commandKeys = useRef(createCommandKeys());
+
+  const loadChangeDetails = async (items: TimeOffRequest[]) => {
+    const approved = items.filter((item) => item.status === 'approved')
+      .sort((a, b) => new Date(b.startAt).getTime() - new Date(a.startAt).getTime())
+      .slice(0, MAX_CHANGE_DETAILS);
+    const results = await Promise.allSettled(approved.map((item) => fetchTutorTimeOffChangeDetail(item.id)));
+    const next: Record<number, TimeOffChangeDetail> = {};
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') next[approved[index].id] = result.value;
+    });
+    setChangeDetails(next);
+  };
 
   const load = async () => {
     setLoading(true);
@@ -66,6 +108,8 @@ export function TutorTimeOffPage(): JSX.Element {
       setRequests(requestData);
       setPolicy(policyData);
       setPtoProfile(profileData);
+      if (policyData.changesEnabled === true) await loadChangeDetails(requestData);
+      else setChangeDetails({});
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Unable to load time off');
     } finally {
@@ -214,6 +258,87 @@ export function TutorTimeOffPage(): JSX.Element {
     }
   };
 
+  const openChangeDialog = async (kind: ChangeDialog['kind'], requestId: number) => {
+    commandKeys.current.reset();
+    editorDirty.current = false;
+    setDialogError(null);
+    setDialogStale(false);
+    setCancellationReason('');
+    setDialogDetail(changeDetails[requestId] ?? null);
+    setChangeDialog({ kind, requestId });
+    try {
+      setDialogDetail(await fetchTutorTimeOffChangeDetail(requestId));
+    } catch (err) {
+      setDialogError(changeErrorMessage(err, 'Unable to load this time off.'));
+    }
+  };
+
+  const closeChangeDialog = () => {
+    setChangeDialog(null);
+    setDialogDetail(null);
+    editorDirty.current = false;
+  };
+
+  const requestDialogClose = () => {
+    if (dialogBusy) return;
+    if (editorDirty.current && !window.confirm('Discard your unsaved changes?')) return;
+    closeChangeDialog();
+  };
+
+  const refreshDialogDetail = async () => {
+    if (!changeDialog) return;
+    try {
+      setDialogDetail(await fetchTutorTimeOffChangeDetail(changeDialog.requestId));
+      setDialogStale(false);
+      setDialogError(null);
+    } catch (err) {
+      setDialogError(changeErrorMessage(err, 'Unable to refresh this time off.'));
+    }
+  };
+
+  /** Runs one command with a key that survives a network retry of the same command. */
+  const runChangeCommand = async (fingerprint: unknown, send: (idempotencyKey: string) => Promise<unknown>, success: string) => {
+    setDialogBusy(true);
+    setDialogError(null);
+    try {
+      await send(commandKeys.current.keyFor(JSON.stringify(fingerprint)));
+      commandKeys.current.reset();
+      closeChangeDialog();
+      toast.success(success);
+      await load();
+    } catch (err) {
+      if (isVersionConflict(err)) setDialogStale(true);
+      throw err;
+    } finally {
+      setDialogBusy(false);
+    }
+  };
+
+  const confirmCancellation = async () => {
+    if (!changeDialog || !dialogDetail) return;
+    const reason = cancellationReason.trim();
+    if (reason.length < 10) {
+      setDialogError('Cancellation reason must be at least 10 characters.');
+      return;
+    }
+    const body = { expectedVersion: dialogDetail.version, changeReason: reason };
+    await runChangeCommand({ action: 'cancel', id: changeDialog.requestId, ...body },
+      (idempotencyKey) => cancelApprovedTimeOff(changeDialog.requestId, { ...body, idempotencyKey }), 'Time off cancelled')
+      .catch((err) => setDialogError(changeErrorMessage(err, 'Unable to cancel this time off.')));
+  };
+
+  const confirmWithdrawal = async () => {
+    const amendment = dialogDetail?.pendingAmendment;
+    if (!changeDialog || !dialogDetail || !amendment) return;
+    const body = { expectedVersion: dialogDetail.version };
+    await runChangeCommand({ action: 'withdraw', id: changeDialog.requestId, amendmentId: amendment.id, ...body },
+      (idempotencyKey) => withdrawTimeOffAmendment(changeDialog.requestId, amendment.id, { ...body, idempotencyKey }),
+      'Change request withdrawn')
+      .catch((err) => setDialogError(changeErrorMessage(err, 'Unable to withdraw this change request.')));
+  };
+
+  const onEditorDirtyChange = useCallback((dirty: boolean) => { editorDirty.current = dirty; }, []);
+
   const handleCancel = async (id: number) => {
     setCancelingId(id);
     try {
@@ -361,6 +486,12 @@ export function TutorTimeOffPage(): JSX.Element {
                           </Button>
                         </div>
                       ) : null}
+                      {changeDetails[request.id] ? (
+                        <ApprovedChangeActions
+                          detail={changeDetails[request.id]}
+                          onAction={(kind) => void openChangeDialog(kind, request.id)}
+                        />
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -500,6 +631,123 @@ export function TutorTimeOffPage(): JSX.Element {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={changeDialog !== null} onOpenChange={(open) => { if (!open) requestDialogClose(); }}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
+          {changeDialog?.kind === 'change' ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Request a change</DialogTitle>
+                <DialogDescription>An admin reviews this change before it replaces your approved time off.</DialogDescription>
+              </DialogHeader>
+              {dialogStale ? (
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
+                  <span>This time off changed since you opened it. Refresh, review, and submit again.</span>
+                  <Button size="sm" variant="outline" onClick={() => void refreshDialogDetail()}>Refresh details</Button>
+                </div>
+              ) : null}
+              {dialogDetail ? (
+                <TimeOffChangeEditor
+                  key={dialogDetail.request.id}
+                  detail={dialogDetail}
+                  mode="tutor"
+                  busy={dialogBusy}
+                  onDirtyChange={onEditorDirtyChange}
+                  preview={(draft) => previewTutorTimeOffChange(changeDialog.requestId, toProposedInput(draft))}
+                  onSave={async (draft, changeReason) => {
+                    const body = { expectedVersion: dialogDetail.version, proposed: toProposedInput(draft), changeReason };
+                    await runChangeCommand({ action: 'propose', id: changeDialog.requestId, ...body },
+                      (idempotencyKey) => submitTimeOffAmendment(changeDialog.requestId, { ...body, idempotencyKey }),
+                      'Change submitted for approval');
+                  }}
+                  onCancel={closeChangeDialog}
+                />
+              ) : dialogError ? <p role="alert" className="text-sm text-destructive">{dialogError}</p>
+                : <Skeleton className="h-40 w-full" />}
+            </>
+          ) : null}
+
+          {changeDialog?.kind === 'cancel' ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Cancel approved time off</DialogTitle>
+                <DialogDescription>Cancellation takes effect right away and removes the calendar event.</DialogDescription>
+              </DialogHeader>
+              {dialogDetail ? (
+                <div className="space-y-3 text-sm">
+                  <p className="font-semibold text-foreground">Approved: {describeTimeOffRange(dialogDetail.request)}</p>
+                  {dialogDetail.request.type === 'pto' ? (
+                    <p className="text-muted-foreground">Any PTO this request used is returned to your shared balance.</p>
+                  ) : null}
+                  {dialogDetail.pendingAmendment ? (
+                    <p className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-amber-900">
+                      Your pending change request will also be closed.
+                    </p>
+                  ) : null}
+                  <div className="space-y-2">
+                    <Label htmlFor="cancellationReason">Cancellation reason</Label>
+                    <Textarea id="cancellationReason" maxLength={2000} value={cancellationReason}
+                      onChange={(event) => setCancellationReason(event.target.value)} />
+                  </div>
+                  {dialogError ? <p role="alert" className="text-destructive">{dialogError}</p> : null}
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="destructive" onClick={() => void confirmCancellation()} disabled={dialogBusy}>Cancel time off</Button>
+                    <Button variant="ghost" onClick={closeChangeDialog} disabled={dialogBusy}>Keep time off</Button>
+                  </div>
+                </div>
+              ) : <Skeleton className="h-24 w-full" />}
+            </>
+          ) : null}
+
+          {changeDialog?.kind === 'withdraw' ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Withdraw change request</DialogTitle>
+                <DialogDescription>Your approved time off stays exactly as it is.</DialogDescription>
+              </DialogHeader>
+              {dialogDetail?.pendingAmendment ? (
+                <div className="space-y-3 text-sm">
+                  <p className="text-foreground">Proposed: {describeTimeOffRange(dialogDetail.pendingAmendment.proposed)}</p>
+                  {dialogError ? <p role="alert" className="text-destructive">{dialogError}</p> : null}
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={() => void confirmWithdrawal()} disabled={dialogBusy}>Withdraw change request</Button>
+                    <Button variant="ghost" onClick={closeChangeDialog} disabled={dialogBusy}>Keep change request</Button>
+                  </div>
+                </div>
+              ) : <Skeleton className="h-24 w-full" />}
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/** Server-derived actions and pending-change state for an approved request card. */
+function ApprovedChangeActions({ detail, onAction }: {
+  detail: TimeOffChangeDetail;
+  onAction: (kind: ChangeDialog['kind']) => void;
+}): JSX.Element | null {
+  const amendment = detail.pendingAmendment;
+  const actions = detail.allowedActions;
+  if (!amendment && actions.length === 0 && detail.deliveries.length === 0) return null;
+  return (
+    <div className="mt-3 space-y-2">
+      {amendment ? (
+        <div className="space-y-1 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
+          <Badge variant="warning">{amendment.status === 'expired' ? 'Change expired' : 'Change pending'}</Badge>
+          <p className="font-semibold text-foreground">Approved: {describeTimeOffRange(detail.request)}</p>
+          <p className="text-foreground">Proposed: {describeTimeOffRange(amendment.proposed)}</p>
+        </div>
+      ) : null}
+      <TimeOffDeliveryStatus deliveries={detail.deliveries.filter((delivery) => delivery.status !== 'sent')} />
+      {actions.length > 0 ? (
+        <div className="flex flex-wrap gap-2">
+          {actions.includes('propose') ? <Button size="sm" variant="outline" onClick={() => onAction('change')}>Request change</Button> : null}
+          {actions.includes('withdraw') ? <Button size="sm" variant="outline" onClick={() => onAction('withdraw')}>Withdraw change</Button> : null}
+          {actions.includes('cancel') ? <Button size="sm" variant="ghost" onClick={() => onAction('cancel')}>Cancel time off</Button> : null}
+        </div>
+      ) : null}
     </div>
   );
 }

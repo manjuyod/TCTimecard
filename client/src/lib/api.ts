@@ -60,6 +60,8 @@ export interface TimeOffPolicy {
   allowedTypes: TimeOffType[];
   maxDurationHours: number;
   pto: PtoPolicyStatus;
+  /** Approved-request change actions are available; absent means off. */
+  changesEnabled?: boolean;
 }
 
 export interface TimeOffNotificationResult {
@@ -506,7 +508,8 @@ export interface AdminAttestationTutor {
 
 export type PayPeriodExportFormat = 'xlsx' | 'csv';
 
-const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
+/** Credentialed JSON transport shared by API modules; non-2xx responses throw ApiError. */
+export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, {
     credentials: 'include',
     headers: {
