@@ -11,13 +11,14 @@ import { previewAdminTimeOffChange } from '../../../lib/timeOffChangesApi';
  * Side-by-side review of a pending change request with the server's per-cycle
  * PTO difference. Approval and denial use the amendment endpoint only.
  */
-export function TimeOffAmendmentReview({ franchiseId, detail, amendment, canDecide, busy, onDecide }: {
+export function TimeOffAmendmentReview({ franchiseId, detail, amendment, canDecide, busy, onDecide, onDirtyChange }: {
   franchiseId: number;
   detail: TimeOffChangeDetail;
   amendment: TimeOffAmendment;
   canDecide: boolean;
   busy: boolean;
   onDecide: (decision: 'approve' | 'deny', reason?: string) => Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
 }): JSX.Element {
   const [preview, setPreview] = useState<TimeOffChangePreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -25,6 +26,7 @@ export function TimeOffAmendmentReview({ franchiseId, detail, amendment, canDeci
   const [denialReason, setDenialReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
+  useEffect(() => { onDirtyChange?.(denying && denialReason.trim().length > 0); }, [denying, denialReason, onDirtyChange]);
 
   useEffect(() => {
     alive.current = true;

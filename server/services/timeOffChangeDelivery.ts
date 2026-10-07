@@ -46,7 +46,13 @@ export interface CalendarSyncResult {
  * Converges one request's calendar event with a job's target. Mutates only
  * events that carry this request's ownership markers.
  */
-export async function syncTimeOffCalendarJob(client: CalendarClient, job: CalendarJob): Promise<CalendarSyncResult> {
+export async function syncTimeOffCalendarJob(client: CalendarClient, job: CalendarJob, signal?: AbortSignal): Promise<CalendarSyncResult> {
+  const call = async <T>(work: () => Promise<T>): Promise<T> => {
+    signal?.throwIfAborted();
+    const result = await work();
+    signal?.throwIfAborted();
+    return result;
+  };
   if (!job.identity) throw permanent('Franchise GmailID is not configured for calendar updates.');
   if (job.calendarId && job.calendarId !== job.identity) {
     throw permanent('TIME_OFF_CALENDAR_REPAIR_REQUIRED: the franchise calendar changed since this event was created; repair it manually.');
@@ -58,7 +64,7 @@ export async function syncTimeOffCalendarJob(client: CalendarClient, job: Calend
   const ensureAccess = async () => {
     if (accessVerified) return;
     try {
-      await client.assertCalendarAccess(calendarId);
+      await call(() => client.assertCalendarAccess(calendarId, signal));
       accessVerified = true;
     } catch (error) {
       const classified = classifyDeliveryError(error);
@@ -68,7 +74,7 @@ export async function syncTimeOffCalendarJob(client: CalendarClient, job: Calend
   };
   const lookup = async (eventId: string): Promise<{ state: 'present'; event: Record<string, unknown> } | { state: 'gone' }> => {
     try {
-      const event = await client.getEvent(calendarId, eventId);
+      const event = await call(() => client.getEvent(calendarId, eventId, signal));
       return event.status === 'cancelled' ? { state: 'gone' } : { state: 'present', event };
     } catch (error) {
       if (statusOf(error) === 410) return { state: 'gone' };
@@ -99,7 +105,7 @@ export async function syncTimeOffCalendarJob(client: CalendarClient, job: Calend
       }
       assertOwned(found.event, eventId);
       try {
-        await client.deleteEvent(calendarId, eventId);
+        await call(() => client.deleteEvent(calendarId, eventId, signal));
       } catch (error) {
         if (statusOf(error) === 410) continue;
         if (statusOf(error) === 404) {
@@ -115,7 +121,7 @@ export async function syncTimeOffCalendarJob(client: CalendarClient, job: Calend
   if (!job.event) throw permanent('Calendar job has no event payload.');
   const desired = withTargetVersion(job.event, job);
   const patchTo = async (eventId: string) => {
-    await client.patchEvent(calendarId, eventId, eventPatch(desired));
+    await call(() => client.patchEvent(calendarId, eventId, eventPatch(desired), signal));
   };
 
   if (job.currentEventId) {
@@ -136,9 +142,20 @@ export async function syncTimeOffCalendarJob(client: CalendarClient, job: Calend
     throw permanent('TIME_OFF_CALENDAR_REPAIR_REQUIRED: this legacy approval has no recorded calendar event to update.');
   }
 
+  // A prior attempt can create its recovery event and then lose its DB commit.
+  // Adopt that owned event before allocating another version's recovery id.
+  for (const eventId of new Set(job.cleanupEventIds)) {
+    if (eventId === job.currentEventId || eventId === job.recoveryEventId) continue;
+    const found = await lookup(eventId);
+    if (found.state === 'gone') continue;
+    assertOwned(found.event, eventId);
+    await patchTo(eventId);
+    return { eventId, calendarId };
+  }
+
   // The verified event is gone: recreate it under this target's persisted id.
   try {
-    await client.insertEvent(calendarId, { ...desired, id: job.recoveryEventId });
+    await call(() => client.insertEvent(calendarId, { ...desired, id: job.recoveryEventId }, signal));
     return { eventId: job.recoveryEventId, calendarId };
   } catch (error) {
     if (statusOf(error) !== 409) throw asAttemptError(error);
@@ -251,6 +268,7 @@ export interface TimeOffChangeDeliveryDeps {
   /** The amendment expiry pass, run after deliveries (100 per pass by default). */
   expire?: (nowIso: string) => Promise<number>;
   batchSize?: number;
+  calendarAttemptTimeoutMs?: number;
 }
 
 type Totals = { sent: number; failed: number; superseded: number };
@@ -383,6 +401,19 @@ async function processCalendar(
     );
     const [newest, ...older] = pending.rows;
     if (!newest) return;
+    // Failed/sent newer targets also fence stale retries, not just pending jobs.
+    const newer = await client.query(
+      `SELECT 1 FROM public.time_off_change_deliveries
+       WHERE request_id = $1 AND channel = 'calendar' AND target_version > $2::BIGINT LIMIT 1`,
+      [requestId, newest.target_version]
+    );
+    if (newer.rows.length) {
+      await client.query(`UPDATE public.time_off_change_deliveries SET status = 'superseded',
+        next_attempt_at = NULL, completed_at = $2, updated_at = $2
+        WHERE request_id = $1 AND channel = 'calendar' AND status = 'pending'`, [requestId, nowIso]);
+      totals.superseded += pending.rows.length;
+      return;
+    }
     if (older.length > 0) {
       await client.query(
         `UPDATE public.time_off_change_deliveries
@@ -422,7 +453,10 @@ async function processCalendar(
       } catch (error) {
         throw permanent(`Calendar credentials are not configured: ${sanitizeDeliveryError(error)}`);
       }
-      const result = await withTimeout(syncTimeOffCalendarJob(calendarClient, {
+      // Abort the sequence and its transports together. Await settlement while
+      // retaining the lock; Promise.race alone leaves old writes running.
+      const signal = AbortSignal.timeout(deps.calendarAttemptTimeoutMs ?? CALENDAR_ATTEMPT_TIMEOUT_MS);
+      const result = await syncTimeOffCalendarJob(calendarClient, {
         action: newest.payload.action,
         requestId,
         franchiseId: Number(newest.payload.franchiseId),
@@ -433,7 +467,7 @@ async function processCalendar(
         cleanupEventIds,
         recoveryEventId: newest.recovery_event_id,
         targetVersion: newest.target_version
-      }), CALENDAR_ATTEMPT_TIMEOUT_MS, 'Calendar update');
+      }, signal);
       await markSent(client, newest.id, nowIso, result.eventId, result.calendarId);
       totals.sent += 1;
     } catch (error) {

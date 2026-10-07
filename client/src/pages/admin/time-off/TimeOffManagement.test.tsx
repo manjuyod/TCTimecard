@@ -95,6 +95,16 @@ const renderManagement = (props: Partial<Parameters<typeof TimeOffManagement>[0]
 };
 
 describe('TimeOffManagement', () => {
+  it('follows a new request deep link within the same center', async () => {
+    installFetch({ routes: (call) => call.path.startsWith('/api/timeoff/admin/43/change-detail')
+      ? json(detail({ request: request({ id: 43, tutorName: 'Grace Hopper' }), pendingAmendment: null })) : undefined });
+    const view = render(<TimeOffManagement franchiseId={6} requestId={42} onChanged={() => undefined} />);
+    await screen.findByRole('heading', { name: 'Request #42' });
+    view.rerender(<TimeOffManagement franchiseId={6} requestId={43} onChanged={() => undefined} />);
+    expect(await screen.findByRole('heading', { name: 'Request #43' })).toBeInTheDocument();
+    expect(await screen.findByText(/Grace Hopper/)).toBeInTheDocument();
+  });
+
   it('reviews a change request with both versions and per-cycle PTO, then approves through the amendment endpoint', async () => {
     const calls = installFetch();
     const { onChanged } = renderManagement();

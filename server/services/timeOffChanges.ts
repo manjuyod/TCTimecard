@@ -64,6 +64,8 @@ export interface TimeOffChangeDeps {
   /** Best-effort nudge to the delivery worker after a commit. */
   wake?: () => void;
   newId?: () => string;
+  /** Commit-time clock; defaults to the command clock advanced by elapsed time. */
+  now?: () => string;
 }
 
 const DEFAULT_EXPIRY_LIMIT = 100;
@@ -144,6 +146,8 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
   }
 
   async function execute(command: TimeOffChangeCommand): Promise<TimeOffChangeReceipt> {
+    const startedAt = performance.now();
+    const now = deps.now ?? (() => new Date(Date.parse(command.nowIso) + performance.now() - startedAt).toISOString());
     const reasons = validateCommand(command);
     const inputHash = hashTimeOffChangeCommand(command);
     const franchiseId = command.actor.franchiseId;
@@ -152,10 +156,17 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
       deps.resolveNoticeRequired(franchiseId),
       deps.resolveContact(franchiseId)
     ]);
-    const context: CommandContext = { command, reasons, inputHash, timezone, noticeRequired, contact };
+    const context: CommandContext = { command, reasons, inputHash, timezone, noticeRequired, contact, now };
     let receipt: TimeOffChangeReceipt;
     try {
-      receipt = await retryTimeOffChangeTransaction(() => withTransaction((client) => runCommand(client, context)));
+      receipt = await retryTimeOffChangeTransaction(() => withTransaction(async (client) => {
+        context.startDeadline = undefined;
+        const result = await runCommand(client, context);
+        if (context.startDeadline !== undefined && Date.parse(now()) >= context.startDeadline) {
+          throw failure('TIME_OFF_START_DEADLINE', 'This time off has already started and is view-only', 409);
+        }
+        return result;
+      }));
     } catch (error) {
       if (isTimeOffChangeKeyConflict(error)) return recoverReplay(command, inputHash, timezone);
       throw mapError(error);
@@ -176,11 +187,13 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
 
   async function runCommand(client: PoolClient, context: CommandContext): Promise<TimeOffChangeReceipt> {
     const { command, timezone } = context;
-    const { actor, nowIso } = command;
+    const { actor } = command;
     const locked = await lockTimeOffChangeRequest(client, command.requestId, timezone);
     if (!locked || !visible(actor, locked.request)) throw notFound();
     const replay = await findTimeOffChangeReplay(client, actor, command.idempotencyKey, context.inputHash);
     if (replay) return replay;
+    const nowIso = context.now();
+    context.startDeadline = Date.parse(locked.request.startAt);
 
     if (command.expectedVersion !== locked.version) {
       throw failure('TIME_OFF_VERSION_CONFLICT', 'This time off changed; refresh and review it again', 409);
@@ -204,6 +217,7 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
       if (!isAmendmentActionable(request, pending, nowIso)) {
         throw failure('TIME_OFF_AMENDMENT_EXPIRED', 'This change request expired before it was reviewed', 409);
       }
+      context.startDeadline = Math.min(context.startDeadline, Date.parse(pending.proposed.startAt));
       if (pending.baseVersion !== version) {
         throw failure('TIME_OFF_VERSION_CONFLICT', 'This change request no longer matches the request', 409);
       }
@@ -216,7 +230,7 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
 
     assertActionAllowed(actor, request, pending, command.action, nowIso);
     const base: OperationBase = {
-      client, actor, idempotencyKey: command.idempotencyKey, inputHash: context.inputHash, nowIso,
+      client, actor, idempotencyKey: command.idempotencyKey, inputHash: context.inputHash, nowIso: command.nowIso,
       changeReason: context.reasons.changeReason ?? null, contact: context.contact, request, version,
       calendarId: locked.calendarId
     };
@@ -305,11 +319,12 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
       actor: input.actor,
       timezone: input.context.timezone,
       noticeRequired: input.context.noticeRequired,
-      nowIso: input.context.command.nowIso
+      nowIso: input.context.now()
     });
     if (!validation.valid) {
       throw failure('TIME_OFF_INVALID_CHANGE', validation.errors[0], 400, { errors: validation.errors });
     }
+    input.context.startDeadline = Math.min(input.context.startDeadline ?? Infinity, Date.parse(validation.value.startAt));
     await assertNoOverlap(client, input.request, validation.value);
     return validation.value;
   }
@@ -560,6 +575,8 @@ interface CommandContext {
   timezone: string;
   noticeRequired: boolean;
   contact: FranchiseContact | null;
+  now: () => string;
+  startDeadline?: number;
 }
 
 function visible(actor: TimeOffChangeOperationActor, request: TimeOffRecord): boolean {

@@ -1,8 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { Link, MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ApprovalsPage } from './ApprovalsPage';
 import { pendingDetail } from '../../test/adminTimeEntryFixtures';
+import * as franchiseUtils from '../../lib/franchise';
 vi.mock('../../providers/AuthProvider', () => ({ useAuth: () => ({ session: {
   accountType: 'ADMIN', accountId: 100, franchiseId: 77, displayName: 'Test Admin'
 } }) }));
@@ -90,4 +91,54 @@ it('opens a manage deep link in the change view instead of the original approval
   expect(await screen.findByText('Request #42')).toBeInTheDocument();
   expect(calls.some((path) => path.startsWith('/api/timeoff/admin/42/change-detail'))).toBe(true);
   expect(calls.some((path) => /^\/api\/timeoff\/admin\/42\?/.test(path))).toBe(false);
+});
+
+it('switches centers from a manage link without restoring its old request and center', async () => {
+  const selector = vi.spyOn(franchiseUtils, 'isSelectorAllowed').mockReturnValue(true);
+  const calls = timeOffHost(true);
+  try {
+    render(<MemoryRouter initialEntries={['/admin/approvals?tab=timeoff&franchiseId=77&requestId=42&view=manage']}
+      future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><ApprovalsPage /></MemoryRouter>);
+    await screen.findByText('Request #42');
+    fireEvent.change(screen.getByLabelText(/Franchise ID/), { target: { value: '88' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(calls.some((path) => path.includes('change-capabilities?franchiseId=88'))).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getByLabelText(/Franchise ID/)).toHaveValue('88');
+    expect(screen.queryByText('Request #42')).not.toBeInTheDocument();
+  } finally { selector.mockRestore(); }
+});
+
+it('asks before a tab switch discards a denial draft', async () => {
+  timeOffHost(true);
+  const selector = vi.spyOn(franchiseUtils, 'isSelectorAllowed').mockReturnValue(true);
+  const baseFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (String(input).includes('/43/change-detail')) return new Response(JSON.stringify({ error: 'Not found' }), { status: 404 });
+    if (String(input).endsWith('/42/change-preview')) return new Response(JSON.stringify({
+      version: '5', resolvedOffsets: { start: '-08:00', end: '-08:00' }, pto: null, warnings: []
+    }));
+    const response = await baseFetch(input, init);
+    if (!String(input).includes('/42/change-detail')) return response;
+    const body = await response.json();
+    body.allowedActions = ['approve_amendment', 'deny_amendment', 'cancel'];
+    body.pendingAmendment = { id: '7', requestId: 42, baseVersion: '5', status: 'pending',
+      proposed: { ...body.request, endDate: '2026-11-18' }, timezone: body.timezone, changeReason: 'Flights changed' };
+    return new Response(JSON.stringify(body));
+  };
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  try {
+    render(<MemoryRouter initialEntries={['/admin/approvals?tab=timeoff&franchiseId=77&requestId=42&view=manage']}
+      future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <Link to="/admin/approvals?tab=timeoff&franchiseId=88&requestId=43&view=manage">Open another center</Link>
+      <ApprovalsPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Deny change' }));
+    fireEvent.change(await screen.findByLabelText('Denial reason'), { target: { value: 'Coverage is short that week' } });
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Time Entry Variances' }));
+    expect(confirm).toHaveBeenCalled();
+    expect(screen.getByLabelText('Denial reason')).toHaveValue('Coverage is short that week');
+    fireEvent.click(screen.getByRole('link', { name: 'Open another center' }));
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText('Denial reason')).toHaveValue('Coverage is short that week');
+  } finally { confirm.mockRestore(); selector.mockRestore(); }
 });

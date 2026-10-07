@@ -87,6 +87,18 @@ export function TutorTimeOffPage(): JSX.Element {
   const editorDirty = useRef(false);
   const commandKeys = useRef(createCommandKeys());
   const dialogOpener = useRef<HTMLElement | null>(null);
+  const dialogGeneration = useRef(0);
+  const [loadingChangeId, setLoadingChangeId] = useState<number | null>(null);
+
+  const loadRequestChangeDetail = async (id: number) => {
+    setLoadingChangeId(id);
+    try {
+      const detail = await fetchTutorTimeOffChangeDetail(id);
+      setChangeDetails((previous) => ({ ...previous, [id]: detail }));
+    } catch (err) {
+      toast.error(changeErrorMessage(err, 'Unable to load this time off.'));
+    } finally { setLoadingChangeId(null); }
+  };
 
   const loadChangeDetails = async (items: TimeOffRequest[]) => {
     const approved = items.filter((item) => item.status === 'approved')
@@ -260,6 +272,7 @@ export function TutorTimeOffPage(): JSX.Element {
   };
 
   const openChangeDialog = async (kind: ChangeDialog['kind'], requestId: number) => {
+    const generation = ++dialogGeneration.current;
     // Dialogs open without a DialogTrigger, so restore focus to the opener ourselves.
     dialogOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     commandKeys.current.reset();
@@ -270,13 +283,15 @@ export function TutorTimeOffPage(): JSX.Element {
     setDialogDetail(changeDetails[requestId] ?? null);
     setChangeDialog({ kind, requestId });
     try {
-      setDialogDetail(await fetchTutorTimeOffChangeDetail(requestId));
+      const detail = await fetchTutorTimeOffChangeDetail(requestId);
+      if (generation === dialogGeneration.current) setDialogDetail(detail);
     } catch (err) {
-      setDialogError(changeErrorMessage(err, 'Unable to load this time off.'));
+      if (generation === dialogGeneration.current) setDialogError(changeErrorMessage(err, 'Unable to load this time off.'));
     }
   };
 
   const closeChangeDialog = () => {
+    dialogGeneration.current += 1;
     setChangeDialog(null);
     setDialogDetail(null);
     editorDirty.current = false;
@@ -290,12 +305,15 @@ export function TutorTimeOffPage(): JSX.Element {
 
   const refreshDialogDetail = async () => {
     if (!changeDialog) return;
+    const generation = ++dialogGeneration.current;
     try {
-      setDialogDetail(await fetchTutorTimeOffChangeDetail(changeDialog.requestId));
+      const detail = await fetchTutorTimeOffChangeDetail(changeDialog.requestId);
+      if (generation !== dialogGeneration.current) return;
+      setDialogDetail(detail);
       setDialogStale(false);
       setDialogError(null);
     } catch (err) {
-      setDialogError(changeErrorMessage(err, 'Unable to refresh this time off.'));
+      if (generation === dialogGeneration.current) setDialogError(changeErrorMessage(err, 'Unable to refresh this time off.'));
     }
   };
 
@@ -494,6 +512,12 @@ export function TutorTimeOffPage(): JSX.Element {
                           detail={changeDetails[request.id]}
                           onAction={(kind) => void openChangeDialog(kind, request.id)}
                         />
+                      ) : policy?.changesEnabled && ['approved', 'cancelled'].includes(request.status) ? (
+                        <Button variant="outline" size="sm" className="mt-3"
+                          aria-label={`View change details for #${request.id}`} disabled={loadingChangeId === request.id}
+                          onClick={() => void loadRequestChangeDetail(request.id)}>
+                          {loadingChangeId === request.id ? 'Loading...' : 'View change details'}
+                        </Button>
                       ) : null}
                     </div>
                   ))}
@@ -646,12 +670,10 @@ export function TutorTimeOffPage(): JSX.Element {
                 <DialogTitle>Request a change</DialogTitle>
                 <DialogDescription>An admin reviews this change before it replaces your approved time off.</DialogDescription>
               </DialogHeader>
-              {dialogStale ? (
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
-                  <span>This time off changed since you opened it. Refresh, review, and submit again.</span>
-                  <Button size="sm" variant="outline" onClick={() => void refreshDialogDetail()}>Refresh details</Button>
-                </div>
-              ) : null}
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
+                {dialogStale ? <span>This time off changed since you opened it. Refresh, review, and submit again.</span> : null}
+                <Button size="sm" variant="outline" onClick={() => void refreshDialogDetail()} disabled={dialogBusy}>Refresh details</Button>
+              </div>
               {dialogDetail ? (
                 <TimeOffChangeEditor
                   key={dialogDetail.request.id}

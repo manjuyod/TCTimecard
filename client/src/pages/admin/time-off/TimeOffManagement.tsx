@@ -73,6 +73,7 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
   const [detail, setDetail] = useState<TimeOffChangeDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [focusAmendment, setFocusAmendment] = useState<string | null>(amendmentId ?? null);
+  const link = useRef({ requestId, amendmentId });
   const [dialog, setDialog] = useState<Dialogs>(null);
   const [busy, setBusy] = useState(false);
   const [stale, setStale] = useState(false);
@@ -80,6 +81,8 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
   const [cancellationReason, setCancellationReason] = useState('');
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const editorDirty = useRef(false);
+  const [reviewDirty, setReviewDirty] = useState(false);
+  const [draftDirty, setDraftDirty] = useState(false);
   const dialogOpener = useRef<HTMLElement | null>(null);
   const openDialog = (next: Exclude<Dialogs, null>) => {
     // Dialogs open without a DialogTrigger, so restore focus to the opener ourselves.
@@ -161,11 +164,32 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
   }, [loadDetail, selectedId]);
 
   const open = (id: number, amendment?: string) => {
+    if (busy || (reviewDirty && !window.confirm('Discard your unsaved changes?'))) return;
+    setReviewDirty(false);
     setFocusAmendment(amendment ?? null);
     setDetail(null);
     if (id === selectedId) void loadDetail(id);
     setSelectedId(id);
   };
+
+  useEffect(() => {
+    if (link.current.requestId === requestId && link.current.amendmentId === amendmentId) return;
+    link.current = { requestId, amendmentId };
+    if (busy || ((editorDirty.current || reviewDirty || (dialog === 'cancel' && cancellationReason.trim()))
+      && !window.confirm('Discard your unsaved changes?'))) return;
+    detailGeneration.current += 1;
+    setDetail(null);
+    setDialog(null);
+    setDialogError(null);
+    setStale(false);
+    editorDirty.current = false;
+    setDraftDirty(false);
+    setReviewDirty(false);
+    onDirtyChange?.(false);
+    setFocusAmendment(amendmentId ?? null);
+    setSelectedId(requestId ?? null);
+    if (requestId === selectedId && requestId !== undefined) void loadDetail(requestId);
+  }, [requestId, amendmentId, loadDetail]);
 
   const refreshAll = async () => {
     await Promise.all([
@@ -188,6 +212,7 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
     setDialogError(null);
     setStale(false);
     editorDirty.current = false;
+    setDraftDirty(false);
     onDirtyChange?.(false);
   };
 
@@ -205,6 +230,7 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
       commandKeys.current.reset();
       if (!alive.current) return;
       closeDialog();
+      setReviewDirty(false);
       toast.success(success);
       await refreshAll();
     } catch (err) {
@@ -254,8 +280,12 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
 
   const onEditorDirtyChange = useCallback((dirty: boolean) => {
     editorDirty.current = dirty;
-    onDirtyChange?.(dirty);
-  }, [onDirtyChange]);
+    setDraftDirty(dirty);
+  }, []);
+
+  useEffect(() => {
+    onDirtyChange?.(busy || draftDirty || reviewDirty || (dialog === 'cancel' && cancellationReason.trim().length > 0));
+  }, [busy, draftDirty, reviewDirty, dialog, cancellationReason, onDirtyChange]);
 
   const actions = detail?.allowedActions ?? [];
   const amendment = detail?.pendingAmendment ?? null;
@@ -389,6 +419,7 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
                         && (focusAmendment === null || focusAmendment === amendment.id)}
                       busy={busy}
                       onDecide={decide}
+                      onDirtyChange={setReviewDirty}
                     />
                   ) : null}
                   {actions.length === 0 ? (
@@ -435,14 +466,12 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
                 <DialogTitle>Edit approved request</DialogTitle>
                 <DialogDescription>Changes take effect immediately and the request stays approved.</DialogDescription>
               </DialogHeader>
-              {stale ? (
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
-                  <span>This time off changed since you opened it. Refresh, compare, and save again.</span>
-                  <Button size="sm" variant="outline" onClick={() => { void loadDetail(detail.request.id); setStale(false); }}>
-                    Refresh details
-                  </Button>
-                </div>
-              ) : null}
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
+                {stale ? <span>This time off changed since you opened it. Refresh, compare, and save again.</span> : null}
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => { void loadDetail(detail.request.id); setStale(false); }}>
+                  Refresh details
+                </Button>
+              </div>
               <TimeOffChangeEditor
                 key={detail.request.id}
                 detail={detail}

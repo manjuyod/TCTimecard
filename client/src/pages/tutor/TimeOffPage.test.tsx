@@ -331,6 +331,57 @@ const openChangeEditor = async () => {
 };
 
 describe('tutor approved time-off changes', () => {
+  it('ignores a late dialog detail response after opening another request', async () => {
+    installChangeFetch({ changesEnabled: true });
+    const baseFetch = globalThis.fetch;
+    let release: (response: Response) => void = () => undefined;
+    let firstDetailCalls = 0;
+    const second = { ...approvedRequest, id: 44, startDate: '2026-12-01', endDate: '2026-12-02' };
+    globalThis.fetch = async (input, init) => {
+      const path = String(input);
+      if (path.startsWith('/api/timeoff/me')) return new Response(JSON.stringify({ requests: [approvedRequest, second] }));
+      if (path === '/api/timeoff/42/change-detail' && ++firstDetailCalls === 2) {
+        return new Promise<Response>((resolve) => { release = resolve; });
+      }
+      if (path === '/api/timeoff/44/change-detail') {
+        const response = await baseFetch('/api/timeoff/42/change-detail', init);
+        const body = await response.json();
+        body.request = second;
+        return new Response(JSON.stringify(body));
+      }
+      return baseFetch(input, init);
+    };
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    const actions = await screen.findAllByRole('button', { name: 'Request change' });
+    fireEvent.click(actions[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Request change' })[1]);
+    expect(await screen.findByLabelText('Start date')).toHaveValue('2026-12-01');
+    release(await baseFetch('/api/timeoff/42/change-detail'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByLabelText('Start date')).toHaveValue('2026-12-01');
+  });
+
+  it('keeps approved requests beyond the initial detail batch reachable', async () => {
+    installChangeFetch({ changesEnabled: true });
+    const baseFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const path = String(input);
+      if (path.startsWith('/api/timeoff/me')) return new Response(JSON.stringify({ requests:
+        Array.from({ length: 21 }, (_, i) => ({ ...approvedRequest, id: 42 + i })) }));
+      if (/\/timeoff\/\d+\/change-detail/.test(path)) {
+        const response = await baseFetch('/api/timeoff/42/change-detail', init);
+        const body = await response.json();
+        body.request.id = Number(path.split('/')[3]);
+        return new Response(JSON.stringify(body));
+      }
+      return baseFetch(input, init);
+    };
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'View change details for #62' }));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Request change' })).toHaveLength(21));
+  });
+
   it('keeps the existing card actions when changes are disabled', async () => {
     installChangeFetch();
     render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);

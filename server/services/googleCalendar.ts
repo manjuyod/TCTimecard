@@ -41,13 +41,13 @@ export const resolveCalendarServiceAccountCredentials = (
 };
 
 export interface CalendarClient {
-  insertEvent: (calendarId: string, event: Record<string, unknown>) => Promise<{ id: string; htmlLink?: string }>;
-  getEvent: (calendarId: string, eventId: string) => Promise<Record<string, unknown>>;
+  insertEvent: (calendarId: string, event: Record<string, unknown>, signal?: AbortSignal) => Promise<{ id: string; htmlLink?: string }>;
+  getEvent: (calendarId: string, eventId: string, signal?: AbortSignal) => Promise<Record<string, unknown>>;
   /** Partial update: omitted fields are kept and `null` clears a field. */
-  patchEvent: (calendarId: string, eventId: string, patch: Record<string, unknown>) => Promise<Record<string, unknown>>;
-  deleteEvent: (calendarId: string, eventId: string) => Promise<void>;
+  patchEvent: (calendarId: string, eventId: string, patch: Record<string, unknown>, signal?: AbortSignal) => Promise<Record<string, unknown>>;
+  deleteEvent: (calendarId: string, eventId: string, signal?: AbortSignal) => Promise<void>;
   /** Proves the subject can read the calendar using only the events scope. */
-  assertCalendarAccess: (calendarId: string) => Promise<void>;
+  assertCalendarAccess: (calendarId: string, signal?: AbortSignal) => Promise<void>;
 }
 
 export type CalendarProviderError = Error & { status?: number; reason?: string };
@@ -77,41 +77,63 @@ const parseJson = (text: string): unknown => {
 };
 
 /**
- * Patch, delete, and access-probe requests for an authorized calendar subject.
- * Every request carries a 10-second timeout.
+ * All event requests, including token acquisition, have a 10-second deadline.
  */
 export const createCalendarEventTransport = (input: {
   getAccessToken: () => Promise<string>;
   fetch?: typeof fetch;
   timeoutMs?: number;
-}): Pick<CalendarClient, 'patchEvent' | 'deleteEvent' | 'assertCalendarAccess'> => {
+}): CalendarClient => {
   const fetchImpl = input.fetch ?? fetch;
-  const send = async (operation: string, url: string, init: RequestInit = {}): Promise<unknown> => {
-    const accessToken = await input.getAccessToken();
+  const send = async (operation: string, url: string, init: RequestInit = {}, parentSignal?: AbortSignal): Promise<unknown> => {
+    const timeout = AbortSignal.timeout(input.timeoutMs ?? CALENDAR_REQUEST_TIMEOUT_MS);
+    const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
+    signal.throwIfAborted();
+    const accessToken = await tokenBeforeDeadline(input.getAccessToken(), signal);
+    // Token acquisition itself may finish after an abort. Never start a write then.
+    signal.throwIfAborted();
     const response = await fetchImpl(url, {
       ...init,
       headers: {
         Authorization: `Bearer ${accessToken}`,
         ...(init.body ? { 'Content-Type': 'application/json' } : {})
       },
-      signal: AbortSignal.timeout(input.timeoutMs ?? CALENDAR_REQUEST_TIMEOUT_MS)
+      signal
     });
     const body = parseJson(await response.text());
     if (!response.ok) throw providerError(operation, response.status, body);
     return body;
   };
   return {
-    patchEvent: async (calendarId, eventId, patch) =>
-      ((await send('patch', calendarEventsUrl(calendarId, eventId), { method: 'PATCH', body: JSON.stringify(patch) }))
+    insertEvent: async (calendarId, event, signal) =>
+      ((await send('insert', calendarEventsUrl(calendarId), { method: 'POST', body: JSON.stringify(event) }, signal))
+        ?? {}) as { id: string; htmlLink?: string },
+    getEvent: async (calendarId, eventId, signal) =>
+      ((await send('event lookup', calendarEventsUrl(calendarId, eventId), {}, signal)) ?? {}) as Record<string, unknown>,
+    patchEvent: async (calendarId, eventId, patch, signal) =>
+      ((await send('patch', calendarEventsUrl(calendarId, eventId), { method: 'PATCH', body: JSON.stringify(patch) }, signal))
         ?? {}) as Record<string, unknown>,
-    deleteEvent: async (calendarId, eventId) => {
-      await send('delete', calendarEventsUrl(calendarId, eventId), { method: 'DELETE' });
+    deleteEvent: async (calendarId, eventId, signal) => {
+      await send('delete', calendarEventsUrl(calendarId, eventId), { method: 'DELETE' }, signal);
     },
-    assertCalendarAccess: async (calendarId) => {
-      await send('access check', `${calendarEventsUrl(calendarId)}?maxResults=1`);
+    assertCalendarAccess: async (calendarId, signal) => {
+      await send('access check', `${calendarEventsUrl(calendarId)}?maxResults=1`, {}, signal);
     }
   };
 };
+
+async function tokenBeforeDeadline(token: Promise<string>, signal: AbortSignal): Promise<string> {
+  let aborted: () => void = () => undefined;
+  try {
+    return await Promise.race([token, new Promise<never>((_resolve, reject) => {
+      aborted = () => reject(signal.reason);
+      signal.addEventListener('abort', aborted, { once: true });
+      if (signal.aborted) aborted();
+    })]);
+  } finally {
+    signal.removeEventListener('abort', aborted);
+  }
+}
 
 export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient => {
   const subject = subjectEmail?.trim();
@@ -127,67 +149,6 @@ export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient 
     subject
   });
 
-  const insertEvent = async (calendarId: string, event: Record<string, unknown>) => {
-    const tokens = await jwt.authorize();
-    const accessToken = tokens?.access_token;
-    if (!accessToken) {
-      throw new Error('Unable to acquire Google access token');
-    }
-
-    const response = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(event)
-      }
-    );
-
-    const text = await response.text();
-    let json: Record<string, unknown> | null = null;
-    try {
-      json = text ? (JSON.parse(text) as Record<string, unknown>) : null;
-    } catch (_err) {
-      json = null;
-    }
-
-    if (!response.ok) {
-      const message =
-        (json as { error?: { message?: string } } | null)?.error?.message ||
-        response.statusText ||
-        'Unknown Google Calendar error';
-      const error = new Error(`Google Calendar insert failed (${response.status}): ${message}`) as Error & {
-        status?: number;
-      };
-      error.status = response.status;
-      throw error;
-    }
-
-    return (json ?? {}) as { id: string; htmlLink?: string };
-  };
-
-  const getEvent = async (calendarId: string, eventId: string) => {
-    const tokens = await jwt.authorize();
-    const accessToken = tokens?.access_token;
-    if (!accessToken) throw new Error('Unable to acquire Google access token');
-    const response = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    const text = await response.text();
-    const body = parseJson(text);
-    if (!response.ok) {
-      const error = new Error(`Google Calendar event lookup failed (${response.status})`) as CalendarProviderError;
-      error.status = response.status;
-      error.reason = (body as { error?: { errors?: Array<{ reason?: string }> } } | null)?.error?.errors?.[0]?.reason;
-      throw error;
-    }
-    return (body ?? {}) as Record<string, unknown>;
-  };
-
   const transport = createCalendarEventTransport({
     getAccessToken: async () => {
       const accessToken = (await jwt.authorize())?.access_token;
@@ -196,7 +157,7 @@ export const buildGcalClientForSubject = (subjectEmail: string): CalendarClient 
     }
   });
 
-  return { insertEvent, getEvent, ...transport };
+  return transport;
 };
 
 export const buildDeterministicTimeOffEventId = (requestId: number): string => `tctimeoff${requestId.toString(32)}`;

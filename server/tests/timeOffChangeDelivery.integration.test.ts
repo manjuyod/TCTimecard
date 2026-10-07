@@ -100,6 +100,52 @@ describe('approved time-off change delivery', { skip }, () => {
     sent.length = 0;
   });
 
+  it('adopts a recovery event from a crashed older edit when a newer edit arrives', async () => {
+    const calendar = new FakeCalendar();
+    const requestId = await approvedWithEvent(calendar, false);
+    await edit(requestId, '2026-11-18');
+    calendar.afterMutation = async () => { await terminateIdleWorker(); };
+    await assert.rejects(runTimeOffChangeDeliveryPass(deps(calendar), NOW));
+    calendar.afterMutation = undefined;
+    await edit(requestId, '2026-11-19');
+    await runTimeOffChangeDeliveryPass(deps(calendar), later(1));
+    assert.equal(calendar.events.size, 1, 'an uncertain older recovery must not become a second leave event');
+    assert.deepEqual([...calendar.events.values()][0].end, { date: '2026-11-20' });
+  });
+
+  it('stops the calendar sequence at its deadline before starting a later mutation', async () => {
+    const calendar = new FakeCalendar();
+    const requestId = await approvedWithEvent(calendar);
+    await edit(requestId, '2026-11-18');
+    const client = { ...calendar, getEvent: async (calendarId: string, eventId: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return calendar.getEvent(calendarId, eventId);
+    }, patchEvent: calendar.patchEvent.bind(calendar), insertEvent: calendar.insertEvent.bind(calendar),
+    deleteEvent: calendar.deleteEvent.bind(calendar), assertCalendarAccess: calendar.assertCalendarAccess.bind(calendar) };
+    await runTimeOffChangeDeliveryPass({ ...deps(calendar), calendarClientFor: () => client,
+      calendarAttemptTimeoutMs: 5 } as TimeOffChangeDeliveryDeps, NOW);
+    assert.equal(calendar.count('patch'), 0, 'expired work must stop before a mutation');
+    assert.equal((await jobs(requestId))[0].status, 'pending');
+    await cancel(requestId);
+    await runTimeOffChangeDeliveryPass(deps(calendar), later(1));
+    assert.equal(calendar.events.size, 0);
+  });
+
+  it('never delivers an older pending edit when a newer cancellation is already sent', async () => {
+    const calendar = new FakeCalendar();
+    const requestId = await approvedWithEvent(calendar);
+    await edit(requestId, '2026-11-18');
+    const [older] = await jobs(requestId);
+    await db().query("UPDATE time_off_change_deliveries SET status='failed' WHERE id=$1", [older.id]);
+    await cancel(requestId);
+    await runTimeOffChangeDeliveryPass(deps(calendar), NOW);
+    // A retry read can race with the cancellation commit; the worker must still fence it.
+    await db().query("UPDATE time_off_change_deliveries SET status='pending', next_attempt_at=$2 WHERE id=$1", [older.id, NOW]);
+    await runTimeOffChangeDeliveryPass(deps(calendar), later(1));
+    assert.equal(calendar.events.size, 0, 'a stale retry cannot resurrect cancelled leave');
+    assert.equal((await jobs(requestId))[0].status, 'superseded');
+  });
+
   it('applies only the newest calendar target and never runs an older edit after a cancellation', async () => {
     const calendar = new FakeCalendar();
     const requestId = await approvedWithEvent(calendar);

@@ -22,7 +22,10 @@ const PREREQUISITE_TABLES = `
     decision_token_expires_at TIMESTAMPTZ, decision_token_used_at TIMESTAMPTZ
   );
   CREATE TABLE public.time_off_audit (
-    id BIGSERIAL PRIMARY KEY, request_id BIGINT NOT NULL, action TEXT NOT NULL,
+    id BIGSERIAL PRIMARY KEY, request_id BIGINT NOT NULL, action TEXT NOT NULL
+      CONSTRAINT time_off_audit_action_check CHECK (action IN (
+        'created', 'cancelled', 'approved', 'denied', 'admin_email_sent', 'admin_email_failed',
+        'requester_email_sent', 'requester_email_failed', 'notification_retry_sent', 'notification_retry_failed')),
     actor_account_type TEXT NOT NULL, actor_account_id BIGINT, at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     previous_status TEXT, new_status TEXT NOT NULL, metadata JSONB NOT NULL DEFAULT '{}'::JSONB
   );
@@ -36,7 +39,8 @@ export const TIME_OFF_MIGRATION_CHAIN = [
   '0012_pto_routes.sql',
   '0013_persistent_pto_profile_links.sql',
   '0014_database_controlled_pto_linked_login.sql',
-  '0016_approved_time_off_changes.sql'
+  '0016_approved_time_off_changes.sql',
+  '0017_time_off_change_review_fixes.sql'
 ];
 
 export const readMigration = (name: string): string =>

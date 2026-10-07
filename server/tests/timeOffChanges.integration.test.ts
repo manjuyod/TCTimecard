@@ -89,6 +89,32 @@ describe('approved time-off change lifecycle', { skip }, () => {
     timezone = 'America/Los_Angeles';
   });
 
+  it('rechecks the start deadline after waiting for the parent lock', async () => {
+    const requestId = await seedTimeOffRequest(db(), { startAt: '2026-10-07T17:01:00Z' });
+    let current = NOW;
+    const locked = await db().connect();
+    await locked.query('BEGIN');
+    await locked.query('SELECT 1 FROM time_off_requests WHERE id=$1 FOR UPDATE', [requestId]);
+    try {
+      const outcome = service({ now: () => current } as Partial<TimeOffChangeDeps>).execute({
+        actor: tutor, requestId, action: 'cancel', expectedVersion: '1', idempotencyKey: key(), nowIso: NOW,
+        changeReason: 'Plans changed while waiting'
+      }).then(() => 'saved', (error) => error.code);
+      for (let i = 0; i < 100; i += 1) {
+        const waiting = await db().query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'");
+        if (waiting.rows.length) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      current = '2026-10-07T17:02:00Z';
+      await locked.query('COMMIT');
+      assert.equal(await outcome, 'TIME_OFF_START_DEADLINE');
+      assert.equal((await detail(tutor, requestId)).request.status, 'approved');
+    } finally {
+      await locked.query('ROLLBACK');
+      locked.release();
+    }
+  });
+
   it('a proposal leaves the effective request, PTO, and calendar untouched', async () => {
     const pto = await seedPtoTutor(db());
     const requestId = await approvedPto(db(), '2026-11-16', '2026-11-17');

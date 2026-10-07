@@ -131,6 +131,39 @@ describe('approved time-off PTO reconciliation', { skip }, () => {
     await resetTimeOffChangesSchema(db());
   });
 
+  it('allows a legacy reason-only edit across UTC midnight without inventing consumption', async () => {
+    await seedPtoTutor();
+    const requestId = await seedTimeOffRequest(db(), {
+      type: 'pto', partialDay: true, startDate: '2026-11-16', endDate: '2026-11-16',
+      startAt: '2026-11-17T04:00:00Z', endAt: '2026-11-17T06:00:00Z', durationHours: 2
+    });
+    await db().query("UPDATE time_off_requests SET public_metadata = '{}', leave_time='20:00', return_time='22:00' WHERE id=$1", [requestId]);
+    const target = fullDays('2026-11-16', '2026-11-16', {
+      partialDay: true, startAt: '2026-11-17T04:00:00.000Z', endAt: '2026-11-17T06:00:00.000Z',
+      leaveTime: '20:00', returnTime: '22:00', durationHours: 2, reason: 'Updated explanation only'
+    });
+    const quote = await quoteApprovedTimeOffChange(db(), requestId, target);
+    assert.equal(quote.eligible, true);
+    await change(requestId, 'admin_edit', target);
+    assert.equal((await ledger(requestId)).length, 0);
+    await change(requestId, 'cancel', null);
+    assert.equal((await ledger(requestId)).length, 0);
+  });
+
+  it('recognizes legacy timed leave even when the old partial-day flag is false', async () => {
+    await seedPtoTutor();
+    const requestId = await seedTimeOffRequest(db(), { type: 'pto', partialDay: false,
+      startAt: '2026-11-17T04:00:00Z', endAt: '2026-11-17T06:00:00Z', durationHours: 2 });
+    await db().query("UPDATE time_off_requests SET public_metadata = '{}', leave_time='20:00', return_time='22:00' WHERE id=$1", [requestId]);
+    const target = fullDays('2026-11-16', '2026-11-16', { partialDay: true,
+      startAt: '2026-11-17T04:00:00.000Z', endAt: '2026-11-17T06:00:00.000Z',
+      leaveTime: '20:00', returnTime: '22:00', durationHours: 2, reason: 'Updated explanation only' });
+    const quote = await quoteApprovedTimeOffChange(db(), requestId, target);
+    assert.equal(quote.tracked, false);
+    await change(requestId, 'admin_edit', target);
+    assert.equal((await ledger(requestId)).length, 0);
+  });
+
   it('replacements reprice one allocation and append deltas while retaining all history', async () => {
     const tutor = await seedPtoTutor();
     const requestId = await approvedPto('2026-11-16', '2026-11-17');

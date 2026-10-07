@@ -138,6 +138,17 @@ describe('time-off Google Calendar payload', () => {
 });
 
 describe('time-off Google Calendar event transport', () => {
+  it('does not send a mutation after token acquisition outlives the request timeout', async () => {
+    let calls = 0;
+    const transport = createCalendarEventTransport({
+      getAccessToken: () => new Promise((resolve) => setTimeout(() => resolve('token'), 40)),
+      fetch: (async () => { calls += 1; return new Response('{}'); }) as typeof fetch,
+      timeoutMs: 5
+    });
+    await assert.rejects(transport.patchEvent('center@example.com', 'event', {}), /abort|timeout/i);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(calls, 0);
+  });
   const recorder = (responses: Array<{ status: number; body?: unknown }>) => {
     const calls: Array<{ url: string; method: string; body: unknown; authorization: string; signal: unknown }> = [];
     const fetchImpl = async (url: string | URL, init: RequestInit = {}) => {

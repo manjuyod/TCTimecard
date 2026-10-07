@@ -46,7 +46,8 @@ export function TimeOffChangeEditor({ detail, mode, preview, onSave, onCancel, b
   }, []);
 
   const fingerprint = JSON.stringify(draft);
-  const currentPreview = previewed && previewed.fingerprint === fingerprint ? previewed.result : null;
+  const currentPreview = previewed && previewed.fingerprint === fingerprint
+    && previewed.result.version === detail.version ? previewed.result : null;
   const dirty = fingerprint !== JSON.stringify(initial) || changeReason !== '';
   const disabled = busy || saving || previewing;
 
@@ -93,6 +94,7 @@ export function TimeOffChangeEditor({ detail, mode, preview, onSave, onCancel, b
   };
 
   const save = async () => {
+    if (disabled || !currentPreview) return;
     const reason = changeReason.trim();
     if (reason.length < 10 || reason.length > 2000) {
       setFieldErrors((current) => ({ ...current, changeReason: reason.length < 10
@@ -202,6 +204,9 @@ export function TimeOffChangeEditor({ detail, mode, preview, onSave, onCancel, b
       )}
 
       {error ? <p role="alert" className="rounded-lg bg-destructive/10 p-3 text-sm font-medium text-destructive">{error}</p> : null}
+      {previewed && previewed.fingerprint === fingerprint && previewed.result.version !== detail.version ? (
+        <p role="alert" className="text-sm text-destructive">This time off changed. Refresh details, then preview again.</p>
+      ) : null}
 
       {confirmingDiscard ? (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">

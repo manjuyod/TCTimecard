@@ -17,11 +17,12 @@ Tutors can propose changes to approved time off, and admins can approve or deny 
 
 ## Deploying and enabling
 
-1. **Migrate first.** Take the normal backup. Then apply `server/db/migrations/0016_approved_time_off_changes.sql` with `npm run db:migrate` in the authorized environment; the runner applies every pending migration.
+1. **Migrate first.** Take the normal backup. Apply migrations through `0017_time_off_change_review_fixes.sql` with `npm run db:migrate` in the authorized environment; the runner applies every pending migration.
    - 0016 adds `version`, `last_change_operation_id` and `google_calendar_id` to `time_off_requests`.
    - It adds the amendment, operation and delivery tables.
    - It replaces the PTO writer functions so every balance writer takes the PTO policy lock before profile and allocation locks.
    - Existing approvals keep a NULL calendar ID; nothing is backfilled or guessed.
+   - 0017 extends the deployed `time_off_audit_action_check` allow-list for the seven change actions, retaining the existing values. It also resolves missing legacy date metadata in the center timezone, including legacy timed leave. A read-only check on 2026-10-07 confirmed the shared database's old CHECK rejects the new actions; **0016 alone is insufficient**. `actor_account_type` is unconstrained text and permits SYSTEM with a null actor ID.
 2. **Check readiness.** Run `npm run db:check-timeoff-schema`; it must report no missing columns.
 3. **Deploy with the flag off.** `TIME_OFF_CHANGES_ENABLED` is off unless set to exactly `true`. With the flag off:
    - The new tutor and admin endpoints return 404 `TIME_OFF_CHANGES_DISABLED`.
@@ -36,7 +37,7 @@ Every API instance runs a delivery worker, whether or not the flag is on, so job
 
 - **Schedule.** One pass every 30 seconds, plus an immediate pass after each saved change. A pass handles at most 20 due jobs and runs the expiry check (at most 100 expired proposals). Passes never overlap, and each uses one database connection.
 - **Coordination between instances.** A calendar job locks its time-off request. Business changes take the same lock, so an older edit can never overwrite a newer edit or cancellation. Older pending calendar jobs for the request are marked **superseded**; a superseded job can never be revived. An email job locks only its own row.
-- **Timeouts.** Each Google request times out after 10 seconds. Each job attempt is capped at 20 seconds for email and 60 seconds for calendar work.
+- **Timeouts.** Each Google request, including token acquisition and insert/lookup, times out after 10 seconds. Each job attempt is capped at 20 seconds for email and 60 seconds for calendar work. Calendar attempts abort the sequence and transport together, and retain the request lock until the attempt settles. A command waiting for that lock rechecks the leave's start deadline before committing.
 - **Retries.** Transient failures (network, timeout, 429, 5xx, rate-limit 403) retry after 30 seconds, 2 minutes, 10 minutes, 1 hour and 6 hours. The job is marked **failed** after the sixth failed attempt. Permission, validation and ownership errors fail immediately.
 - **Before migration.** On startup before 0016, the worker logs once that the delivery tables do not exist yet and stays idle.
 
@@ -49,6 +50,8 @@ The request detail (tutor card or admin **Manage time off**) lists **Calendar up
 In **Manage time off**, failed deliveries appear under *Calendar and email follow-up that needs attention* and in the request detail. **Retry** re-queues the same job with a fresh retry schedule; it does not repeat the business change or rebuild the email. A retry is refused for jobs that are superseded, already sent, or belong to another center. These retries are separate from the legacy notification retry for original requests.
 
 Email is not exactly-once. If the email provider accepts a message and the process crashes before the job is marked sent, the email can be sent twice. Calendar work is idempotent: patches repeat safely, and replacement events use an ID fixed when the job was queued.
+
+A newer edit adopts an owned recovery event left by an earlier crashed attempt. A newer calendar target fences every older pending retry, including when the newer target is already sent or failed.
 
 ### Repair-needed calendar failures
 

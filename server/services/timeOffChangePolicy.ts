@@ -49,6 +49,20 @@ export function validateApprovedTimeOffChange(input: {
 
   const missingTime = nonexistentLocalTime(value, timezone);
   if (missingTime) return invalid(missingTime);
+  // Luxon's default ambiguous offset depends on the current season. Freeze the
+  // earlier occurrence explicitly so preview and later approval agree.
+  if (value.partialDay) {
+    const earlier = (iso: string) => DateTime.fromISO(iso, { setZone: true }).setZone(timezone)
+      .getPossibleOffsets().sort((a, b) => a.toMillis() - b.toMillis())[0];
+    const start = earlier(value.startAt);
+    const end = earlier(value.endAt);
+    value.startAt = start.toUTC().toISO() as string;
+    value.endAt = end.toUTC().toISO() as string;
+    value.durationHours = end.diff(start, 'hours').hours;
+    if (value.durationHours <= 0 || value.durationHours > MAX_TIME_OFF_CHANGE_DURATION_HOURS) {
+      return invalid('Request date or time range is invalid.');
+    }
+  }
   if (instant(value.startAt) <= instant(input.nowIso)) {
     return invalid('The changed time off must start in the future.');
   }

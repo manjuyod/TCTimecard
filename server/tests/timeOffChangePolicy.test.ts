@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { Settings } from 'luxon';
 import {
   amendmentExpiresAt,
   findOverlappingTimeOff,
@@ -127,6 +128,21 @@ describe('approved time-off change validation', () => {
 });
 
 describe('approved time-off change timezone and input rules', () => {
+  it('chooses the earlier ambiguous occurrence even when the server clock is in winter', () => {
+    const previous = Settings.now;
+    try {
+      Settings.now = () => Date.parse('2026-01-15T12:00:00Z');
+      Settings.resetCaches();
+      const result = validate(days('2026-11-01', '2026-11-01', {
+        partialDay: true, leaveTime: '01:30', returnTime: '03:00'
+      }), { request: approved(), actor: admin });
+      assert.equal(result.value?.startAt, '2026-11-01T08:30:00.000Z');
+    } finally {
+      Settings.now = previous;
+      Settings.resetCaches();
+    }
+  });
+
   const novemberRequest = approved({ startAt: '2026-11-09T08:00:00.000Z', endAt: '2026-11-10T08:00:00.000Z',
     startDate: '2026-11-09', endDate: '2026-11-09' });
 

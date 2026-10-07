@@ -53,6 +53,26 @@ const renderEditor = (overrides: Partial<Parameters<typeof TimeOffChangeEditor>[
 };
 
 describe('TimeOffChangeEditor', () => {
+  it('explains when a preview discovers a newer request version', async () => {
+    renderEditor({ preview: vi.fn(async () => ({ ...preview, version: '5' })) });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2026-11-19' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+    expect(await screen.findByText('This time off changed. Refresh details, then preview again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Submit change for approval' })).toBeDisabled();
+  });
+
+  it('requires a new preview after refreshing the request version and preserves the draft', async () => {
+    const props = { detail: detail(), mode: 'tutor' as const, preview: vi.fn(async () => preview),
+      onSave: vi.fn(async () => undefined), onCancel: vi.fn(), busy: false };
+    const view = render(<TimeOffChangeEditor {...props} />);
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2026-11-19' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+    await screen.findByText('Proposed');
+    view.rerender(<TimeOffChangeEditor {...props} detail={detail({ version: '5' })} />);
+    expect(screen.getByLabelText('End date')).toHaveValue('2026-11-19');
+    expect(screen.getByRole('button', { name: 'Submit change for approval' })).toBeDisabled();
+  });
+
   it('prefills franchise-local values without browser timezone conversion and focuses the first field', () => {
     renderEditor();
     expect(screen.getByLabelText('Start date')).toHaveValue('2026-11-16');
