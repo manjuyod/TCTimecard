@@ -1,0 +1,1 @@
+- [Deployment runtime compatibility](deployment-runtime.md) — platform-injected Node options can crash Node 18 before application startup, despite a successful build.
