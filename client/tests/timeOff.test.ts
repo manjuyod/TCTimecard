@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import {
   parseAdminTimeOffDeepLink,
+  parseAdminTimeOffManageLink,
   parseEmailDecisionFragment,
   returnTarget,
   validateTimeOffForm
@@ -106,6 +107,25 @@ describe('time-off client helpers', () => {
       franchiseId: 6,
       requestId: 42,
       action: 'deny'
+    });
+  });
+
+  it('parses change-management deep links additively', () => {
+    assert.deepEqual(parseAdminTimeOffManageLink('?tab=timeoff&franchiseId=6&requestId=42&view=manage&amendmentId=7&x=1'), {
+      franchiseId: 6,
+      requestId: 42,
+      amendmentId: '7'
+    });
+    assert.deepEqual(parseAdminTimeOffManageLink('?tab=timeoff&franchiseId=6&requestId=42&view=manage'), {
+      franchiseId: 6,
+      requestId: 42,
+      amendmentId: null
+    });
+    assert.equal(parseAdminTimeOffManageLink('?tab=timeoff&franchiseId=6&requestId=42&action=approve'), null);
+    assert.equal(parseAdminTimeOffManageLink('?tab=timeoff&franchiseId=6&requestId=42&view=manage&amendmentId=x'), null);
+    assert.equal(parseAdminTimeOffManageLink('?tab=timeentry&view=manage&tutorId=88'), null);
+    assert.deepEqual(parseAdminTimeOffDeepLink('?tab=timeoff&franchiseId=6&requestId=42&view=manage'), {
+      tab: 'timeoff', franchiseId: 6, requestId: 42, action: null
     });
   });
 

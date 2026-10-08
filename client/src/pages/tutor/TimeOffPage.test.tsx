@@ -256,3 +256,219 @@ describe('tutor time-off policy', () => {
     await waitFor(() => expect(calls.some((call) => call.path === '/api/pto/me/emails/31' && call.init?.method === 'DELETE')).toBe(true));
   });
 });
+
+type ChangeCall = { path: string; method: string; body: Record<string, unknown> | null };
+const approvedRequest = {
+  id: 42, franchiseId: 1, tutorId: 123, startAt: '2026-11-16T08:00:00.000Z', endAt: '2026-11-18T08:00:00.000Z',
+  startDate: '2026-11-16', endDate: '2026-11-17', type: 'emergency', absenceLabel: 'Emergency',
+  notes: 'Family emergency out of state', reason: 'Family emergency out of state', status: 'approved',
+  createdAt: '2026-10-01T18:00:00.000Z', decidedAt: '2026-10-02T18:00:00.000Z', decisionReason: 'Approved',
+  partialDay: false, leaveTime: null, returnTime: null, durationHours: 48, source: 'authenticated'
+};
+const pendingRequest = { ...approvedRequest, id: 43, status: 'pending', decidedAt: null, decisionReason: null,
+  startAt: '2026-12-07T08:00:00.000Z', endAt: '2026-12-08T08:00:00.000Z', startDate: '2026-12-07', endDate: '2026-12-07' };
+const proposal = {
+  id: '7', requestId: 42, baseVersion: '5', status: 'pending', timezone: 'America/Los_Angeles',
+  changeReason: 'My flight moved by a day', proposedBy: 123, createdAt: '2026-10-07T17:00:00.000Z',
+  decidedByType: null, decidedBy: null, decidedAt: null, decisionReason: null,
+  proposed: { ...approvedRequest, endDate: '2026-11-18', endAt: '2026-11-19T08:00:00.000Z', storageType: 'other', durationHours: 72 }
+};
+
+const installChangeFetch = (options: { changesEnabled?: boolean; pending?: boolean; submit?: 'ok' | 'network' | 'conflict' } = {}) => {
+  const calls: ChangeCall[] = [];
+  let pending = options.pending ?? false;
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const detail = () => ({
+    version: pending ? '5' : '4', timezone: 'America/Los_Angeles', request: approvedRequest,
+    pendingAmendment: pending ? proposal : null, history: [], deliveries: [],
+    allowedActions: pending ? ['withdraw', 'cancel'] : ['propose', 'cancel']
+  });
+  globalThis.fetch = async (input, init) => {
+    const path = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ path, method, body: init?.body ? JSON.parse(String(init.body)) : null });
+    if (path.startsWith('/api/timeoff/me')) return json({ requests: [approvedRequest, pendingRequest] });
+    if (path === '/api/timeoff/policy') {
+      return json({ policy: { timezone: 'America/Los_Angeles', today: '2026-10-07', minimumStartDate: '2026-10-21',
+        noticeDays: 14, noticeRequired: true, exemptTypes: ['sick', 'emergency'],
+        allowedTypes: ['sick', 'emergency', 'unpaid', 'other'], maxDurationHours: 336,
+        pto: { enabled: false, reason: 'center_disabled' },
+        ...(options.changesEnabled === undefined ? {} : { changesEnabled: options.changesEnabled }) } });
+    }
+    if (path === '/api/pto/me') return json({ profile: null, memberships: [], emails: [], balance: null });
+    if (path === '/api/timeoff/42/change-detail') return json(detail());
+    if (path === '/api/timeoff/42/change-preview') {
+      return json({ version: '4', normalized: proposal.proposed, resolvedOffsets: { start: '-08:00', end: '-08:00' },
+        pto: null, warnings: [] });
+    }
+    if (path === '/api/timeoff/42/amendments' && method === 'POST') {
+      if (options.submit === 'network') throw new TypeError('Failed to fetch');
+      if (options.submit === 'conflict') {
+        return json({ error: 'This time off changed; refresh and review it again', code: 'TIME_OFF_VERSION_CONFLICT' }, 409);
+      }
+      pending = true;
+      return json({ operationId: 'op-1', requestId: 42, version: '5', amendmentId: '7', outcome: 'proposed', deliveryIds: [] }, 201);
+    }
+    if (path === '/api/timeoff/42/amendments/7/withdraw' && method === 'POST') {
+      pending = false;
+      return json({ operationId: 'op-2', requestId: 42, version: '6', amendmentId: '7', outcome: 'withdrawn', deliveryIds: [] });
+    }
+    if (path === '/api/timeoff/43/cancel' && method === 'POST') return json({ request: { ...pendingRequest, status: 'cancelled' } });
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  };
+  return calls;
+};
+
+const openChangeEditor = async () => {
+  render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Request change' }));
+  await screen.findByLabelText('Change reason');
+  fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2026-11-18' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+  await screen.findByText('Proposed');
+  fireEvent.change(screen.getByLabelText('Change reason'), { target: { value: 'My flight moved by a day' } });
+};
+
+describe('tutor approved time-off changes', () => {
+  it('ignores a late dialog detail response after opening another request', async () => {
+    installChangeFetch({ changesEnabled: true });
+    const baseFetch = globalThis.fetch;
+    let release: (response: Response) => void = () => undefined;
+    let firstDetailCalls = 0;
+    const second = { ...approvedRequest, id: 44, startDate: '2026-12-01', endDate: '2026-12-02' };
+    globalThis.fetch = async (input, init) => {
+      const path = String(input);
+      if (path.startsWith('/api/timeoff/me')) return new Response(JSON.stringify({ requests: [approvedRequest, second] }));
+      if (path === '/api/timeoff/42/change-detail' && ++firstDetailCalls === 2) {
+        return new Promise<Response>((resolve) => { release = resolve; });
+      }
+      if (path === '/api/timeoff/44/change-detail') {
+        const response = await baseFetch('/api/timeoff/42/change-detail', init);
+        const body = await response.json();
+        body.request = second;
+        return new Response(JSON.stringify(body));
+      }
+      return baseFetch(input, init);
+    };
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    const actions = await screen.findAllByRole('button', { name: 'Request change' });
+    fireEvent.click(actions[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Request change' })[1]);
+    expect(await screen.findByLabelText('Start date')).toHaveValue('2026-12-01');
+    release(await baseFetch('/api/timeoff/42/change-detail'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByLabelText('Start date')).toHaveValue('2026-12-01');
+  });
+
+  it('keeps approved requests beyond the initial detail batch reachable', async () => {
+    installChangeFetch({ changesEnabled: true });
+    const baseFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const path = String(input);
+      if (path.startsWith('/api/timeoff/me')) return new Response(JSON.stringify({ requests:
+        Array.from({ length: 21 }, (_, i) => ({ ...approvedRequest, id: 42 + i })) }));
+      if (/\/timeoff\/\d+\/change-detail/.test(path)) {
+        const response = await baseFetch('/api/timeoff/42/change-detail', init);
+        const body = await response.json();
+        body.request.id = Number(path.split('/')[3]);
+        return new Response(JSON.stringify(body));
+      }
+      return baseFetch(input, init);
+    };
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'View change details for #62' }));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Request change' })).toHaveLength(21));
+  });
+
+  it('keeps the existing card actions when changes are disabled', async () => {
+    installChangeFetch();
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    expect(await screen.findByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request change' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel time off' })).not.toBeInTheDocument();
+  });
+
+  it('offers change and cancellation on approved time off while pending requests keep their Cancel action', async () => {
+    installChangeFetch({ changesEnabled: true });
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    expect(await screen.findByRole('button', { name: 'Request change' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel time off' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+  });
+
+  it('submits a proposal while the approved dates stay effective', async () => {
+    const calls = installChangeFetch({ changesEnabled: true });
+    await openChangeEditor();
+    expect(screen.getByText('Your current approved time off stays in effect until an admin approves this change.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Submit change for approval' }));
+
+    expect(await screen.findByText('Change pending')).toBeInTheDocument();
+    expect(screen.getByText(/Approved: 2026-11-16 – 2026-11-17/)).toBeInTheDocument();
+    expect(screen.getByText(/Proposed: 2026-11-16 – 2026-11-18/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Withdraw change' })).toBeInTheDocument();
+    const submitted = calls.find((call) => call.path === '/api/timeoff/42/amendments');
+    expect(submitted?.body).toMatchObject({
+      expectedVersion: '4', changeReason: 'My flight moved by a day',
+      proposed: { startDate: '2026-11-16', endDate: '2026-11-18', partialDay: false, leaveTime: null, returnTime: null,
+        type: 'emergency', reason: 'Family emergency out of state' }
+    });
+    expect(String(submitted?.body?.idempotencyKey)).toMatch(/^[A-Za-z0-9._:-]{8,200}$/);
+  });
+
+  it('warns that cancelling also closes a pending change and lets the tutor withdraw it', async () => {
+    const calls = installChangeFetch({ changesEnabled: true, pending: true });
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel time off' }));
+    expect(await screen.findByText('Your pending change request will also be closed.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep time off' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw change' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Withdraw change request' }));
+    await waitFor(() => expect(screen.queryByText('Change pending')).not.toBeInTheDocument());
+    expect(calls.find((call) => call.path === '/api/timeoff/42/amendments/7/withdraw')?.body)
+      .toMatchObject({ expectedVersion: '5' });
+  });
+
+  it('keeps the draft and the idempotency key across a network retry, and a new command gets a new key', async () => {
+    const calls = installChangeFetch({ changesEnabled: true, submit: 'network' });
+    await openChangeEditor();
+    fireEvent.click(screen.getByRole('button', { name: 'Submit change for approval' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Failed to fetch/);
+    fireEvent.click(screen.getByRole('button', { name: 'Submit change for approval' }));
+    await waitFor(() => expect(calls.filter((call) => call.path === '/api/timeoff/42/amendments')).toHaveLength(2));
+    const [first, retry] = calls.filter((call) => call.path === '/api/timeoff/42/amendments');
+    expect(retry.body?.idempotencyKey).toBe(first.body?.idempotencyKey);
+
+    fireEvent.change(screen.getByLabelText('Change reason'), { target: { value: 'My flight moved by two days' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Submit change for approval' }));
+    await waitFor(() => expect(calls.filter((call) => call.path === '/api/timeoff/42/amendments')).toHaveLength(3));
+    const changed = calls.filter((call) => call.path === '/api/timeoff/42/amendments')[2];
+    expect(changed.body?.idempotencyKey).not.toBe(first.body?.idempotencyKey);
+    expect(screen.getByLabelText('End date')).toHaveValue('2026-11-18');
+  });
+
+  it('asks for a refresh after a version conflict and never resubmits on its own', async () => {
+    const calls = installChangeFetch({ changesEnabled: true, submit: 'conflict' });
+    await openChangeEditor();
+    fireEvent.click(screen.getByRole('button', { name: 'Submit change for approval' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('This time off changed; refresh and review it again');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh details' }));
+    await waitFor(() => expect(calls.filter((call) => call.path === '/api/timeoff/42/change-detail').length).toBeGreaterThan(1));
+    expect(calls.filter((call) => call.path === '/api/timeoff/42/amendments')).toHaveLength(1);
+    expect(screen.getByLabelText('End date')).toHaveValue('2026-11-18');
+  });
+});
+
+describe('tutor approved time-off dialogs and keyboard focus', () => {
+  it('returns focus to the action that opened a dialog when it closes', async () => {
+    installChangeFetch({ changesEnabled: true });
+    render(<MemoryRouter><TutorTimeOffPage /></MemoryRouter>);
+    const trigger = await screen.findByRole('button', { name: 'Cancel time off' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole('button', { name: 'Keep time off' }));
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+});

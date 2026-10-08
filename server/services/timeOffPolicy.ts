@@ -17,6 +17,8 @@ export interface TimeOffPolicyOptions {
   nowIso?: string;
   maxDurationHours: number;
   noticeRequired: boolean;
+  /** Trusted admin correction only; ordinary new requests keep the default. */
+  allowPastDates?: boolean;
 }
 
 export type TimeOffValidationResult =
@@ -74,7 +76,7 @@ export function normalizeTimeOffSubmission(
   }
 
   const today = currentLocalDate(options);
-  if (startLocalDate < today) {
+  if (!options.allowPastDates && startLocalDate < today) {
     return { valid: false, errors: ['Start date cannot be in the past.'] };
   }
   if (

@@ -1,5 +1,6 @@
 import express, { NextFunction, Request, Response } from 'express';
 import { APP_ORIGIN } from '../config/appOrigin';
+import { isTimeOffChangesEnabled } from '../config/timeOffChanges';
 import { getPostgresPool } from '../db/postgres';
 import { requireAdmin, requireTutor } from '../middleware/auth';
 import { enforceFranchiseScope } from '../middleware/franchiseScope';
@@ -84,6 +85,7 @@ export interface TimeOffRouteDeps {
   }) => Promise<TimeOffDecisionResult>;
   listNotificationFailures: (franchiseId: number) => Promise<NotificationFailureRow[]>;
   retryNotification: typeof retryTimeOffNotification;
+  changesEnabled: () => boolean;
 }
 
 const defaultDeps: TimeOffRouteDeps = {
@@ -134,7 +136,8 @@ const defaultDeps: TimeOffRouteDeps = {
     ),
   decideRequest: decideTimeOffRequest,
   listNotificationFailures: listLatestNotificationFailures,
-  retryNotification: retryTimeOffNotification
+  retryNotification: retryTimeOffNotification,
+  changesEnabled: () => isTimeOffChangesEnabled(process.env)
 };
 
 export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
@@ -200,7 +203,7 @@ export function createTimeOffRouter(overrides: Partial<TimeOffRouteDeps> = {}) {
         nowIso,
         maxDurationHours: MAX_TIME_OFF_DURATION_HOURS,
         noticeRequired
-      }), pto };
+      }), pto, changesEnabled: deps.changesEnabled() };
     if (pto.reason !== 'eligible' || (pto.balance?.availableDays ?? 0) <= 0) {
       policy.allowedTypes = policy.allowedTypes.filter((type) => type !== 'pto');
     }
