@@ -4,7 +4,7 @@
   "private": true,
   "description": "Replit-ready Vite React + Express scaffold with legacy branding applied globally.",
   "engines": {
-    "node": ">=18.18.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
