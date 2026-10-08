@@ -68,6 +68,19 @@ const validate = (
 });
 
 describe('approved time-off change validation', () => {
+  it('allows scoped admin corrections of past and ongoing leave, including past replacement dates', () => {
+    const past = approved({ startAt: '2026-09-14T07:00:00.000Z', endAt: '2026-09-17T07:00:00.000Z',
+      startDate: '2026-09-14', endDate: '2026-09-16' });
+    const ongoing = approved({ startAt: '2026-10-06T07:00:00.000Z', endAt: '2026-10-09T07:00:00.000Z',
+      startDate: '2026-10-06', endDate: '2026-10-08' });
+    assert.equal(validate(days('2026-09-14', '2026-09-15'), { request: past, actor: admin }).valid, true);
+    assert.equal(validate(days('2026-09-14', '2026-09-15'), { request: approved(), actor: admin }).valid, true);
+    assert.equal(validate(days('2026-10-06', '2026-10-07'), { request: ongoing, actor: admin }).valid, true);
+    assert.equal(validate(days('2026-09-14', '2026-09-15'), { request: past, actor: tutor }).valid, false);
+    assert.equal(validate(days('2026-10-06', '2026-10-07'), { request: ongoing, actor: tutor }).valid, false);
+    assert.equal(validate(days('2026-09-14', '2026-09-15'), { request: approved(), actor: tutor }).valid, false);
+  });
+
   it('lets a tutor reduce leave inside the notice window but not newly cover dates inside it', () => {
     const reduction = validate(days('2026-10-19', '2026-10-20'));
     const tooSoonExpansion = validate(days('2026-10-16', '2026-10-21'));
@@ -100,10 +113,10 @@ describe('approved time-off change validation', () => {
     assert.match(noop.errors.join(' '), /no changes/i);
   });
 
-  it('requires both the current and proposed starts to be in the future for both roles', () => {
+  it('requires both the current and proposed starts to be in the future for tutors', () => {
     const started = approved({ startAt: '2026-10-07T07:00:00.000Z', endAt: '2026-10-09T07:00:00.000Z',
       startDate: '2026-10-07', endDate: '2026-10-08' });
-    for (const actor of [tutor, admin]) {
+    for (const actor of [tutor]) {
       assert.equal(validate(days('2026-10-08', '2026-10-09'), { request: started, actor }).valid, false);
       assert.equal(validate(days('2026-10-07', '2026-10-21'), { actor }).valid, false, 'full-day leave today has started');
     }
@@ -239,13 +252,21 @@ describe('approved time-off change actions', () => {
     assert.deepEqual(actions(admin, { request: approved({ tutorId: 9 }), amendment: amendment() }), ['cancel']);
   });
 
-  it('offers nothing outside ownership, scope, approval, or the future', () => {
+  it('offers nothing outside ownership, scope, approval, or a tutor future start', () => {
     assert.deepEqual(actions({ ...tutor, accountId: 124 }), []);
     assert.deepEqual(actions({ ...tutor, franchiseId: 7 }), []);
     assert.deepEqual(actions({ ...admin, franchiseId: 7 }), []);
     assert.deepEqual(actions(admin, { request: approved({ status: 'pending' }) }), []);
     assert.deepEqual(actions(tutor, { request: approved({ status: 'cancelled' }) }), []);
-    assert.deepEqual(actions(admin, { nowIso: '2026-10-19T07:00:00.000Z' }), []);
+    assert.deepEqual(actions(tutor, { nowIso: '2026-10-19T07:00:00.000Z' }), []);
+  });
+
+  it('offers only direct admin correction/cancellation after the start and never revives an expired proposal', () => {
+    const afterStart = '2026-10-20T17:00:00.000Z';
+    assert.deepEqual(actions(admin, { nowIso: afterStart, amendment: amendment() }), ['admin_edit', 'cancel']);
+    assert.deepEqual(actions(tutor, { nowIso: afterStart, amendment: amendment() }), []);
+    assert.deepEqual(actions(admin, { nowIso: afterStart, request: approved({ tutorId: 9 }) }), ['cancel']);
+    assert.deepEqual(actions({ ...admin, franchiseId: 7 }, { nowIso: afterStart }), []);
   });
 
   it('never offers approval of a terminal or expired amendment', () => {

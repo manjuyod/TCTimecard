@@ -28,7 +28,7 @@
 - Use the existing React, Express, PostgreSQL, Luxon, and Google authentication stack. Add no package dependencies.
 - Add `TIME_OFF_CHANGES_ENABLED` (default false) to gate new reads/writes/UI capabilities while deploying; the delivery worker remains able to drain already-committed jobs when the flag is turned off.
 
-The upcoming-only boundary is the proposed default, pending any user correction. Update both documents before implementation if admins must edit ongoing/past leave; refund rules for already-taken leave require a different design.
+Follow-up scope approved 2026-10-07: admins may directly edit or cancel past/ongoing approved requests. Tutors and amendment decisions remain upcoming-only. Retrospective edits use the existing per-cycle preview/reconciliation; cancellation means leave was not taken and refunds only recorded consumption to its original cycle. Self-edit, center scope, duration, overlap and sufficiency checks remain. Clocked hours are unaffected. No additional migration is needed. Regression coverage extends Tasks 3/4/5/8 with historical and ongoing corrections, expired proposal refusal, previous-cycle refunds, untracked PTO, tutor/scope/self-edit denials and calendar delivery.
 
 ## Review Focus
 
@@ -229,7 +229,7 @@ Repository public methods use `PoolClient` for mutations; export `lockTimeOffCha
 | Spec requirement | Tasks |
 | --- | --- |
 | Parent remains effective during proposal; separate amendment state | 1, 3, 4, 7, 8 |
-| Role/scope, own-admin restriction, future-only limits | 3, 4, 6–8 |
+| Role/scope, own-admin restriction, tutor future-only limits, admin retrospective correction | 3, 4, 6–8 |
 | Replacement quotes, delta ledger, type conversion, refunds, provenance | 2, 4, 7–9 |
 | Idempotency, version conflicts, expiry, audit/history | 1, 3, 4, 6–9 |
 | Calendar update/delete, legacy identity, retries/order/crash recovery | 4–6, 9 |

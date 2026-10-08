@@ -7,11 +7,13 @@ Tutors can propose changes to approved time off, and admins can approve or deny 
 - **Tutor, Time Off → My Requests.** Upcoming approved cards offer **Request change** and **Cancel time off**. A submitted proposal shows **Change pending**, with the approved dates first and the proposed dates beneath. The approved time off, calendar event and PTO charge stay in effect until an admin approves the change. **Withdraw change** closes the proposal.
 - **Admin, Approvals → Time Off.** The pending-request inbox is unchanged. Two sections sit below it:
   - **Change requests** compares the current and proposed versions, including the per-cycle PTO difference, and offers **Approve change** and **Deny change**. Denial requires a reason.
-  - **Manage time off** defaults to approved requests starting today or later. You can filter by status, tutor ID, local date range or request ID. **Edit approved request** saves immediately and the request stays approved. **Cancel time off** removes the leave and returns any PTO it used.
+  - **Manage time off** defaults to approved requests starting today or later. Choose **Approved** or **All** in Status, then **Apply filters**, to include past requests. You can also filter by tutor ID, local date range or request ID. **Edit approved request** saves immediately and the request stays approved. **Cancel time off** removes the leave and returns recorded PTO consumption to its original cycle.
 - **Who can do what.**
-  - Changes and cancellations are allowed only before the leave starts. Ongoing and past requests are view-only.
+  - Tutors can propose changes or cancel only before leave starts. Admins can directly correct or cancel approved leave before, during, or after it happens.
   - An admin cannot edit or approve a change to their own request; they can still cancel it.
   - Admin edits and cancellations close any pending proposal, recorded as superseded.
+  - Expired tutor proposals remain expired. An admin correcting past/ongoing leave uses a direct edit, not retrospective proposal approval.
+  - Cancel only when no leave was taken. If part of the leave was taken, correct its dates/times instead. The edit preview shows the PTO difference; prior-cycle refunds stay in that prior cycle. These actions do not change clocked hours.
 - **Reasons.** Proposals, direct edits and approved cancellations require a 10–2000 character change reason.
 - **Links.** Proposal emails link to `/admin/approvals?tab=timeoff&franchiseId=…&requestId=…&view=manage&amendmentId=…`. Original approval tokens never authorize a change.
 

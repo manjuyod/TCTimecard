@@ -100,6 +100,24 @@ describe('approved time-off change delivery', { skip }, () => {
     sent.length = 0;
   });
 
+  it('synchronizes an admin historical correction and cancellation with calendar and requester notifications', async () => {
+    const calendar = new FakeCalendar();
+    const requestId = await seedTimeOffRequest(db(), { startDate: '2025-11-17', tutorId: 4401 });
+    await db().query('UPDATE time_off_requests SET google_calendar_event_id=$2, google_calendar_id=$3 WHERE id=$1',
+      [requestId, eventIdFor(requestId), CALENDAR]);
+    calendar.seed(CALENDAR, { ...ownedEvent(requestId), start: { date: '2025-11-17' }, end: { date: '2025-11-18' } });
+    await execute(admin, requestId, { action: 'admin_edit', proposed: days('2025-11-17', '2025-11-18'),
+      changeReason: 'Correcting the actual leave taken' });
+    await runTimeOffChangeDeliveryPass(deps(calendar), NOW);
+    assert.deepEqual(calendar.get(CALENDAR, eventIdFor(requestId))?.end, { date: '2025-11-19' });
+    assert.equal(sent[0]?.to, 'ada@example.com');
+    await cancel(requestId);
+    await runTimeOffChangeDeliveryPass(deps(calendar), later(1));
+    assert.equal(calendar.events.size, 0);
+    assert.equal(sent.length, 2);
+    assert.deepEqual((await jobs(requestId)).map((job) => job.status), ['sent', 'sent']);
+  });
+
   it('adopts a recovery event from a crashed older edit when a newer edit arrives', async () => {
     const calendar = new FakeCalendar();
     const requestId = await approvedWithEvent(calendar, false);

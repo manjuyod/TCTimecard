@@ -326,7 +326,7 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
       <Card>
         <CardHeader>
           <CardTitle>Manage time off</CardTitle>
-          <CardDescription>Upcoming approved time off by default. Edits and cancellations take effect right away.</CardDescription>
+          <CardDescription>Upcoming approved time off by default. Choose Approved or All to include past requests. Edits and cancellations take effect right away.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <form className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6" onSubmit={applyFilters}>
@@ -425,7 +425,7 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
                   {actions.length === 0 ? (
                     <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
                       {detail.request.status === 'approved'
-                        ? 'This time off has already started, so it is view-only.'
+                        ? 'You do not have permission to change this approved request.'
                         : `This request is ${detail.request.status}, so it is view-only.`}
                     </p>
                   ) : (
@@ -497,6 +497,10 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
               </DialogHeader>
               <div className="space-y-3 text-sm">
                 <p className="font-semibold text-foreground">Approved: {describeTimeOffRange(detail.request)}</p>
+                <p className="text-muted-foreground">
+                  Cancel only when no leave was taken. If some leave was taken, edit the dates or times instead.
+                  {' '}Only recorded consumption is refunded to its original PTO cycle.
+                </p>
                 {detail.pendingAmendment ? (
                   <p className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-amber-900">
                     The pending change request will also be closed.

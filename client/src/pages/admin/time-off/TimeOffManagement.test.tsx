@@ -95,6 +95,32 @@ const renderManagement = (props: Partial<Parameters<typeof TimeOffManagement>[0]
 };
 
 describe('TimeOffManagement', () => {
+  it('explains how to find past approvals and corrects them through the existing admin editor', async () => {
+    const past = request({ startAt: '2025-11-17T08:00:00Z', endAt: '2025-11-19T08:00:00Z',
+      startDate: '2025-11-17', endDate: '2025-11-18' });
+    const calls = installFetch({ requests: [past], detail: detail({ request: past, pendingAmendment: null,
+      allowedActions: ['admin_edit', 'cancel'] }) });
+    renderManagement({ requestId: 42 });
+    expect(await screen.findByText(/Choose Approved or All to include past requests/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit approved request' }));
+    expect(screen.getByLabelText('Start date')).toHaveValue('2025-11-17');
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-11-17' } });
+    fireEvent.change(screen.getByLabelText('Change reason'), { target: { value: 'Only one day was actually taken' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save approved changes' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Save approved changes' }));
+    await waitFor(() => expect(calls.find((call) => call.path === '/api/timeoff/admin/42/change')?.body).toMatchObject({
+      proposed: { startDate: '2025-11-17', endDate: '2025-11-17' }, changeReason: 'Only one day was actually taken'
+    }));
+  });
+
+  it('explains cancellation versus correcting partially taken historical leave', async () => {
+    installFetch();
+    renderManagement({ requestId: 42 });
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel time off' }));
+    expect(await screen.findByText(/If some leave was taken, edit the dates or times instead/)).toBeInTheDocument();
+    expect(screen.getByText(/original PTO cycle/)).toBeInTheDocument();
+  });
   it('follows a new request deep link within the same center', async () => {
     installFetch({ routes: (call) => call.path.startsWith('/api/timeoff/admin/43/change-detail')
       ? json(detail({ request: request({ id: 43, tutorName: 'Grace Hopper' }), pendingAmendment: null })) : undefined });

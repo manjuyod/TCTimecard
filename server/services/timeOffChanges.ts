@@ -193,7 +193,8 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
     const replay = await findTimeOffChangeReplay(client, actor, command.idempotencyKey, context.inputHash);
     if (replay) return replay;
     const nowIso = context.now();
-    context.startDeadline = Date.parse(locked.request.startAt);
+    const adminCorrection = actor.kind === 'ADMIN' && (command.action === 'admin_edit' || command.action === 'cancel');
+    context.startDeadline = adminCorrection ? undefined : Date.parse(locked.request.startAt);
 
     if (command.expectedVersion !== locked.version) {
       throw failure('TIME_OFF_VERSION_CONFLICT', 'This time off changed; refresh and review it again', 409);
@@ -202,7 +203,7 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
     if (request.status !== 'approved') {
       throw failure('TIME_OFF_INVALID_STATE', 'Only approved time off can be changed or cancelled here', 409);
     }
-    if (Date.parse(request.startAt) <= Date.parse(nowIso)) {
+    if (!adminCorrection && Date.parse(request.startAt) <= Date.parse(nowIso)) {
       throw failure('TIME_OFF_START_DEADLINE', 'This time off has already started and is view-only', 409);
     }
 
@@ -217,7 +218,7 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
       if (!isAmendmentActionable(request, pending, nowIso)) {
         throw failure('TIME_OFF_AMENDMENT_EXPIRED', 'This change request expired before it was reviewed', 409);
       }
-      context.startDeadline = Math.min(context.startDeadline, Date.parse(pending.proposed.startAt));
+      context.startDeadline = Math.min(context.startDeadline ?? Infinity, Date.parse(pending.proposed.startAt));
       if (pending.baseVersion !== version) {
         throw failure('TIME_OFF_VERSION_CONFLICT', 'This change request no longer matches the request', 409);
       }
@@ -324,7 +325,9 @@ export function createTimeOffChangeService(overrides: Partial<TimeOffChangeDeps>
     if (!validation.valid) {
       throw failure('TIME_OFF_INVALID_CHANGE', validation.errors[0], 400, { errors: validation.errors });
     }
-    input.context.startDeadline = Math.min(input.context.startDeadline ?? Infinity, Date.parse(validation.value.startAt));
+    if (input.actor.kind === 'TUTOR') {
+      input.context.startDeadline = Math.min(input.context.startDeadline ?? Infinity, Date.parse(validation.value.startAt));
+    }
     await assertNoOverlap(client, input.request, validation.value);
     return validation.value;
   }

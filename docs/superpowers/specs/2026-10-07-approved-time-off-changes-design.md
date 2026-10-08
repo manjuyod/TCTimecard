@@ -2,7 +2,7 @@
 
 Date: 2026-10-07
 
-Status: Implemented on branch `feature/approved-time-off-changes` and verified locally (see the plan's status and `docs/operations/approved-time-off-changes.md`). Not deployed. The user approved the core behavior; the upcoming-only boundary remains the default.
+Status: Implemented on branch `feature/approved-time-off-changes` and verified locally (see the plan's status and `docs/operations/approved-time-off-changes.md`). App not deployed. On 2026-10-07 the user approved admin-only corrections and cancellation for past and ongoing approved leave; tutors remain upcoming-only.
 
 Companion: [Implementation plan](../plans/2026-10-07-approved-time-off-changes.md)
 
@@ -21,10 +21,10 @@ This is one lifecycle feature spanning existing requests, PostgreSQL accounting,
 
 These are design decisions for review, rather than additional requirements explicitly supplied by the user:
 
-- Version one permits changes and cancellation only before the current leave starts. Both the current and proposed start instants must be strictly later than the server's current instant. Ongoing and past requests are view-only for both roles. Full-day leave starts at local midnight, so full-day leave beginning today has already started. The user was offered a broader admin-history option; this document uses the upcoming-only default unless that preference changes.
+- Tutors may propose changes or cancel only before the current leave starts; both current and proposed starts must be strictly later than the server's current instant. Admins may directly correct or cancel approved requests before, during, or after leave, including replacement dates in the past. Full-day leave begins at center-local midnight. This admin-only retrospective scope was explicitly approved on 2026-10-07 and supersedes the original upcoming-only default.
 - Editable fields are start/end dates, partial-day times, absence type, and request reason. Tutor, franchise, requester identity, source, and creation history are immutable.
 - Only one pending amendment per request. A tutor withdraws an amendment before proposing another. An admin edit or cancellation supersedes any pending amendment, with an explicit warning and audit record.
-- Pending ordinary requests retain their existing submit/approve/deny/cancel flow. Editing pending requests, restoring cancelled requests, bulk actions, retrospective PTO corrections, and anonymous self-service edits are outside this version.
+- Pending ordinary requests retain their existing submit/approve/deny/cancel flow. Editing pending requests, restoring cancelled requests, bulk actions, tutor retrospective changes, and anonymous self-service edits are outside this version.
 - Public/bridge requests can be managed by the owning center's admin. Possession of a submission link, an old approval token, or a matching email does not grant tutor ownership.
 - Use the existing React, Express, PostgreSQL, Luxon, and Google authentication stack. Add no package dependencies.
 
@@ -80,9 +80,9 @@ Amendment statuses: `pending`, `approved`, `denied`, `withdrawn`, `superseded`, 
 - Reject local times that do not exist during a DST jump. For an ambiguous fall-back time, choose the earlier UTC occurrence and display the resolved zone/offset in the preview. Freeze the proposal timezone; if the center timezone changes before review, require a new proposal instead of silently reinterpreting it.
 - Reject normalized no-op proposals/direct edits. A changed explanation alone is a meaningful edit and follows the same approval/audit flow.
 - Tutor proposals that add coverage outside the existing approved interval follow the configured 14-day notice rule, except Sick/Emergency. A pure reduction within the approved interval, or reason-only change, is grandfathered. A type change into a non-exempt type is checked as a new non-exempt request. Use proposal submission time for notice validation; do not move the notice window forward while an admin reviews it.
-- Admin direct edits may bypass the notice window, with their mandatory change reason recorded. They cannot bypass ownership, future-date, overlap, duration, or PTO sufficiency checks.
+- Admin direct edits may bypass the notice window and future-date restriction, with their mandatory change reason recorded. They cannot bypass ownership, self-edit restrictions, overlap, duration, or PTO sufficiency checks. Normal new-request validation continues to reject past dates.
 - Reuse the optional overlap enforcement setting. When enabled, exclude the parent request itself and compare with other active pending/approved requests. Recheck at save and approval; a proposal itself does not block other leave.
-- Recheck current and proposed start instants at commit. A pending proposal expires at the earlier start instant; withdrawal remains possible until expiration. Reads report it non-actionable immediately even before the background expiry pass persists the terminal state.
+- Recheck current and proposed start instants at commit for tutor commands and amendment decisions. Direct admin edits/cancellation are exempt. A pending proposal still expires at the earlier start instant, and cannot be approved retrospectively; admins must make an explicit direct correction. Reads report it non-actionable immediately even before the background expiry pass persists the terminal state.
 
 ## Screen behavior
 
@@ -100,7 +100,7 @@ Keep the pending-request inbox. Add a **Change requests** section and **Manage t
 
 Details show original approval, effective request, pending amendment if present, change history, and delivery status. **Approve change** and **Deny change** are distinct from original approval buttons. Before/after fields and per-cycle PTO differences appear before confirmation. Insufficient PTO leaves the proposal pending and the original request intact, with an actionable error.
 
-**Edit approved request** opens the same field editor with a required change reason and **Save approved changes**. If a proposal exists, show **“Saving this edit will replace the pending change request.”** **Cancel time off** requires confirmation and a reason. Past/ongoing records remain searchable but explain why edits are unavailable.
+**Edit approved request** opens the same field editor with a required change reason and **Save approved changes**. If a proposal exists, show **“Saving this edit will replace the pending change request.”** **Cancel time off** requires confirmation and a reason. Admins can find past requests by choosing Approved or All rather than the default Upcoming approved filter. Past/ongoing approved records offer the same direct correction controls. Explain that cancellation is for leave not taken; partially taken leave should have its dates/times corrected instead. Recorded consumption is returned to its original PTO cycle, never transferred into a later cycle. Clocked hours are unaffected.
 
 Add `view=manage` and optional `amendmentId` to existing `tab=timeoff&franchiseId=…&requestId=…` links. Preserve existing time-entry/extra-hours links, unrelated query parameters, browser back/forward, and franchise switching. Clear stale detail/drafts on franchise switch; never render a late response from the previous center.
 

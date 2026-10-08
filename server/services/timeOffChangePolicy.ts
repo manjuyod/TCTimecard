@@ -17,7 +17,7 @@ const instant = (iso: string): number => DateTime.fromISO(iso, { setZone: true }
  * Validates replacement fields for an approved request (a tutor proposal, an
  * admin direct edit, or approval of a proposal, whose `actor` is the
  * proposer). Notice uses `submittedAt` when given; start deadlines always use
- * `nowIso`.
+ * `nowIso` for tutors. Admin direct corrections can include past/ongoing leave.
  */
 export function validateApprovedTimeOffChange(input: {
   request: TimeOffRecord;
@@ -31,9 +31,9 @@ export function validateApprovedTimeOffChange(input: {
   const { request, actor, timezone } = input;
   if (request.status !== 'approved') return invalid('Only approved time off can be changed.');
   if (actor.kind === 'ADMIN' && request.tutorId !== null && request.tutorId === actor.accountId) {
-    return invalid('Admins cannot directly change their own time off; submit a change request instead.');
+    return invalid('Admins cannot directly change their own time off; another admin must make this correction.');
   }
-  if (instant(request.startAt) <= instant(input.nowIso)) {
+  if (actor.kind === 'TUTOR' && instant(request.startAt) <= instant(input.nowIso)) {
     return invalid('This time off has already started and can no longer be changed.');
   }
 
@@ -42,7 +42,8 @@ export function validateApprovedTimeOffChange(input: {
     timezone,
     nowIso: input.nowIso,
     maxDurationHours: MAX_TIME_OFF_CHANGE_DURATION_HOURS,
-    noticeRequired: false
+    noticeRequired: false,
+    allowPastDates: actor.kind === 'ADMIN'
   });
   if (!normalized.valid) return normalized;
   const value = normalized.value;
@@ -63,7 +64,7 @@ export function validateApprovedTimeOffChange(input: {
       return invalid('Request date or time range is invalid.');
     }
   }
-  if (instant(value.startAt) <= instant(input.nowIso)) {
+  if (actor.kind === 'TUTOR' && instant(value.startAt) <= instant(input.nowIso)) {
     return invalid('The changed time off must start in the future.');
   }
   if (isNoOp(request, value)) return invalid('No changes were made to this time off.');
@@ -88,7 +89,7 @@ export function getTimeOffChangeActions(input: {
 }): TimeOffChangeAction[] {
   const { actor, request, amendment, nowIso } = input;
   if (request.franchiseId !== actor.franchiseId || request.status !== 'approved') return [];
-  if (instant(request.startAt) <= instant(nowIso)) return [];
+  if (actor.kind === 'TUTOR' && instant(request.startAt) <= instant(nowIso)) return [];
   const pending = amendment !== null && isAmendmentActionable(request, amendment, nowIso);
   const owner = request.tutorId !== null && request.tutorId === actor.accountId;
   const allowed = new Set<TimeOffChangeAction>();

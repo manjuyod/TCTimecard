@@ -89,6 +89,79 @@ describe('approved time-off change lifecycle', { skip }, () => {
     timezone = 'America/Los_Angeles';
   });
 
+  it('admin historical PTO corrections preview and refund only the original cycle, with idempotent cancellation', async () => {
+    const pto = await seedPtoTutor(db());
+    const requestId = await approvedPto(db(), '2025-11-17', '2025-11-18');
+    const oldBalance = () => createPtoRouteStore(db()).getBalanceSummary(pto.profileId, '2025-11-17');
+    const current = await balance(pto.profileId);
+    const before = await detail(admin, requestId);
+    const proposed = days('2025-11-17', '2025-11-17');
+    const preview = await service().preview({ actor: admin, requestId, proposed, nowIso: NOW });
+    assert.equal(preview.pto?.cycles[0].cycleStart, '2025-01-01');
+    assert.equal(preview.pto?.cycles[0].oldDays, 2);
+    assert.equal(preview.pto?.cycles[0].newDays, 1);
+    const edited = await command(admin, requestId, { action: 'admin_edit', proposed, changeReason: 'Only one day was taken' });
+    assert.equal(edited.outcome, 'edited');
+    assert.equal((await oldBalance()).usedDays, 1);
+    assert.equal((await detail(admin, requestId)).request.decidedAt, before.request.decidedAt);
+    assert.equal((await balance(pto.profileId)).availableDays, current.availableDays);
+    const version = edited.version;
+    const input = { action: 'cancel', changeReason: 'Leave was not taken after all' };
+    const cancelled = await command(admin, requestId, input, { idempotencyKey: 'past-cancel-key', expectedVersion: version });
+    const ledgerCount = await count('SELECT COUNT(*)::INT AS count FROM public.pto_ledger_entries');
+    assert.deepEqual(await command(admin, requestId, input, { idempotencyKey: 'past-cancel-key', expectedVersion: version }), cancelled);
+    assert.equal(await count('SELECT COUNT(*)::INT AS count FROM public.pto_ledger_entries'), ledgerCount);
+    assert.equal((await oldBalance()).usedDays, 0);
+    assert.equal((await balance(pto.profileId)).availableDays, current.availableDays);
+    assert.deepEqual((await detail(admin, requestId)).history.map((entry) => entry.action), ['admin_edit', 'cancel']);
+    assert.deepEqual((await deliveries(edited.operationId)).map(({ kind }) => kind), ['calendar_upsert', 'requester_edited']);
+  });
+
+  it('keeps tutor deadlines, center scope and admin self-edit restrictions for historical requests', async () => {
+    const requestId = await seedTimeOffRequest(db(), { startDate: '2026-09-14' });
+    const proposed = days('2026-09-14', '2026-09-15', { type: 'sick' });
+    assert.deepEqual((await detail(tutor, requestId)).allowedActions, []);
+    assert.deepEqual((await detail(admin, requestId)).allowedActions, ['admin_edit', 'cancel']);
+    await assert.rejects(service().preview({ actor: tutor, requestId, proposed, nowIso: NOW }), withCode('TIME_OFF_START_DEADLINE'));
+    await assert.rejects(propose(requestId, proposed), withCode('TIME_OFF_START_DEADLINE'));
+    await assert.rejects(command(tutor, requestId, { action: 'cancel', changeReason: 'Attempting a past cancellation' }), withCode('TIME_OFF_START_DEADLINE'));
+    await assert.rejects(service().execute({ actor: { ...admin, franchiseId: 45 }, requestId, action: 'cancel',
+      changeReason: 'Another center cannot cancel', expectedVersion: '1', idempotencyKey: key(), nowIso: NOW }), withCode('TIME_OFF_NOT_FOUND'));
+    const own = await seedTimeOffRequest(db(), { startDate: '2026-09-14', tutorId: admin.accountId });
+    await assert.rejects(command(admin, own, { action: 'admin_edit', proposed, changeReason: 'Editing my own past leave' }),
+      withCode('TIME_OFF_SELF_APPROVAL'));
+    assert.equal((await command(admin, own, { action: 'cancel', changeReason: 'My past leave was not taken' })).outcome, 'cancelled');
+  });
+
+  it('allows an admin to correct ongoing leave while expired tutor proposals stay closed', async () => {
+    const requestId = await seedTimeOffRequest(db(), { startDate: '2026-10-06', endDate: '2026-10-08',
+      startAt: '2026-10-06T07:00:00Z', endAt: '2026-10-09T07:00:00Z', durationHours: 72 });
+    const proposal = await propose(requestId, days('2026-10-06', '2026-10-09', { type: 'sick' }),
+      { nowIso: '2026-10-01T17:00:00Z' });
+    await assert.rejects(command(admin, requestId, { action: 'approve_amendment', amendmentId: proposal.amendmentId }),
+      withCode('TIME_OFF_START_DEADLINE'));
+    await command(admin, requestId, { action: 'admin_edit', proposed: days('2026-10-06', '2026-10-07', { type: 'sick' }),
+      changeReason: 'Returned to work one day earlier' });
+    const after = await detail(admin, requestId);
+    assert.equal(after.request.endDate, '2026-10-07');
+    assert.equal(after.pendingAmendment, null);
+    assert.deepEqual(after.history.map((entry) => entry.action), ['propose', 'expire', 'admin_edit']);
+  });
+
+  it('preserves historical PTO sufficiency and untracked-record safeguards', async () => {
+    await seedPtoTutor(db());
+    const requestId = await approvedPto(db(), '2025-11-17', '2025-11-18');
+    const before = await detail(admin, requestId);
+    await assert.rejects(command(admin, requestId, { action: 'admin_edit', proposed: days('2025-11-17', '2025-11-24'),
+      changeReason: 'Request more than the original entitlement' }), withCode('PTO_INSUFFICIENT_BALANCE'));
+    assert.deepEqual(effective(await detail(admin, requestId)), effective(before));
+    const legacy = await approvedPto(db(), '2025-12-01', '2025-12-02', { legacy: true });
+    await assert.rejects(command(admin, legacy, { action: 'admin_edit', proposed: days('2025-12-01', '2025-12-01'),
+      changeReason: 'Untracked leave needs reconciliation' }), withCode('TIME_OFF_PTO_RECONCILIATION_REQUIRED'));
+    await command(admin, legacy, { action: 'cancel', changeReason: 'Untracked leave was not taken' });
+    assert.equal(await count('SELECT COUNT(*)::INT AS count FROM public.pto_ledger_entries WHERE request_id=$1', [legacy]), 0);
+  });
+
   it('rechecks the start deadline after waiting for the parent lock', async () => {
     const requestId = await seedTimeOffRequest(db(), { startAt: '2026-10-07T17:01:00Z' });
     let current = NOW;
