@@ -7,4 +7,4 @@ Production logs showed Replit injecting `--network-family-autoselection-attempt-
 
 **Why:** This caused repeated startup failures and HTTP 502 responses despite a successful deployment build.
 
-**How to apply:** For deployment reachability failures, inspect runtime logs rather than treating successful builds as proof of health. Use a supported modern Node runtime that accepts the platform-injected option.
+**How to apply:** For deployment reachability failures, inspect runtime logs rather than treating successful builds as proof of health. Node 22 was verified to accept the platform-injected option; avoid reverting to Node 18.
