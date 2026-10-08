@@ -296,6 +296,8 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
   },
 
   syncRoster: async (input: PtoRosterSyncStoreInput): Promise<PtoRosterSyncSummary> => {
+    // Roster writes lock profiles and later create cycles; take the policy lock first.
+    await db.query("SELECT PG_ADVISORY_XACT_LOCK(HASHTEXTEXTENDED('pto-policy-version', 0))");
     const enabledCenter = await queryRows(db, `
       SELECT enabled FROM public.pto_center_settings WHERE franchiseid = $1
     `, [input.franchiseId]);
@@ -859,6 +861,13 @@ const createStore = (db: Queryable, transactionPool?: Pool): PtoServiceStore => 
   },
 
   adjustBalance: async (input: AdjustPtoBalanceInput) => {
+    // Shared PTO lock order: policy lock, then the canonical profile's advisory
+    // lock and row. Written inline so it does not require migration 0016.
+    await db.query("SELECT PG_ADVISORY_XACT_LOCK(HASHTEXTEXTENDED('pto-policy-version', 0))");
+    await db.query(`SELECT PG_ADVISORY_XACT_LOCK(
+      HASHTEXTEXTENDED('pto-profile:' || public.pto_canonical_profile_id($1::BIGINT), 0))`, [input.profileId]);
+    await db.query('SELECT 1 FROM public.pto_profiles WHERE id = public.pto_canonical_profile_id($1::BIGINT) FOR UPDATE',
+      [input.profileId]);
     await db.query('SELECT public.pto_assert_profile_admin($1, $2)', [input.profileId, input.actorFranchiseId]);
     const canonical = await queryRows(db,
       'SELECT public.pto_canonical_profile_id($1) AS id', [input.profileId]);

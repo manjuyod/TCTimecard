@@ -4,7 +4,7 @@ import { TimeEntryCorrectionDialog, CorrectionDialogTarget } from './time-entry/
 import { getAdminTimeEntryDetail } from '../../lib/adminTimeEntryApi';
 import type { AdminTimeEntryDetail, AdminOperationResult } from '../../lib/adminTimeEntry';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import {
   AdminAttestationTutor,
@@ -49,7 +49,9 @@ import {
 } from '../../components/ui/dialog';
 import { Textarea } from '../../components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
-import { parseAdminTimeOffDeepLink } from '../../lib/timeOff';
+import { parseAdminTimeOffDeepLink, parseAdminTimeOffManageLink } from '../../lib/timeOff';
+import { fetchAdminTimeOffChangeCapabilities } from '../../lib/timeOffChangesApi';
+import { TimeOffManagement } from './time-off/TimeOffManagement';
 
 type DenyContext =
   | { type: 'extra'; request: ExtraHoursRequest }
@@ -223,7 +225,10 @@ function AttestationExportCard({
 export function ApprovalsPage(): JSX.Element {
   const { session } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
+  const acceptedTimeOffLocation = useRef(`${location.pathname}${location.search}`);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [timeOffManageTarget, setTimeOffManageTarget] = useState(() => parseAdminTimeOffManageLink(location.search));
   const manageEntries = searchParams.get('tab') === 'timeentry' && searchParams.get('view') === 'manage';
   const [reviewDetail, setReviewDetail] = useState<AdminTimeEntryDetail | null>(null);
   const [correctionTarget, setCorrectionTarget] = useState<CorrectionDialogTarget | null>(null);
@@ -264,6 +269,18 @@ export function ApprovalsPage(): JSX.Element {
   const [denyDialog, setDenyDialog] = useState<DenyContext | null>(null);
   const [denyReason, setDenyReason] = useState('');
   const [actingId, setActingId] = useState<number | null>(null);
+  const [timeOffChangesEnabled, setTimeOffChangesEnabled] = useState(false);
+  const timeOffChangesDirty = useRef(false);
+  useEffect(() => {
+    let current = true;
+    setTimeOffChangesEnabled(false);
+    timeOffChangesDirty.current = false;
+    if (franchiseId === null) return () => { current = false; };
+    fetchAdminTimeOffChangeCapabilities(franchiseId)
+      .then((capability) => { if (current) setTimeOffChangesEnabled(capability.enabled === true); })
+      .catch(() => { if (current) setTimeOffChangesEnabled(false); });
+    return () => { current = false; };
+  }, [franchiseId]);
   useEffect(() => {
     if (!selectorAllowed) {
       setError(null);
@@ -293,8 +310,15 @@ export function ApprovalsPage(): JSX.Element {
     const parsed = validateFranchise();
     if (parsed !== null) {
       if (correctionTarget) return;
+      if (parsed !== franchiseId && timeOffChangesDirty.current
+        && !window.confirm('Discard your unsaved time-off change and switch centers?')) return;
       if (parsed !== franchiseId) setSearchParams(prev => {
-        const next = new URLSearchParams(prev); next.delete('tutorId'); next.delete('workDate'); return next;
+        timeOffChangesDirty.current = false;
+        const next = new URLSearchParams(prev);
+        next.delete('tutorId'); next.delete('workDate');
+        next.delete('requestId'); next.delete('amendmentId');
+        next.set('franchiseId', String(parsed));
+        return next;
       });
       setFranchiseId(parsed);
       setError(null);
@@ -359,6 +383,7 @@ export function ApprovalsPage(): JSX.Element {
   }, [franchiseId]);
 
   const timeOffDeepLink = useMemo(() => parseAdminTimeOffDeepLink(location.search), [location.search]);
+  const timeOffManageLink = useMemo(() => parseAdminTimeOffManageLink(location.search), [location.search]);
 
   useEffect(() => {
     if (!reviewDetail) return;
@@ -379,6 +404,16 @@ export function ApprovalsPage(): JSX.Element {
 
   useEffect(() => {
     if (!timeOffDeepLink) return;
+    const destination = `${location.pathname}${location.search}`;
+    if (selectorAllowed && timeOffDeepLink.franchiseId !== franchiseId && timeOffChangesDirty.current) {
+      if (!window.confirm('Discard your unsaved time-off change and switch centers?')) {
+        navigate(acceptedTimeOffLocation.current, { replace: true });
+        return;
+      }
+      timeOffChangesDirty.current = false;
+    }
+    acceptedTimeOffLocation.current = destination;
+    setTimeOffManageTarget(timeOffManageLink);
     setActiveTab('timeoff');
     if (selectorAllowed) {
       setFranchiseInput(String(timeOffDeepLink.franchiseId));
@@ -387,7 +422,8 @@ export function ApprovalsPage(): JSX.Element {
   }, [selectorAllowed, timeOffDeepLink]);
 
   useEffect(() => {
-    if (!timeOffDeepLink || franchiseId === null) return;
+    // Change-management links open in TimeOffManagement, not the original approval flow.
+    if (!timeOffDeepLink || franchiseId === null || timeOffManageLink) return;
     const key = `${location.pathname}${location.search}`;
     if (handledDeepLink === key) return;
     const effectiveFranchiseId = selectorAllowed ? timeOffDeepLink.franchiseId : franchiseId;
@@ -406,7 +442,7 @@ export function ApprovalsPage(): JSX.Element {
         }
       })
       .catch((err) => toast.error(err instanceof Error ? err.message : 'Unable to open time-off request'));
-  }, [franchiseId, handledDeepLink, location.pathname, location.search, selectorAllowed, timeOffDeepLink]);
+  }, [franchiseId, handledDeepLink, location.pathname, location.search, selectorAllowed, timeOffDeepLink, timeOffManageLink]);
 
   const handleApproveExtra = async (request: ExtraHoursRequest) => {
     if (franchiseId === null && sessionFranchiseId === null) {
@@ -902,7 +938,12 @@ export function ApprovalsPage(): JSX.Element {
 
       <AttestationExportCard franchiseId={franchiseId} sessionFranchiseId={sessionFranchiseId} />
 
-      <Tabs value={activeTab} onValueChange={(val) => { if (!correctionTarget) setActiveTab(val as 'extra' | 'timeoff' | 'timeentry'); }}>
+      <Tabs value={activeTab} onValueChange={(val) => {
+        if (correctionTarget) return;
+        if (val !== activeTab && timeOffChangesDirty.current && !window.confirm('Discard your unsaved time-off change?')) return;
+        timeOffChangesDirty.current = false;
+        setActiveTab(val as 'extra' | 'timeoff' | 'timeentry');
+      }}>
         <TabsList>
           <TabsTrigger value="extra">Extra Hours</TabsTrigger>
           <TabsTrigger value="timeentry">Time Entry Variances</TabsTrigger>
@@ -955,28 +996,30 @@ export function ApprovalsPage(): JSX.Element {
 
           {timeOffFailures.length ? (
             <Card className="border-amber-300">
-              <CardHeader>
-                <CardTitle>Notification failures</CardTitle>
-                <CardDescription>These saved requests or decisions need an email retry.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {timeOffFailures.map((failure) => (
-                  <div key={failure.auditId} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
-                    <div>
-                      <p className="font-semibold">Request #{failure.requestId} · {failure.kind.replace('_', ' ')}</p>
-                      <p className="text-xs text-muted-foreground">{failure.error || 'Notification provider error'}</p>
+              <details key={franchiseId}>
+                <summary className="cursor-pointer rounded-xl px-6 py-4 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  Notification failures <span className="text-muted-foreground">({timeOffFailures.length})</span>
+                </summary>
+                <CardContent className="space-y-2">
+                  <CardDescription>These saved requests or decisions need an email retry.</CardDescription>
+                  {timeOffFailures.map((failure) => (
+                    <div key={failure.auditId} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
+                      <div>
+                        <p className="font-semibold">Request #{failure.requestId} · {failure.kind.replace('_', ' ')}</p>
+                        <p className="text-xs text-muted-foreground">{failure.error || 'Notification provider error'}</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void handleRetryTimeOffNotification(failure)}
+                        disabled={retryingAuditId === failure.auditId}
+                      >
+                        {retryingAuditId === failure.auditId ? 'Retrying...' : 'Retry email'}
+                      </Button>
                     </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void handleRetryTimeOffNotification(failure)}
-                      disabled={retryingAuditId === failure.auditId}
-                    >
-                      {retryingAuditId === failure.auditId ? 'Retrying...' : 'Retry email'}
-                    </Button>
-                  </div>
-                ))}
-              </CardContent>
+                  ))}
+                </CardContent>
+              </details>
             </Card>
           ) : null}
 
@@ -990,6 +1033,17 @@ export function ApprovalsPage(): JSX.Element {
             </CardHeader>
             <CardContent>{timeOffContent}</CardContent>
           </Card>
+
+          {timeOffChangesEnabled && franchiseId !== null ? (
+            <TimeOffManagement
+              key={franchiseId}
+              franchiseId={franchiseId}
+              requestId={timeOffManageTarget?.franchiseId === franchiseId ? timeOffManageTarget.requestId : undefined}
+              amendmentId={timeOffManageTarget?.franchiseId === franchiseId ? timeOffManageTarget.amendmentId ?? undefined : undefined}
+              onChanged={() => void loadTimeOff(franchiseId)}
+              onDirtyChange={(dirty) => { timeOffChangesDirty.current = dirty; }}
+            />
+          ) : null}
           </div>
         </TabsContent>
       </Tabs>

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   buildDeterministicTimeOffEventId,
+  buildRecoveryTimeOffEventId,
   buildTimeOffCalendarEvent,
+  createCalendarEventTransport,
   insertOrVerifyTimeOffEvent,
   resolveCalendarServiceAccountCredentials
 } from '../services/googleCalendar';
@@ -132,5 +134,69 @@ describe('time-off Google Calendar payload', () => {
         ),
       /does not match time-off request 42/i
     );
+  });
+});
+
+describe('time-off Google Calendar event transport', () => {
+  it('does not send a mutation after token acquisition outlives the request timeout', async () => {
+    let calls = 0;
+    const transport = createCalendarEventTransport({
+      getAccessToken: () => new Promise((resolve) => setTimeout(() => resolve('token'), 40)),
+      fetch: (async () => { calls += 1; return new Response('{}'); }) as typeof fetch,
+      timeoutMs: 5
+    });
+    await assert.rejects(transport.patchEvent('center@example.com', 'event', {}), /abort|timeout/i);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(calls, 0);
+  });
+  const recorder = (responses: Array<{ status: number; body?: unknown }>) => {
+    const calls: Array<{ url: string; method: string; body: unknown; authorization: string; signal: unknown }> = [];
+    const fetchImpl = async (url: string | URL, init: RequestInit = {}) => {
+      const headers = new Headers(init.headers);
+      calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ? JSON.parse(String(init.body)) : undefined,
+        authorization: headers.get('Authorization') ?? '', signal: init.signal });
+      const next = responses.shift() ?? { status: 200, body: {} };
+      return new Response(next.body === undefined ? null : JSON.stringify(next.body), { status: next.status });
+    };
+    const transport = createCalendarEventTransport({ getAccessToken: async () => 'token-1', fetch: fetchImpl as typeof fetch });
+    return { calls, transport };
+  };
+
+  it('patches an event with only the supplied fields', async () => {
+    const { calls, transport } = recorder([{ status: 200, body: { id: 'tctimeoff1a' } }]);
+    const patch = { start: { date: '2026-11-16', dateTime: null } };
+    assert.deepEqual(await transport.patchEvent('center@example.com', 'tctimeoff1a', patch), { id: 'tctimeoff1a' });
+    assert.equal(calls[0].method, 'PATCH');
+    assert.equal(calls[0].url, 'https://www.googleapis.com/calendar/v3/calendars/center%40example.com/events/tctimeoff1a');
+    assert.deepEqual(calls[0].body, patch);
+    assert.equal(calls[0].authorization, 'Bearer token-1');
+    assert.ok(calls[0].signal, 'every provider request carries a timeout signal');
+  });
+
+  it('accepts an empty delete response and reports provider status and reason on failure', async () => {
+    const { calls, transport } = recorder([
+      { status: 204 },
+      { status: 410, body: { error: { message: 'Resource has been deleted', errors: [{ reason: 'deleted' }] } } },
+      { status: 403, body: { error: { message: 'Rate Limit Exceeded', errors: [{ reason: 'rateLimitExceeded' }] } } }
+    ]);
+    await transport.deleteEvent('center@example.com', 'tctimeoff1a');
+    assert.equal(calls[0].method, 'DELETE');
+    await assert.rejects(transport.deleteEvent('center@example.com', 'tctimeoff1a'),
+      (error: { status?: number; reason?: string }) => error.status === 410 && error.reason === 'deleted');
+    await assert.rejects(transport.assertCalendarAccess('center@example.com'),
+      (error: { status?: number; reason?: string }) => error.status === 403 && error.reason === 'rateLimitExceeded');
+  });
+
+  it('probes calendar access with a minimal events list under the events scope', async () => {
+    const { calls, transport } = recorder([{ status: 200, body: { items: [] } }]);
+    await transport.assertCalendarAccess('center@example.com');
+    assert.equal(calls[0].method, 'GET');
+    assert.equal(calls[0].url, 'https://www.googleapis.com/calendar/v3/calendars/center%40example.com/events?maxResults=1');
+  });
+
+  it('derives a distinct Google-compatible recovery id per calendar target version', () => {
+    assert.equal(buildRecoveryTimeOffEventId(42, '5'), 'tctimeoff1av5');
+    assert.equal(buildRecoveryTimeOffEventId(42, '33'), 'tctimeoff1av11');
+    assert.match(buildRecoveryTimeOffEventId(42, '9007199254740993'), /^[a-v0-9]{5,1024}$/);
   });
 });

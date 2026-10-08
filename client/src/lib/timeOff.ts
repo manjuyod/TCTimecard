@@ -68,3 +68,23 @@ export function parseAdminTimeOffDeepLink(search: string): {
 export function returnTarget(location: { pathname: string; search?: string; hash?: string }): string {
   return `${location.pathname}${location.search ?? ''}${location.hash ?? ''}`;
 }
+
+/**
+ * Approved-time-off management links: the original
+ * `tab=timeoff&franchiseId=…&requestId=…` link plus `view=manage` and an
+ * optional `amendmentId`. Original links keep using parseAdminTimeOffDeepLink.
+ */
+export function parseAdminTimeOffManageLink(search: string): {
+  franchiseId: number;
+  requestId: number;
+  amendmentId: string | null;
+} | null {
+  const params = new URLSearchParams(search);
+  if (params.get('tab') !== 'timeoff' || params.get('view') !== 'manage') return null;
+  const franchiseId = Number(params.get('franchiseId'));
+  const requestId = Number(params.get('requestId'));
+  if (!Number.isInteger(franchiseId) || franchiseId <= 0 || !Number.isInteger(requestId) || requestId <= 0) return null;
+  const amendmentId = params.get('amendmentId');
+  if (amendmentId !== null && !/^[1-9][0-9]{0,18}$/.test(amendmentId)) return null;
+  return { franchiseId, requestId, amendmentId };
+}

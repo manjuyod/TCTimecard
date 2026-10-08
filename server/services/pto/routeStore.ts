@@ -108,7 +108,9 @@ const balanceSummary = async (db: Queryable, profileId: string, balanceDate: str
     ), activity AS (
       SELECT
         COALESCE(SUM(ledger.balance_delta) FILTER (WHERE ledger.event_type = 'adjustment'), 0) AS adjusted_days,
-        COALESCE(-SUM(ledger.balance_delta) FILTER (WHERE ledger.event_type = 'consume'), 0) AS used_days
+        -- Net approved consumption: consumes minus releases of consumed days.
+        -- Pending-reservation releases carry a zero balance delta.
+        COALESCE(-SUM(ledger.balance_delta) FILTER (WHERE ledger.event_type IN ('consume', 'release')), 0) AS used_days
       FROM public.pto_entitlement_cycles cycle
       LEFT JOIN public.pto_ledger_entries ledger ON ledger.cycle_id = cycle.id
       WHERE public.pto_canonical_profile_id(cycle.profile_id) = public.pto_canonical_profile_id($1::BIGINT)

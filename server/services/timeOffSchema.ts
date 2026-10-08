@@ -3,7 +3,24 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'id', 'franchiseid', 'tutorid', 'bridge_flag', 'bridge_profile_id', 'first_name', 'last_name', 'email',
     'start_at', 'end_at', 'type', 'absence_label', 'notes', 'status', 'created_at', 'created_by', 'decided_at',
     'decided_by', 'decision_reason', 'google_calendar_event_id', 'duration_hours', 'partial_day', 'leave_time',
-    'return_time', 'public_metadata', 'decision_token_hash', 'decision_token_expires_at', 'decision_token_used_at'
+    'return_time', 'public_metadata', 'decision_token_hash', 'decision_token_expires_at', 'decision_token_used_at',
+    'version', 'last_change_operation_id', 'google_calendar_id'
+  ],
+  time_off_amendments: [
+    'id', 'request_id', 'base_version', 'start_date', 'end_date', 'start_at', 'end_at', 'partial_day',
+    'leave_time', 'return_time', 'type', 'storage_type', 'absence_label', 'reason', 'duration_hours', 'timezone',
+    'change_reason', 'proposed_by', 'created_at', 'status', 'decided_by_type', 'decided_by', 'decided_at',
+    'decision_reason'
+  ],
+  time_off_change_operations: [
+    'id', 'request_id', 'actor_type', 'actor_id', 'franchiseid', 'action', 'amendment_id', 'expected_version',
+    'result_version', 'idempotency_key', 'input_hash', 'before_snapshot', 'after_snapshot', 'target',
+    'change_reason', 'created_at', 'completed_at', 'response'
+  ],
+  time_off_change_deliveries: [
+    'id', 'operation_id', 'request_id', 'channel', 'kind', 'target_version', 'payload', 'recipient', 'identity',
+    'calendar_id', 'recovery_event_id', 'adopted_event_id', 'dedupe_key', 'status', 'attempts', 'next_attempt_at',
+    'last_error', 'completed_at', 'created_at', 'updated_at'
   ],
   time_off_audit: [
     'id', 'request_id', 'action', 'actor_account_type', 'actor_account_id', 'at', 'previous_status', 'new_status',

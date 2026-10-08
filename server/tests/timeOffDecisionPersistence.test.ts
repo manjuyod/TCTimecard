@@ -200,4 +200,31 @@ describe('time-off email decision persistence', () => {
     assert.match(statement, /FOR UPDATE/i);
     assert.deepEqual(values, ['b'.repeat(64), '2026-07-12T18:00:00.000Z']);
   });
+
+  it('records the calendar that received the approval event', async () => {
+    let statement = '';
+    let values: unknown[] = [];
+    const db = {
+      async query(sql: string, params: unknown[]) {
+        statement = sql;
+        values = params;
+        return { rows: [{ ...row, status: 'approved', google_calendar_event_id: 'tctimeoff1a' }] };
+      }
+    };
+
+    await updateTimeOffDecision({
+      client: db as never,
+      requestId: 42,
+      status: 'approved',
+      actorId: 9,
+      reason: 'Approved',
+      calendarEventId: 'tctimeoff1a',
+      calendarId: 'center@example.com',
+      timezone: 'America/Los_Angeles'
+    });
+
+    const calendarParameter = values.indexOf('center@example.com') + 1;
+    assert.ok(calendarParameter > 0);
+    assert.match(statement, new RegExp(`google_calendar_id\\s*=\\s*COALESCE\\(\\$${calendarParameter}`, 'i'));
+  });
 });

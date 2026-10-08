@@ -40,3 +40,17 @@ test('time-off schema preflight includes persistent PTO discovery and provenance
   assert.ok(missing.includes('pto_center_settings.last_successful_discovery_at'));
   assert.ok(missing.includes('pto_center_settings.last_discovery_error'));
 });
+
+test('time-off schema preflight includes approved time-off change workflow storage', () => {
+  const missing = findMissingTimeOffSchemaColumns([]);
+
+  assert.ok(missing.includes('time_off_requests.version'));
+  assert.ok(missing.includes('time_off_requests.last_change_operation_id'));
+  assert.ok(missing.includes('time_off_requests.google_calendar_id'));
+  assert.ok(missing.includes('time_off_amendments.status'));
+  assert.ok(missing.includes('time_off_amendments.timezone'));
+  assert.ok(missing.includes('time_off_change_operations.idempotency_key'));
+  assert.ok(missing.includes('time_off_change_operations.response'));
+  assert.ok(missing.includes('time_off_change_deliveries.next_attempt_at'));
+  assert.ok(missing.includes('time_off_change_deliveries.recovery_event_id'));
+});
