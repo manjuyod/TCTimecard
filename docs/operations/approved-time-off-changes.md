@@ -17,7 +17,9 @@ Tutors can propose changes to approved time off, and admins can approve or deny 
 - **Reasons.** Proposals, direct edits and approved cancellations require a 10–2000 character change reason.
 - **Links.** Proposal emails link to `/admin/approvals?tab=timeoff&franchiseId=…&requestId=…&view=manage&amendmentId=…`. Original approval tokens never authorize a change.
 
-## Deploying and enabling
+## Deploying
+
+Approved time-off changes are always available to authorized users. No rollout setting is required; the retired `TIME_OFF_CHANGES_ENABLED` environment variable is ignored and can be removed from deployment configuration. Tutor policy and the scoped admin capability endpoint continue to advertise availability for existing clients.
 
 1. **Migrate first.** Take the normal backup. Apply migrations through `0017_time_off_change_review_fixes.sql` with `npm run db:migrate` in the authorized environment; the runner applies every pending migration.
    - 0016 adds `version`, `last_change_operation_id` and `google_calendar_id` to `time_off_requests`.
@@ -26,16 +28,12 @@ Tutors can propose changes to approved time off, and admins can approve or deny 
    - Existing approvals keep a NULL calendar ID; nothing is backfilled or guessed.
    - 0017 extends the deployed `time_off_audit_action_check` allow-list for the seven change actions, retaining the existing values. It also resolves missing legacy date metadata in the center timezone, including legacy timed leave. A read-only check on 2026-10-07 confirmed the shared database's old CHECK rejects the new actions; **0016 alone is insufficient**. `actor_account_type` is unconstrained text and permits SYSTEM with a null actor ID.
 2. **Check readiness.** Run `npm run db:check-timeoff-schema`; it must report no missing columns.
-3. **Deploy with the flag off.** `TIME_OFF_CHANGES_ENABLED` is off unless set to exactly `true`. With the flag off:
-   - The new tutor and admin endpoints return 404 `TIME_OFF_CHANGES_DISABLED`.
-   - The tutor policy reports `changesEnabled: false`, and the admin capability endpoint answers `{ "enabled": false }`.
-   - Original submission, approval, email-decision and pending-cancellation flows work as before.
-4. **Smoke-test outside production.** Use a nonproduction center and disposable data. Do not send live email: `EMAIL_LOG_ONLY` stays at its default unless you deliberately test live sends. Walk through propose → deny → propose → approve → admin edit → cancel. Confirm the calendar event, emails, PTO balance and history at each step.
-5. **Enable.** Set `TIME_OFF_CHANGES_ENABLED=true` on every API instance and restart. If 0016 is missing, startup logs the missing columns and exits; an unreachable database only logs a warning.
+3. **Smoke-test outside production.** Use a nonproduction center and disposable data. Do not send live email: `EMAIL_LOG_ONLY` stays at its default unless you deliberately test live sends. Walk through propose → deny → propose → approve → admin edit → cancel. Confirm the calendar event, emails, PTO balance and history at each step.
+4. **Deploy and restart.** Availability is automatic on every API instance. Startup checks the required change-workflow columns on every boot. If 0016 is missing, startup logs the missing columns and exits; an unreachable or unconfigured database logs a warning. This column check does not verify 0017's audit constraint/function updates, so both migrations must still be applied first.
 
 ## Calendar and email delivery
 
-Every API instance runs a delivery worker, whether or not the flag is on, so jobs already committed always drain.
+Every API instance runs a delivery worker so jobs already committed drain independently of incoming requests.
 
 - **Schedule.** One pass every 30 seconds, plus an immediate pass after each saved change. A pass handles at most 20 due jobs and runs the expiry check (at most 100 expired proposals). Passes never overlap, and each uses one database connection.
 - **Coordination between instances.** A calendar job locks its time-off request. Business changes take the same lock, so an older edit can never overwrite a newer edit or cancellation. Older pending calendar jobs for the request are marked **superseded**; a superseded job can never be revived. An email job locks only its own row.
@@ -84,9 +82,9 @@ Watch these with read-only queries against the authorized database:
 
 ## Rolling back
 
-Set `TIME_OFF_CHANGES_ENABLED=false` and restart. This stops new proposals, edits and cancellations; the worker keeps draining committed jobs.
+There is no runtime disable switch. Prefer rolling forward with a fix. If an application rollback is necessary, choose a version compatible with the approved time-off schema and the shared PTO writer lock order, and ensure committed delivery jobs continue to drain.
 
-Keep the 0016 schema, operations, amendments, deliveries and ledger rows. Do not drop the tables or reverse ledger entries. An application binary from before 0016 still runs against the 0016 schema, but its PTO writers would no longer share the new lock order. Prefer disabling the flag and rolling forward with a fix.
+Keep migrations 0016/0017, operations, amendments, deliveries and ledger rows. Do not drop the tables or reverse ledger entries. Avoid application binaries from before 0016: their PTO writers do not share the new lock order.
 
 ## Verification commands
 

@@ -2,7 +2,7 @@
 
 Date: 2026-10-07
 
-Status: Implemented on branch `feature/approved-time-off-changes` and verified locally (see the plan's status and `docs/operations/approved-time-off-changes.md`). App not deployed. On 2026-10-07 the user approved admin-only corrections and cancellation for past and ongoing approved leave; tutors remain upcoming-only.
+Status: Implemented on branch `feature/approved-time-off-changes`, merged into `dev`, and verified locally (see the plan's status and `docs/operations/approved-time-off-changes.md`). The user reports the feature is deployed. On 2026-10-07 the user approved admin-only corrections and cancellation for past and ongoing approved leave; tutors remain upcoming-only. The user subsequently requested removal of the rollout setting so availability is automatic.
 
 Companion: [Implementation plan](../plans/2026-10-07-approved-time-off-changes.md)
 
@@ -194,7 +194,7 @@ All paths are under `/api`; exact new DTOs live in `server/types/timeOffChanges.
 | `POST /timeoff/:id/amendments` | Submit `{expectedVersion, idempotencyKey, proposed, changeReason}` |
 | `POST /timeoff/:id/amendments/:amendmentId/withdraw` | Withdraw with expected version and idempotency key |
 | `POST /timeoff/:id/cancel-approved` | Owner cancellation with expected version, idempotency key, and change reason |
-| `GET /timeoff/admin/change-capabilities` | Scoped admin capability `{enabled}`; remains readable when the feature is off |
+| `GET /timeoff/admin/change-capabilities` | Scoped admin capability `{enabled: true}` retained for existing clients |
 | `GET /timeoff/admin/requests` | Scoped filtered/cursor-paginated management list |
 | `GET /timeoff/admin/amendments` | Scoped pending amendment queue, same pagination limits |
 | `GET /timeoff/admin/:id/change-detail` | Scoped admin detail |
@@ -219,6 +219,6 @@ Run database tests against disposable PostgreSQL with migrations through the new
 
 Test stale tabs, repeated commands with the same/different payload, worker crashes after remote success, older jobs after newer jobs, permission failures, missing/deleted events, center changes while requests are in flight, and server-versus-browser timezones around DST. Check existing initial approval, original email decisions, pending cancellation, PTO public quotes, and time-entry flows for regressions.
 
-Ship the migration before enabling mutation routes/UI. Add `TIME_OFF_CHANGES_ENABLED` (default false) to gate new reads/writes/UI capabilities while deploying; the delivery worker remains able to drain already-committed jobs when the flag is turned off. The existing tutor policy and an always-readable authenticated admin capability endpoint expose the flag without enabling any mutations. Enable after database, API, worker, and UI checks pass. Roll back by disabling new operations and preserving schema/history/jobs; do not reverse applied ledger changes or drop tables. Monitor due/failed deliveries and stale amendments.
+Apply migrations 0016/0017 before deploying mutation routes/UI. The initial rollout flag was retired at the user's request after production deployment: approved time-off changes are always available under the existing role, ownership and center restrictions. Tutor policy returns `changesEnabled: true`, and the authenticated scoped admin capability endpoint returns `{enabled: true}` for client compatibility. Startup always checks the required change-workflow columns, and the delivery worker drains committed jobs independently of incoming requests. Prefer rolling forward with a fix; any application rollback must retain compatible PTO writer locking and delivery processing. Preserve schema/history/jobs; do not reverse applied ledger changes or drop tables. Monitor due/failed deliveries and stale amendments.
 
 No production migration, application deployment, or live calendar/email mutation is part of this planning pass.

@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import { Server } from 'node:http';
 import { AddressInfo } from 'node:net';
-import { afterEach, describe, it } from 'node:test';
+import { afterEach, describe, it, type TestContext } from 'node:test';
 import express, { Request } from 'express';
-import { isTimeOffChangesEnabled } from '../config/timeOffChanges';
 import { createTimeOffRouter } from '../routes/timeoff';
 import { createTimeOffChangesRouter, type TimeOffChangeRouteDeps } from '../routes/timeOffChanges';
 import { TimeOffChangeError } from '../services/timeOffChangeErrors';
@@ -25,7 +24,6 @@ function fakeDeps(overrides: Partial<TimeOffChangeRouteDeps> = {}) {
   const calls = { execute: [] as TimeOffChangeCommand[], detail: [] as unknown[], preview: [] as unknown[],
     lists: [] as Array<{ kind: string; input: Record<string, unknown> }>, retries: [] as unknown[] };
   const deps: Partial<TimeOffChangeRouteDeps> = {
-    enabled: () => true,
     nowIso: () => '2026-10-07T17:00:00.000Z',
     resolveTimezone: async () => 'America/Los_Angeles',
     service: {
@@ -64,8 +62,7 @@ async function startApp(session: Session, deps: Partial<TimeOffChangeRouteDeps>,
       resolveTimeOffNoticeRequired: async () => true,
       fetchById: async (id) => ({ id, franchiseId: 6, tutorId: 123, status: 'pending' } as never),
       fetchTutors: async () => new Map(),
-      getPtoPolicyStatus: async () => ({ enabled: false, reason: 'center_disabled' }),
-      changesEnabled: () => deps.enabled?.() ?? false
+      getPtoPolicyStatus: async () => ({ enabled: false, reason: 'center_disabled' })
     }));
   }
   const server = app.listen(0);
@@ -233,31 +230,48 @@ describe('approved time-off change routes: inputs and errors', () => {
   });
 });
 
-describe('approved time-off change routes: feature gate and compatibility', () => {
-  it('defaults the flag off and enables it only for the exact string true', () => {
-    assert.equal(isTimeOffChangesEnabled({}), false);
-    assert.equal(isTimeOffChangesEnabled({ TIME_OFF_CHANGES_ENABLED: 'TRUE' }), false);
-    assert.equal(isTimeOffChangesEnabled({ TIME_OFF_CHANGES_ENABLED: '1' }), false);
-    assert.equal(isTimeOffChangesEnabled({ TIME_OFF_CHANGES_ENABLED: 'true' }), true);
+function legacyRolloutFlag(t: TestContext, value: string | undefined) {
+  const previous = process.env.TIME_OFF_CHANGES_ENABLED;
+  if (value === undefined) delete process.env.TIME_OFF_CHANGES_ENABLED;
+  else process.env.TIME_OFF_CHANGES_ENABLED = value;
+  t.after(() => {
+    if (previous === undefined) delete process.env.TIME_OFF_CHANGES_ENABLED;
+    else process.env.TIME_OFF_CHANGES_ENABLED = previous;
   });
+}
 
-  it('hides new operations when disabled but keeps the admin capability readable', async () => {
-    const { calls, deps } = fakeDeps({ enabled: () => false });
-    const adminOrigin = await startApp(admin, deps);
-    const capability = await call(adminOrigin, 'GET', '/timeoff/admin/change-capabilities');
-    assert.equal(capability.status, 200);
-    assert.deepEqual(await capability.json(), { enabled: false });
-    for (const [method, path, body] of ADMIN_ROUTES) {
-      const response = await call(adminOrigin, method, path, body);
-      assert.equal(response.status, 404, `${method} ${path}`);
-      assert.equal((await response.json() as { code: string }).code, 'TIME_OFF_CHANGES_DISABLED');
-    }
-    const tutorOrigin = await startApp(tutor, deps);
-    for (const [method, path, body] of TUTOR_ROUTES) {
-      assert.equal((await call(tutorOrigin, method, path, body)).status, 404, `${method} ${path}`);
-    }
-    assert.equal(calls.execute.length + calls.lists.length + calls.retries.length, 0);
-  });
+describe('approved time-off change routes: availability and compatibility', () => {
+  for (const value of [undefined, 'false', 'true']) {
+    it(`serves authorized operations and admin capability with the old flag ${value ?? 'unset'}`, async (t) => {
+      legacyRolloutFlag(t, value);
+      const { calls, deps } = fakeDeps();
+      const adminOrigin = await startApp(admin, deps);
+      const capability = await call(adminOrigin, 'GET', '/timeoff/admin/change-capabilities');
+      assert.equal(capability.status, 200);
+      assert.deepEqual(await capability.json(), { enabled: true });
+      for (const [method, path, body] of ADMIN_ROUTES) {
+        assert.equal((await call(adminOrigin, method, path, body)).status, 200, `${method} ${path}`);
+      }
+      const tutorOrigin = await startApp(tutor, deps);
+      for (const [method, path, body] of TUTOR_ROUTES) {
+        const status = path === '/timeoff/42/amendments' ? 201 : 200;
+        assert.equal((await call(tutorOrigin, method, path, body)).status, status, `${method} ${path}`);
+      }
+      assert.equal(calls.execute.length, 6);
+    });
+
+    it(`advertises tutor changes without changing notice or PTO policy with the old flag ${value ?? 'unset'}`, async (t) => {
+      legacyRolloutFlag(t, value);
+      const { deps } = fakeDeps();
+      const origin = await startApp(tutor, deps, true);
+      const response = await call(origin, 'GET', '/timeoff/policy');
+      const body = await response.json() as { policy: Record<string, unknown> };
+      assert.equal(response.status, 200);
+      assert.equal(body.policy.changesEnabled, true);
+      assert.equal(body.policy.noticeDays, 14);
+      assert.deepEqual(body.policy.pto, { enabled: false, reason: 'center_disabled' });
+    });
+  }
 
   it('registers management routes ahead of the existing request detail route', async () => {
     const { calls, deps } = fakeDeps();
@@ -269,18 +283,6 @@ describe('approved time-off change routes: feature gate and compatibility', () =
     const legacyDetail = await call(origin, 'GET', '/timeoff/admin/42');
     assert.equal(legacyDetail.status, 200);
     assert.equal((await legacyDetail.json() as { request: { id: number } }).request.id, 42);
-  });
-
-  it('adds changesEnabled to the existing tutor policy without changing its other fields', async () => {
-    for (const enabled of [true, false]) {
-      const { deps } = fakeDeps({ enabled: () => enabled });
-      const origin = await startApp(tutor, deps, true);
-      const response = await call(origin, 'GET', '/timeoff/policy');
-      const body = await response.json() as { policy: Record<string, unknown> };
-      assert.equal(response.status, 200);
-      assert.equal(body.policy.changesEnabled, enabled);
-      assert.equal(body.policy.noticeDays, 14);
-    }
   });
 
   it('retries only new-operation deliveries through their own scoped endpoint', async () => {
