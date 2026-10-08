@@ -23,7 +23,7 @@ import healthRoutes from './routes/health';
 import { validateDbEnv, validateRuntimeEnv } from './config/env';
 import { SESSION_SECRET } from './config/session';
 import { createSessionMiddleware } from './config/sessionMiddleware';
-import { findMissingTimeOffChangeSchema, isTimeOffChangesEnabled } from './config/timeOffChanges';
+import { findMissingTimeOffChangeSchema } from './config/timeOffChanges';
 import { closePostgresPool, getPostgresPool } from './db/postgres';
 import { closeMssqlPool } from './db/mssql';
 import { startAutoClockOutScheduler } from './services/autoClockOutScheduler';
@@ -59,8 +59,7 @@ if (process.env.SKIP_DB_VALIDATION !== 'true') {
 
 const autoClockOutScheduler = startAutoClockOutScheduler();
 
-// Committed calendar/email jobs drain even while new change operations are
-// disabled; before migration 0016 the worker stays idle instead of failing.
+// Drain committed calendar/email jobs independently of incoming requests.
 let timeOffChangeWorker: ReturnType<typeof startTimeOffChangeWorker> | undefined;
 const timeOffChangeService = createTimeOffChangeService({ wake: () => timeOffChangeWorker?.wake() });
 timeOffChangeWorker = startTimeOffChangeWorker({
@@ -70,17 +69,16 @@ timeOffChangeWorker = startTimeOffChangeWorker({
   }, nowIso)
 });
 
-if (isTimeOffChangesEnabled(process.env)) {
-  findMissingTimeOffChangeSchema(getPostgresPool())
-    .then((missing) => {
-      if (missing.length === 0) return;
-      console.error(`[startup] TIME_OFF_CHANGES_ENABLED=true requires migration 0016; missing: ${missing.join(', ')}`);
-      process.exit(1);
-    })
-    .catch((err) => {
-      console.warn('[startup] Could not verify the approved time-off change schema:', err instanceof Error ? err.message : err);
-    });
-}
+void Promise.resolve()
+  .then(() => findMissingTimeOffChangeSchema(getPostgresPool()))
+  .then((missing) => {
+    if (missing.length === 0) return;
+    console.error(`[startup] Approved time-off changes require migration 0016; missing: ${missing.join(', ')}`);
+    process.exit(1);
+  })
+  .catch((err) => {
+    console.warn('[startup] Could not verify the approved time-off change schema:', err instanceof Error ? err.message : err);
+  });
 
 if (!process.env.SESSION_SECRET) {
   console.warn(

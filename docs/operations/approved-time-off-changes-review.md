@@ -50,7 +50,7 @@ Reviewed 2026-10-07, inline, without subagents. Scope: `85249b1..0881366` (nine 
 - **Email delivery is not exactly-once:** retain the documented at-least-once behavior. The provider can accept an email before the transaction's completion record survives a crash. Cost if wrong: duplicate historical notification, not a repeated PTO action.
 - **Admin preview of their own request returns 403:** retain the self-edit restriction. The endpoint previews an admin edit; own-request detail and cancellation remain available. Cost if wrong: no admin-mode quote for their own edit.
 - **Ledger rulings:** retain the other recorded decisions. In particular, the old PTO suites intentionally keep their legacy fixtures, while the feature suites test replaced functions and lock order through the new migrations. The local browser harness evidence does not establish real login or provider transport behavior. The earlier audit-constraint and UTC-fallback assumptions are superseded by this fix pass.
-- Apply **both 0016 and 0017** before enabling the feature. Verify the authorized deployed schema again during rollout; the read-only check here made no production changes. Continue to use the feature flag and the operations runbook.
+- Apply **both 0016 and 0017** before deploying the feature. Verify the authorized deployed schema again during rollout; the read-only check here made no production changes. Follow the operations runbook. Follow-up: the user applied both migrations and requested retirement of the rollout flag after production deployment; availability is now automatic.
 
 ## Verification
 

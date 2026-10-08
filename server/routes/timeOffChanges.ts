@@ -1,5 +1,4 @@
 import express, { NextFunction, Request, Response } from 'express';
-import { isTimeOffChangesEnabled } from '../config/timeOffChanges';
 import { getPostgresPool } from '../db/postgres';
 import { requireAdmin, requireTutor } from '../middleware/auth';
 import { enforceFranchiseScope } from '../middleware/franchiseScope';
@@ -27,7 +26,6 @@ import type {
 
 export interface TimeOffChangeRouteDeps {
   service: Pick<TimeOffChangeService, 'execute' | 'preview' | 'detail'>;
-  enabled: () => boolean;
   nowIso: () => string;
   resolveTimezone: (franchiseId: number) => Promise<string>;
   listRequests: (query: AdminTimeOffListQuery) => Promise<TimeOffChangePage<TimeOffChangeListItem>>;
@@ -56,7 +54,6 @@ function defaultDeps(): TimeOffChangeRouteDeps {
       preview: (input) => lazyService().preview(input),
       detail: (actor, requestId, nowIso) => lazyService().detail(actor, requestId, nowIso)
     },
-    enabled: () => isTimeOffChangesEnabled(process.env),
     nowIso: () => new Date().toISOString(),
     resolveTimezone: async (franchiseId) => (await getFranchisePayrollSettings(franchiseId)).timezone,
     listRequests: (query) => listAdminTimeOffRequests(getPostgresPool(), query),
@@ -75,13 +72,13 @@ export function createTimeOffChangesRouter(overrides: Partial<TimeOffChangeRoute
   const router = express.Router();
 
   const tutorRoute = (handler: (req: Request, res: Response, actor: TimeOffChangeActor) => Promise<unknown>) =>
-    gated(deps, requireTutor, async (req, res) => {
+    gated(requireTutor, async (req, res) => {
       const actor = tutorActor(req);
       if (!actor) return res.status(400).json({ error: 'Tutor context missing', code: 'TIME_OFF_INVALID_INPUT' });
       return handler(req, res, actor);
     });
   const adminRoute = (handler: (req: Request, res: Response, actor: TimeOffChangeActor) => Promise<unknown>) =>
-    gated(deps, requireAdmin, async (req, res) => {
+    gated(requireAdmin, async (req, res) => {
       const actor = adminActor(req, res);
       if (!actor) return undefined;
       return handler(req, res, actor);
@@ -89,7 +86,7 @@ export function createTimeOffChangesRouter(overrides: Partial<TimeOffChangeRoute
 
   router.get('/timeoff/admin/change-capabilities', requireAdmin, (req, res) => {
     if (!adminActor(req, res)) return;
-    res.json({ enabled: deps.enabled() });
+    res.json({ enabled: true });
   });
 
   router.get('/timeoff/admin/requests', adminRoute(async (req, res, actor) => {
@@ -181,9 +178,8 @@ export function createTimeOffChangesRouter(overrides: Partial<TimeOffChangeRoute
 
 type Handler = (req: Request, res: Response) => Promise<unknown>;
 
-/** Authenticates, then hides the endpoint while the feature is off, then maps domain errors. */
+/** Authenticates, prevents caching, and maps domain errors. */
 function gated(
-  deps: TimeOffChangeRouteDeps,
   authenticate: (req: Request, res: Response, next: NextFunction) => void,
   handler: Handler
 ) {
@@ -191,10 +187,6 @@ function gated(
     authenticate,
     (req: Request, res: Response, next: NextFunction) => {
       res.set('Cache-Control', 'no-store');
-      if (!deps.enabled()) {
-        res.status(404).json({ error: 'Approved time-off changes are not enabled', code: 'TIME_OFF_CHANGES_DISABLED' });
-        return;
-      }
       Promise.resolve(handler(req, res)).catch((error: unknown) => {
         if (error instanceof InputError) {
           res.status(400).json({ error: error.message, code: 'TIME_OFF_INVALID_INPUT' });
