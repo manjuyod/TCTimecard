@@ -996,28 +996,30 @@ export function ApprovalsPage(): JSX.Element {
 
           {timeOffFailures.length ? (
             <Card className="border-amber-300">
-              <CardHeader>
-                <CardTitle>Notification failures</CardTitle>
-                <CardDescription>These saved requests or decisions need an email retry.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {timeOffFailures.map((failure) => (
-                  <div key={failure.auditId} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
-                    <div>
-                      <p className="font-semibold">Request #{failure.requestId} · {failure.kind.replace('_', ' ')}</p>
-                      <p className="text-xs text-muted-foreground">{failure.error || 'Notification provider error'}</p>
+              <details key={franchiseId}>
+                <summary className="cursor-pointer rounded-xl px-6 py-4 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  Notification failures <span className="text-muted-foreground">({timeOffFailures.length})</span>
+                </summary>
+                <CardContent className="space-y-2">
+                  <CardDescription>These saved requests or decisions need an email retry.</CardDescription>
+                  {timeOffFailures.map((failure) => (
+                    <div key={failure.auditId} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
+                      <div>
+                        <p className="font-semibold">Request #{failure.requestId} · {failure.kind.replace('_', ' ')}</p>
+                        <p className="text-xs text-muted-foreground">{failure.error || 'Notification provider error'}</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void handleRetryTimeOffNotification(failure)}
+                        disabled={retryingAuditId === failure.auditId}
+                      >
+                        {retryingAuditId === failure.auditId ? 'Retrying...' : 'Retry email'}
+                      </Button>
                     </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void handleRetryTimeOffNotification(failure)}
-                      disabled={retryingAuditId === failure.auditId}
-                    >
-                      {retryingAuditId === failure.auditId ? 'Retrying...' : 'Retry email'}
-                    </Button>
-                  </div>
-                ))}
-              </CardContent>
+                  ))}
+                </CardContent>
+              </details>
             </Card>
           ) : null}
 

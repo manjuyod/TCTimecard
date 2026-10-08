@@ -381,10 +381,14 @@ export function TimeOffManagement({ franchiseId, requestId, amendmentId, onChang
           ) : null}
 
           {failedDeliveries.length > 0 ? (
-            <div className="space-y-2 rounded-lg border border-amber-300 p-3">
-              <p className="text-sm font-semibold text-foreground">Calendar and email follow-up that needs attention</p>
-              <TimeOffDeliveryStatus deliveries={failedDeliveries} onRetry={(delivery) => void retryDelivery(delivery)} retryingId={retryingId} />
-            </div>
+            <details className="rounded-lg border border-amber-300">
+              <summary className="cursor-pointer rounded-lg p-3 text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                Calendar and email follow-up that needs attention <span className="text-muted-foreground">({failedDeliveries.length})</span>
+              </summary>
+              <div className="px-3 pb-3">
+                <TimeOffDeliveryStatus deliveries={failedDeliveries} onRetry={(delivery) => void retryDelivery(delivery)} retryingId={retryingId} />
+              </div>
+            </details>
           ) : null}
         </CardContent>
       </Card>
