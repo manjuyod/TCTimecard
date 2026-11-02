@@ -166,11 +166,16 @@ export function normalizeCorrection(
       b.durationMinutes === original.durationMinutes &&
       sameInstant(b.startTime, original.startTime) &&
       sameInstant(b.endTime, original.endTime);
+    const restoring = original?.status === 'voided' && b.status === 'completed';
     let startTime: string | null = null,
       endTime: string | null = null;
-    if (b.startTime === null && b.endTime === null) {
+    if (b.status === 'voided' && unchanged) {
+      // Removed breaks retain their history without constraining the corrected day.
+      startTime = original.startTime;
+      endTime = original.endTime;
+    } else if (b.startTime === null && b.endTime === null) {
       if (
-        !unchanged &&
+        (!unchanged || restoring) &&
         !(original?.status === 'active' && b.status === 'voided')
       )
         invalid('New or edited breaks require start and end times', field);
@@ -184,7 +189,7 @@ export function normalizeCorrection(
       )
         invalid('Break duration must match its time window', field);
       if (
-        !unchanged &&
+        (!unchanged || restoring) &&
         !sessions.some(
           (s) =>
             Date.parse(startTime!) >= Date.parse(s.startAt) &&
